@@ -114,12 +114,13 @@ def source(*, inbox: Any = None, session_factory: Any = None) -> WebhookSource:
 def configured(
     *,
     api_version: str = "2026-08-26.dahlia",
+    api_key: str = "rk_test_example",
     connect: StripeConnect | None = None,
 ) -> tuple[Billing, Client, RecordingLedger]:
     client = Client()
     backend = StripeBilling(
         client=client,
-        api_key=Secret("rk_test_example"),
+        api_key=Secret(api_key),
         api_version=api_version,
         allowed_return_origins=("https://app.example",),
         connect=connect,
@@ -341,3 +342,13 @@ def test_binding_refuses_version_backend_scope_ledger_and_transaction_mismatches
         bind(local, billing)
     with pytest.raises(TypeError, match="PostgresWebhookInbox"):
         bind(source(inbox=object()), billing)
+
+
+def test_binding_refuses_api_key_and_webhook_mode_confusion() -> None:
+    live_billing, _, _ = configured(api_key="rk_live_example")
+    test_billing, _, _ = configured(api_key="rk_test_example")
+
+    with pytest.raises(ValueError, match="livemode"):
+        bind(source(), live_billing, StripeWebhookPolicy("2026-08-26.dahlia", False, "account"))
+    with pytest.raises(ValueError, match="livemode"):
+        bind(source(), test_billing, StripeWebhookPolicy("2026-08-26.dahlia", True, "account"))

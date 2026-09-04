@@ -56,12 +56,13 @@ def _collecting(bus: Any = None, *, channel: str = "test_channel"):
     return BusBridge(bus, channel=channel, apply=apply), accepted
 
 
-async def test_a_bridge_refuses_a_nonpositive_publish_ceiling() -> None:
+@pytest.mark.parametrize("max_inflight", [0, float("nan"), float("inf"), True, 1.5])
+async def test_a_bridge_refuses_an_invalid_publish_ceiling(max_inflight: Any) -> None:
     async def apply(payload: dict) -> None:
         return None
 
-    with pytest.raises(ValueError, match="max_inflight must be at least 1"):
-        BusBridge(FakeBus(), channel="events", apply=apply, max_inflight=0)
+    with pytest.raises(ValueError, match="max_inflight must be a positive integer"):
+        BusBridge(FakeBus(), channel="events", apply=apply, max_inflight=max_inflight)
 
 
 async def test_it_subscribes_once_at_construction() -> None:

@@ -2657,6 +2657,9 @@ process_headers(Http2Protocol *self, int flags, uint32_t sid,
     }
     if (flags & FLAG_PRIORITY) {
         if (end - off < 5) return h2_connection_error(self, H2_PROTOCOL_ERROR);
+        if ((get_u32(payload + off) & 0x7fffffffU) == sid) {
+            return h2_stream_error((PyObject *)self, sid, H2_PROTOCOL_ERROR);
+        }
         off += 5;  /* ignore priority */
     }
     if (pad > end - off) {
@@ -2728,10 +2731,14 @@ process_data(Http2Protocol *self, int flags, uint32_t sid,
         if (sid > self->last_stream_id) {
             return h2_connection_error(self, H2_PROTOCOL_ERROR);
         }
+        if (h2_note_unproductive(self) < 0) return -1;
+        if (self->fatal) return 0;
         return h2_stream_error((PyObject *)self, sid, H2_STREAM_CLOSED);
     }
     Http2Stream *st = (Http2Stream *)stobj;
     if (st->request_ended) {
+        if (h2_note_unproductive(self) < 0) return -1;
+        if (self->fatal) return 0;
         return h2_stream_error((PyObject *)self, sid, H2_STREAM_CLOSED);
     }
     if (len > 0) {
@@ -2916,6 +2923,22 @@ process_ping(Http2Protocol *self, int flags, uint32_t sid,
 }
 
 static int
+process_goaway(Http2Protocol *self, uint32_t sid, Py_ssize_t len)
+{
+    if (sid != 0) {
+        return h2_connection_error(self, H2_PROTOCOL_ERROR);
+    }
+    if (len < 8) {
+        return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
+    }
+    if (h2_note_unproductive(self) < 0 || self->fatal) {
+        return self->fatal ? 0 : -1;
+    }
+    self->closing = 1;
+    return 0;
+}
+
+static int
 process_priority_update(Http2Protocol *self, uint32_t sid,
                         const uint8_t *payload, Py_ssize_t len)
 {
@@ -2979,13 +3002,18 @@ static int
 dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
                const uint8_t *payload, Py_ssize_t len)
 {
+    if (!self->got_first_settings) {
+        if (type != FRAME_SETTINGS || (flags & FLAG_ACK)) {
+            return h2_connection_error(self, H2_PROTOCOL_ERROR);
+        }
+        self->got_first_settings = 1;
+    }
     /* Any frame except CONTINUATION during a header block is a protocol error. */
     if (self->header_stream != 0 && type != FRAME_CONTINUATION) {
         return h2_connection_error(self, H2_PROTOCOL_ERROR);
     }
     switch (type) {
     case FRAME_SETTINGS:
-        self->got_first_settings = 1;
         return process_settings(self, flags, sid, payload, len);
     case FRAME_HEADERS:
         return process_headers(self, flags, sid, payload, len);
@@ -3000,8 +3028,14 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
     case FRAME_PING:
         return process_ping(self, flags, sid, payload, len);
     case FRAME_PRIORITY:
+        if (sid == 0) {
+            return h2_connection_error(self, H2_PROTOCOL_ERROR);
+        }
         if (len != 5) {
             return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
+        }
+        if ((get_u32(payload) & 0x7fffffffU) == sid) {
+            return h2_stream_error((PyObject *)self, sid, H2_PROTOCOL_ERROR);
         }
         if (h2_note_unproductive(self) < 0) {  /* ignored, but still costs us */
             return -1;
@@ -3010,8 +3044,7 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
     case FRAME_PRIORITY_UPDATE:
         return process_priority_update(self, sid, payload, len);
     case FRAME_GOAWAY:
-        self->closing = 1;
-        return 0;
+        return process_goaway(self, sid, len);
     case FRAME_PUSH_PROMISE:
         return h2_connection_error(self, H2_PROTOCOL_ERROR);
     default:

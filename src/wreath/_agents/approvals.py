@@ -4,11 +4,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from math import isfinite
 from time import time
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from .._capability_map import CapabilityMap
 from .._pgname import quote_identifier
 from ..schema import Component, Step
+
+_FIELD_LIMITS = MappingProxyType(
+    {
+        "approval_id": 512,
+        "tenant": 512,
+        "principal_id": 1024,
+        "action": 512,
+        "resource": 16_384,
+    }
+)
 
 
 class ApprovalExpired(RuntimeError):
@@ -27,6 +38,56 @@ def _finite_time(value: float, *, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
         raise ValueError(f"approval {label} must be a finite number")
     return float(value)
+
+
+def _bounded_text(value: Any, *, label: str, optional: bool = False) -> None:
+    if not isinstance(value, str) or (not optional and not value):
+        if optional:
+            raise ValueError(f"approval {label} must be a string or None")
+        raise ValueError(f"approvals require non-empty string {label}")
+    if not value:
+        return
+    maximum = _FIELD_LIMITS[label]
+    if len(value) > maximum:
+        raise ValueError(f"approval {label} must be at most {maximum} UTF-8 bytes")
+    try:
+        encoded = value.encode()
+    except UnicodeEncodeError as error:
+        raise ValueError(f"approval {label} must be valid UTF-8 text") from error
+    if len(encoded) > maximum:
+        raise ValueError(f"approval {label} must be at most {maximum} UTF-8 bytes")
+    if "\0" in value:
+        raise ValueError(f"approval {label} must not contain NUL")
+
+
+def _validate_issue(
+    approval_id: Any,
+    tenant: Any,
+    principal_id: Any,
+    action: Any,
+    resource: Any,
+    require_fresh_auth: Any,
+) -> None:
+    for label, value in (
+        ("approval_id", approval_id),
+        ("tenant", tenant),
+        ("principal_id", principal_id),
+        ("action", action),
+    ):
+        _bounded_text(value, label=label)
+    if resource is not None:
+        _bounded_text(resource, label="resource", optional=True)
+    if type(require_fresh_auth) is not bool:
+        raise TypeError("approval require_fresh_auth must be a boolean")
+
+
+def _validate_binding(approval_id: Any, tenant: Any, principal_id: Any) -> None:
+    for label, value in (
+        ("approval_id", approval_id),
+        ("tenant", tenant),
+        ("principal_id", principal_id),
+    ):
+        _bounded_text(value, label=label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +174,14 @@ class InMemoryApprovalStore:
         require_fresh_auth: bool = False,
         issued_at: float | None = None,
     ) -> ApprovalRequest:
-        if not all((approval_id, tenant, principal_id, action)):
-            raise ValueError("approvals require non-empty ID, tenant, principal, and action")
+        _validate_issue(
+            approval_id,
+            tenant,
+            principal_id,
+            action,
+            resource,
+            require_fresh_auth,
+        )
         ttl = _finite_time(ttl, label="ttl")
         if ttl <= 0:
             raise ValueError("approval ttl must be positive")
@@ -122,7 +189,7 @@ class InMemoryApprovalStore:
         issued = now if issued_at is None else _finite_time(issued_at, label="issued_at")
         if issued > now:
             raise ValueError("approval issued_at cannot be in the future")
-        expires_at = issued + ttl
+        expires_at = _finite_time(issued + ttl, label="expiry")
         if expires_at <= now:
             raise ValueError("approval issued_at and ttl describe an already expired approval")
         request = ApprovalRequest(
@@ -143,6 +210,7 @@ class InMemoryApprovalStore:
         return request
 
     def _bound(self, approval_id: str, *, tenant: str, principal_id: str) -> ApprovalRequest:
+        _validate_binding(approval_id, tenant, principal_id)
         now = _finite_time(self._clock(), label="clock")
         key = self._key(approval_id, tenant)
         request = self._records.peek(key, now=now)
@@ -200,7 +268,7 @@ class InMemoryApprovalStore:
             principal_id,
             request.action,
             request.resource,
-            _finite_time(self._clock(), label="clock"),
+            now,
         )
 
     async def deny(self, approval_id: str, *, tenant: str, principal_id: str) -> None:
@@ -228,17 +296,35 @@ def _row_value(row: Any, key: str, index: int) -> Any:
 
 
 def _request(row: Any) -> ApprovalRequest:
+    approval_id = _row_value(row, "approval_id", 0)
+    tenant = _row_value(row, "tenant", 1)
+    principal_id = _row_value(row, "principal_id", 2)
+    action = _row_value(row, "action", 3)
     resource = _row_value(row, "resource", 4)
+    issued_at = _finite_time(_row_value(row, "issued_at", 5), label="stored issued_at")
+    expires_at = _finite_time(_row_value(row, "expires_at", 6), label="stored expires_at")
+    require_fresh_auth = _row_value(row, "require_fresh_auth", 7)
+    state = _row_value(row, "state", 8)
+    _validate_issue(
+        approval_id,
+        tenant,
+        principal_id,
+        action,
+        resource,
+        require_fresh_auth,
+    )
+    if state not in ("pending", "denied", "used"):
+        raise ValueError("approval stored state must be 'pending', 'denied', or 'used'")
     return ApprovalRequest(
-        approval_id=str(_row_value(row, "approval_id", 0)),
-        tenant=str(_row_value(row, "tenant", 1)),
-        principal_id=str(_row_value(row, "principal_id", 2)),
-        action=str(_row_value(row, "action", 3)),
-        resource=None if resource is None else str(resource),
-        issued_at=float(_row_value(row, "issued_at", 5)),
-        expires_at=float(_row_value(row, "expires_at", 6)),
-        require_fresh_auth=bool(_row_value(row, "require_fresh_auth", 7)),
-        state=_row_value(row, "state", 8),
+        approval_id=approval_id,
+        tenant=tenant,
+        principal_id=principal_id,
+        action=action,
+        resource=resource,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        require_fresh_auth=require_fresh_auth,
+        state=state,
     )
 
 
@@ -299,6 +385,13 @@ class PostgresApprovalStore:
                         f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS agent_approvals_pkey",
                     ),
                 ),
+                Step(
+                    version=3,
+                    statements=(
+                        "CREATE INDEX IF NOT EXISTS agent_approvals_retention_idx ON "
+                        f"{table} (expires_at,tenant,approval_id)",
+                    ),
+                ),
             ),
         )
 
@@ -317,8 +410,14 @@ class PostgresApprovalStore:
         require_fresh_auth: bool = False,
         issued_at: float | None = None,
     ) -> ApprovalRequest:
-        if not all((approval_id, tenant, principal_id, action)):
-            raise ValueError("approvals require non-empty ID, tenant, principal, and action")
+        _validate_issue(
+            approval_id,
+            tenant,
+            principal_id,
+            action,
+            resource,
+            require_fresh_auth,
+        )
         ttl = _finite_time(ttl, label="ttl")
         if ttl <= 0:
             raise ValueError("approval ttl must be positive")
@@ -326,7 +425,7 @@ class PostgresApprovalStore:
         issued = now if issued_at is None else _finite_time(issued_at, label="issued_at")
         if issued > now:
             raise ValueError("approval issued_at cannot be in the future")
-        expires_at = issued + ttl
+        expires_at = _finite_time(issued + ttl, label="expiry")
         if expires_at <= now:
             raise ValueError("approval issued_at and ttl describe an already expired approval")
         row = None
@@ -366,6 +465,7 @@ class PostgresApprovalStore:
         principal_id: str,
         authenticated_at: float | None = None,
     ) -> ApprovalGrant:
+        _validate_binding(approval_id, tenant, principal_id)
         now = _finite_time(self._clock(), label="clock")
         authenticated = authenticated_at
         if authenticated is not None:
@@ -420,6 +520,7 @@ class PostgresApprovalStore:
         )
 
     async def deny(self, approval_id: str, *, tenant: str, principal_id: str) -> None:
+        _validate_binding(approval_id, tenant, principal_id)
         now = _finite_time(self._clock(), label="clock")
         async with self._session_factory() as session:
             row = await session.raw(
@@ -448,6 +549,26 @@ class PostgresApprovalStore:
                     now=now,
                     operation="deny",
                 )
+
+    async def purge(self, *, limit: int = 1000) -> int:
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise ValueError(
+                "approval purge limit must be a positive integer no greater than 10000"
+            )
+        now = _finite_time(self._clock(), label="clock")
+        async with self._session_factory() as session:
+            deleted = await session.raw(
+                f"WITH expired AS (SELECT ctid FROM {self._table} "
+                "WHERE expires_at <= $1::float8 "
+                "ORDER BY expires_at,tenant,approval_id "
+                "FOR UPDATE SKIP LOCKED LIMIT $2), "
+                f"removed AS (DELETE FROM {self._table} AS a USING expired "
+                "WHERE a.ctid=expired.ctid RETURNING 1) "
+                "SELECT count(*) FROM removed",
+                now,
+                limit,
+            ).fetchval()
+        return int(deleted or 0)
 
     @staticmethod
     def _raise_refusal(

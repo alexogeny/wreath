@@ -185,6 +185,53 @@ def test_metadata_needs_somewhere_to_send_a_client() -> None:
         MCPAuth(resource="", authorization_servers=(ISSUER,))
 
 
+@pytest.mark.parametrize(
+    "resource",
+    (
+        "api.example.com/mcp",
+        "http://api.example.com/mcp",
+        "https:///mcp",
+        "https://operator@api.example.com/mcp",
+        "https://api.example.com:0/mcp",
+        "https://api.example.com:invalid/mcp",
+        "https://api.example.com/mcp#fragment",
+        "https://api.exa\tmple.com/mcp",
+        "https://api.example.com/mcp\x80suffix",
+    ),
+)
+def test_resource_identifier_is_a_canonical_https_url(resource: str) -> None:
+    with pytest.raises(ValueError, match="resource.*absolute HTTPS URL"):
+        MCPAuth(resource=resource, authorization_servers=(ISSUER,))
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    (
+        "idp.example",
+        "http://idp.example",
+        "https:///issuer",
+        "https://operator@idp.example",
+        "https://idp.example:0",
+        "https://idp.example:invalid",
+        "https://idp.example/issuer#fragment",
+        "https://idp.exa\tmple",
+        "https://idp.example/issuer\x80suffix",
+    ),
+)
+def test_authorization_server_identifier_is_a_canonical_https_url(issuer: str) -> None:
+    with pytest.raises(ValueError, match="authorization server.*absolute HTTPS URL"):
+        MCPAuth(resource=RESOURCE, authorization_servers=(issuer,))
+
+
+def test_mcp_auth_url_fields_refuse_non_text_and_non_idna_hosts() -> None:
+    with pytest.raises(ValueError, match="resource.*absolute HTTPS URL"):
+        protection(resource=7)
+    with pytest.raises(ValueError, match="authorization server.*absolute HTTPS URL"):
+        protection(authorization_servers=(7,))
+    with pytest.raises(ValueError, match="resource.*absolute HTTPS URL"):
+        MCPAuth(resource="https://" + "\ud800" + "/mcp", authorization_servers=(ISSUER,))
+
+
 async def test_a_missing_token_gets_a_challenge_naming_the_metadata_url() -> None:
     app, _ = build()
     async with TestClient(app) as client:

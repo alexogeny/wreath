@@ -27,6 +27,7 @@ from ..request import Request
 _format_server_timing: Any = _core.format_server_timing
 
 _METRIC_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_POSITIVE_INFINITY = float("inf")
 _STATE_START = "_wreath_timing_start"
 _STATE_ELAPSED = "_wreath_timing_elapsed"
 
@@ -83,12 +84,17 @@ class ServerTimingPolicy:
         emit_header: Send the `Server-Timing` header as well as recording the duration.
 
     Raises:
+        TypeError: `metric` is not a string or `emit_header` is not a bool.
         ValueError: `metric` is empty, over 64 characters, or has other characters.
     """
 
     __slots__ = ("_emit", "_metric")
 
     def __init__(self, *, metric: str = "total", emit_header: bool = True) -> None:
+        if not isinstance(metric, str):
+            raise TypeError("metric must be a str")
+        if type(emit_header) is not bool:
+            raise TypeError("emit_header must be a bool")
         # Validated once here so the per-request formatter never has to escape:
         # an unchecked name would be concatenated straight into a header.
         if not _METRIC_NAME.fullmatch(metric):
@@ -139,6 +145,8 @@ class ServerTimingPolicy:
             # A short-circuiting _ingress-stage ahead of this one skipped the timer.
             return
         duration = time.perf_counter() - start
+        if not 0.0 <= duration < _POSITIVE_INFINITY:
+            raise RuntimeError("performance clock returned an invalid elapsed duration")
         request.state.__setattr__(_STATE_ELAPSED, duration)
         if self._emit:
             replace_server_timing(

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from typing import Any, cast
 
+import pytest
+
+import wreath._userkit as userkit_module
 from wreath._userkit import (
     CapturingEmailSender,
     InMemoryUserStore,
@@ -21,6 +26,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _stored_hash(
+    *, n: int = 16384, r: int = 8, p: int = 1, salt: bytes = b"s" * 16, digest: bytes = b"d" * 32
+) -> str:
+    def encoded(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+    return f"scrypt${n}${r}${p}${encoded(salt)}${encoded(digest)}"
+
+
 def test_password_hash_roundtrip_and_reject():
     h = hash_password("correct horse")
     assert h.startswith("scrypt$")
@@ -31,6 +45,64 @@ def test_password_hash_roundtrip_and_reject():
     assert hash_password("x") != hash_password("x")
 
 
+def test_password_verify_refuses_excessive_stored_work_before_scrypt(monkeypatch):
+    def unexpected_scrypt(*args, **kwargs):
+        pytest.fail("an excessive stored work factor reached scrypt")
+
+    monkeypatch.setattr(userkit_module.hashlib, "scrypt", unexpected_scrypt)
+    encoded = _stored_hash(p=5)
+
+    assert verify_password("password", encoded) is False
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    (
+        _stored_hash(n=1),
+        _stored_hash(n=3),
+        _stored_hash(r=0),
+        _stored_hash(p=0),
+        _stored_hash(salt=b"s" * 15),
+        _stored_hash(digest=b"d" * 31),
+    ),
+)
+def test_password_verify_refuses_invalid_stored_parameters_before_scrypt(
+    monkeypatch, encoded: str
+):
+    def unexpected_scrypt(*args, **kwargs):
+        pytest.fail("invalid stored parameters reached scrypt")
+
+    monkeypatch.setattr(userkit_module.hashlib, "scrypt", unexpected_scrypt)
+
+    assert verify_password("password", encoded) is False
+
+
+def test_password_verify_refuses_oversized_inputs_before_expensive_work(monkeypatch):
+    def unexpected_scrypt(*args, **kwargs):
+        pytest.fail("an oversized password reached scrypt")
+
+    monkeypatch.setattr(userkit_module.hashlib, "scrypt", unexpected_scrypt)
+    assert verify_password("p" * 1025, _stored_hash()) is False
+
+    def unexpected_decode(*args, **kwargs):
+        pytest.fail("an oversized stored hash reached base64 decoding")
+
+    monkeypatch.setattr(userkit_module, "_unb64", unexpected_decode)
+    oversized = _stored_hash(salt=b"s" * 400)
+    assert len(oversized) > 512
+    assert verify_password("password", oversized) is False
+
+
+@pytest.mark.parametrize("password", [None, b"password"])
+def test_password_verify_refuses_non_text_passwords(password: Any):
+    assert verify_password(cast(str, password), _stored_hash()) is False
+
+
+@pytest.mark.parametrize("encoded", [None, b"hash"])
+def test_password_verify_refuses_non_text_stored_hashes(encoded: Any):
+    assert verify_password("password", cast(str, encoded)) is False
+
+
 def test_token_sign_verify_expire_and_purpose():
     t = sign_token("secret", "verify", "42", ttl=100, now=1000)
     assert verify_token("secret", "verify", t, now=1050) == "42"
@@ -39,6 +111,30 @@ def test_token_sign_verify_expire_and_purpose():
     assert verify_token("other", "verify", t, now=1050) is None  # wrong secret
     assert verify_token("secret", "verify", "no.dot.here", now=1050) is None
     assert verify_token("secret", "verify", t[:-2] + "zz", now=1050) is None  # tampered mac
+
+
+def test_token_is_expired_at_its_signed_expiry_boundary():
+    token = sign_token("secret", "verify", "42", ttl=100, now=1000)
+
+    assert verify_token("secret", "verify", token, now=1100) is None
+
+
+def test_oversized_token_is_refused_before_hmac(monkeypatch):
+    def unexpected_hmac(*args, **kwargs):
+        pytest.fail("an oversized action token reached HMAC")
+
+    monkeypatch.setattr(userkit_module.hmac, "new", unexpected_hmac)
+
+    assert verify_token("secret", "verify", "A" * 4097 + ".mac", now=1000) is None
+
+
+def test_unencodable_token_text_is_an_invalid_token():
+    assert verify_token("secret", "verify", "\ud800.mac", now=1000) is None
+
+
+@pytest.mark.parametrize("token", [None, b"token.mac"])
+def test_non_text_token_is_an_invalid_token(token: Any):
+    assert verify_token("secret", "verify", cast(str, token), now=1000) is None
 
 
 def test_token_bound_single_use():

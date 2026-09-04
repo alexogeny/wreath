@@ -94,6 +94,14 @@ def test_merging_requirements_keeps_the_strictest_window() -> None:
     assert merged.second_factor == 60.0
 
 
+@pytest.mark.parametrize(
+    "window", [float("nan"), float("inf"), float("-inf"), True, "60", 0, -1]
+)
+def test_auth_requirement_refuses_invalid_second_factor_windows(window: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="second_factor"):
+        AuthRequirement(second_factor=window)
+
+
 def test_merging_leaves_the_window_absent_when_nobody_asked() -> None:
     merged = merge_requirements(AuthRequirement(authenticated=True), AuthRequirement())
     assert merged.second_factor is None
@@ -152,6 +160,14 @@ def test_stacking_the_decorator_keeps_the_shorter_window() -> None:
 def test_the_decorator_refuses_a_window_that_can_never_be_satisfied() -> None:
     with pytest.raises(ValueError):
         second_factor(max_age=0)
+
+
+def test_the_decorator_refuses_a_boolean_window_before_it_is_applied() -> None:
+    with pytest.raises(TypeError, match="number"):
+        second_factor(max_age=True)
+
+    with pytest.raises(TypeError, match="second-factor max_age"):
+        second_factor(max_age="60")
 
 
 def _sign_in_routes(app: Wreath) -> None:

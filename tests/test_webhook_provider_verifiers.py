@@ -21,6 +21,19 @@ SECONDS = str(int(NOW.timestamp())).encode("ascii")
 BODY = dumps({"id": "evt_1", "type": "invoice.paid", "api_version": "2026-08"})
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: StandardWebhookVerifier(32),
+        lambda: StripeWebhookVerifier(32),
+        lambda: GitHubWebhookVerifier(32),
+    ],
+)
+def test_provider_verifiers_refuse_non_text_and_non_bytes_secrets(build) -> None:
+    with pytest.raises(TypeError, match="webhook secret must be bytes or str"):
+        build()
+
+
 @pytest.mark.parametrize("window", [float("nan"), float("inf")])
 def test_provider_freshness_and_replay_windows_must_be_finite(window: float) -> None:
     for build in (
@@ -30,6 +43,19 @@ def test_provider_freshness_and_replay_windows_must_be_finite(window: float) -> 
     ):
         with pytest.raises(ValueError, match="positive and finite"):
             build()
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        StandardWebhookVerifier(b"secret"),
+        StripeWebhookVerifier(b"secret"),
+        GitHubWebhookVerifier(b"secret"),
+    ],
+)
+def test_provider_verifier_replay_windows_are_immutable(verifier) -> None:
+    with pytest.raises(AttributeError):
+        verifier.max_age = 3600
 
 
 def test_standard_webhooks_profile() -> None:
@@ -154,6 +180,14 @@ def test_standard_webhooks_refuses_an_empty_secret_collection() -> None:
         StandardWebhookVerifier(())
 
 
+@pytest.mark.parametrize("verifier", [StandardWebhookVerifier, StripeWebhookVerifier])
+def test_multi_secret_provider_verifiers_bound_rotation_work(verifier) -> None:
+    secrets = tuple(f"secret-{index}".encode() for index in range(33))
+
+    with pytest.raises(ValueError, match="at most 32 webhook secrets"):
+        verifier(secrets)
+
+
 @pytest.mark.parametrize(
     ("verifier", "headers"),
     (
@@ -200,3 +234,60 @@ def test_github_profile_uses_delivery_and_event_headers() -> None:
         now=NOW,
     )
     assert (result.id, result.type) == ("delivery-7", "push")
+
+
+def test_github_replay_identity_cannot_be_changed_with_an_unsigned_delivery_header() -> None:
+    secret = b"github-secret"
+    signature = b"sha256=" + hmac.new(secret, BODY, hashlib.sha256).hexdigest().encode("ascii")
+    common = {
+        b"x-hub-signature-256": signature,
+        b"x-github-event": b"push",
+    }
+    verifier = GitHubWebhookVerifier(secret)
+
+    first = verifier.verify(
+        body=BODY,
+        headers={**common, b"x-github-delivery": b"delivery-1"},
+        now=NOW,
+    )
+    replay = verifier.verify(
+        body=BODY,
+        headers={**common, b"x-github-delivery": b"attacker-changed-it"},
+        now=NOW,
+    )
+
+    assert first.id != replay.id
+    assert first.deduplication_id == replay.deduplication_id
+
+
+@pytest.mark.parametrize(
+    ("verifier", "headers"),
+    (
+        (
+            StandardWebhookVerifier(b"standard-secret"),
+            {
+                b"webhook-id": b"evt_1",
+                b"webhook-timestamp": SECONDS,
+                b"webhook-signature": b"v1,invalid",
+                b"Webhook-Signature": b"v1,also-invalid",
+            },
+        ),
+        (
+            StripeWebhookVerifier(b"stripe-secret"),
+            {
+                b"stripe-signature": b"t=" + SECONDS + b",v1=invalid",
+                b"Stripe-Signature": b"t=" + SECONDS + b",v1=also-invalid",
+            },
+        ),
+        (
+            GitHubWebhookVerifier(b"github-secret"),
+            {
+                b"x-hub-signature-256": b"sha256=invalid",
+                b"X-Hub-Signature-256": b"sha256=also-invalid",
+            },
+        ),
+    ),
+)
+def test_public_verifiers_refuse_case_variant_duplicate_headers(verifier, headers) -> None:
+    with pytest.raises(ValueError, match="duplicate webhook header"):
+        verifier.verify(body=BODY, headers=headers, now=NOW)

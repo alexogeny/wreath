@@ -186,6 +186,9 @@ class SequencedEngine:
         self.calls.append(arguments)
         return next(self.allowed)
 
+    def reads_context(self, name: str) -> bool:
+        return False
+
 
 @pytest.mark.parametrize(
     ("stop_on_denied", "allowed", "expected"),

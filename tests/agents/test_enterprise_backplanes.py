@@ -182,6 +182,53 @@ def test_azure_endpoint_refuses_each_unsafe_origin_component() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://resource.openai.azure.com\r.evil",
+        "https://resource.openai.azure.com\t",
+        "https://resource.openai.azure.com\x7f",
+    ],
+)
+def test_azure_endpoint_refuses_parser_control_ambiguity(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="endpoint.*absolute https"):
+        AzureOpenAIBackplane(
+            endpoint=endpoint,
+            deployment="chat",
+            api_key="secret",
+            transport=Transport([]),
+        )
+
+
+def test_azure_api_key_cannot_inject_transport_headers() -> None:
+    with pytest.raises(ValueError, match="api_key.*header"):
+        AzureOpenAIBackplane(
+            endpoint="https://resource.openai.azure.com",
+            deployment="chat",
+            api_key="secret\r\nx-injected: yes",
+            transport=Transport([]),
+        )
+
+
+@pytest.mark.parametrize("token", ["token\nextra", "token\x85extra"])
+async def test_dynamic_entra_token_cannot_inject_transport_headers(token: str) -> None:
+    async def token_provider() -> str:
+        return token
+
+    transport = Transport([])
+    plane = AzureOpenAIBackplane(
+        endpoint="https://resource.openai.azure.com",
+        deployment="chat",
+        token_provider=token_provider,
+        transport=transport,
+    )
+
+    with pytest.raises(BackplaneError, match="bearer token.*header"):
+        _ = [event async for event in plane.stream(request())]
+
+    assert transport.requests == []
+
+
 def test_azure_deployment_must_be_a_string() -> None:
     with pytest.raises(ValueError, match="deployment.*non-empty string"):
         AzureOpenAIBackplane(

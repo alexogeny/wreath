@@ -444,6 +444,11 @@ def test_authority_accepts_bare_hosts_and_bracketed_ipv6() -> None:
     assert origin_accepted("http://[::1]:8000", ("http://[::1]",)) is True
 
 
+@pytest.mark.parametrize("origin", ["null", "http://example.test", "https://example.test/path"])
+def test_an_exact_allowlist_entry_cannot_make_an_invalid_origin_valid(origin: str) -> None:
+    assert origin_accepted(origin, (origin,)) is False
+
+
 @pytest.mark.parametrize("presented", [None, 7, ["challenge"]])
 def test_client_data_challenge_must_be_a_string(presented) -> None:
     body = json.dumps(

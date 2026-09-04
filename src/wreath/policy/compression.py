@@ -170,10 +170,20 @@ class CompressionPolicy:
         compress_streaming: bool = True,
         compress_authenticated: bool = False,
     ) -> None:
+        if type(minimum_size) is not int:
+            raise TypeError("minimum_size must be an integer number of bytes")
         if minimum_size < 0:
             raise ValueError("minimum_size must be non-negative")
+        if type(gzip_level) is not int:
+            raise TypeError("gzip_level must be an integer between 0 and 9")
         if not 0 <= gzip_level <= 9:
             raise ValueError("gzip_level must be between 0 and 9")
+        if type(zstd_level) is not int:
+            raise TypeError("zstd_level must be an integer compression level")
+        if type(compress_streaming) is not bool:
+            raise TypeError("compress_streaming must be true or false")
+        if type(compress_authenticated) is not bool:
+            raise TypeError("compress_authenticated must be true or false")
         require_zstd()
         if not ZSTD_MIN_LEVEL <= zstd_level <= ZSTD_MAX_LEVEL:
             raise ValueError(f"zstd_level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
@@ -212,6 +222,10 @@ class CompressionPolicy:
         suffix_bytes: int,
     ) -> None:
         """Prepare one exact stable span as an independently readable gzip member."""
+        if type(prefix_bytes) is not int:
+            raise TypeError("gzip fragment prefix_bytes must be an integer number of bytes")
+        if type(suffix_bytes) is not int:
+            raise TypeError("gzip fragment suffix_bytes must be an integer number of bytes")
         if prefix_bytes < 0 or suffix_bytes < 0:
             raise ValueError("gzip fragment prefix_bytes and suffix_bytes must be non-negative")
         if prefix_bytes + suffix_bytes >= len(document):
@@ -392,8 +406,13 @@ class CompressionPolicy:
         ):
             return response
         cache_control = find_response_header(headers, b"cache-control")
-        if cache_control is not None and cache_control_flags(cache_control) & NO_TRANSFORM:
-            return response
+        if cache_control is not None:
+            for name, value in headers:
+                if (
+                    name.lower() == b"cache-control"
+                    and cache_control_flags(value) & NO_TRANSFORM
+                ):
+                    return response
         content_type = find_response_header(headers, b"content-type")
         if content_type is None or not is_compressible_content_type(content_type):
             return response

@@ -128,11 +128,7 @@ async def test_data_after_end_stream_is_stream_closed(make_driver):
     # Complete request (END_STREAM), then send more DATA on the half-closed stream.
     await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
     await d.feed_and_settle(support.encode_frame(support.DATA, 0, 1, b"late"))
-    # Either a stream error (RST_STREAM) or connection error is acceptable per RFC.
-    frames = d.frames()
-    rst = [f for f in frames if f.type == support.RST_STREAM and f.stream_id == 1]
-    goaway = [f for f in frames if f.type == support.GOAWAY]
-    assert rst or goaway
+    assert _rst_code(d, 1) == support.STREAM_CLOSED
 
 
 async def test_rst_stream_on_idle_stream_is_protocol_error(make_driver):

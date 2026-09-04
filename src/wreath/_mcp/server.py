@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -31,7 +32,7 @@ from itertools import chain
 from typing import Any
 from urllib.parse import urlsplit
 
-from .._auth.models import qualified_identity_value
+from .._auth.models import qualified_identity_key, qualified_identity_value
 from .._auth.requirements import AuthRequirement, second_factor_age
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
@@ -238,7 +239,21 @@ def _sampling_messages(messages: Any) -> list[dict[str, Any]]:
                 "a sampling message's `content` must be text or a content "
                 f"block; got {type(content).__name__}"
             )
-        rendered.append({"role": entry.get("role", "user"), "content": dict(content)})
+        content_type = content.get("type")
+        payload_key = "text" if content_type == "text" else "data"
+        if content_type not in ("text", "image", "audio") or not isinstance(
+            content.get(payload_key), str
+        ):
+            raise ValueError(
+                "a sampling message's content must be a text, image, or audio "
+                "block with a string payload"
+            )
+        role = entry.get("role", "user")
+        if role not in ("user", "assistant"):
+            raise ValueError(
+                f"a sampling message's `role` must be 'user' or 'assistant'; got {role!r}"
+            )
+        rendered.append({"role": role, "content": dict(content)})
     return rendered
 
 
@@ -267,6 +282,14 @@ def _identity_owner(identity: Any, request: Any) -> tuple[str, str, str, str]:
 
 def _identity_principal(identity: Any) -> str:
     return qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity.id))
+
+
+def _identity_partition_key(identity: Any) -> str:
+    return qualified_identity_key(
+        str(identity.type),
+        str(getattr(identity, "namespace", "")),
+        str(identity.id),
+    )
 
 
 class MCP:
@@ -329,6 +352,7 @@ class MCP:
         "_authorizer",
         "_file_root",
         "_file_root_fd",
+        "_file_root_lock",
         "_instructions",
         "_limits",
         "_metadata_path",
@@ -376,10 +400,17 @@ class MCP:
         progress_interval: float = 0.25,
         file_root: str | os.PathLike[str] | None = None,
     ) -> None:
-        if progress_interval <= 0:
+        if progress_interval <= 0 or not math.isfinite(progress_interval):
             raise ValueError("progress_interval must be positive")
-        self._file_root = None if file_root is None else os.fspath(file_root)
+        if file_root is None:
+            self._file_root = None
+        else:
+            configured_root = os.fspath(file_root)
+            if not configured_root:
+                raise ValueError("file_root must name a directory")
+            self._file_root = os.path.abspath(configured_root)
         self._file_root_fd: int | None = None
+        self._file_root_lock = asyncio.Lock()
         self._name = name
         self._version = version
         self._path = path
@@ -612,6 +643,16 @@ class MCP:
         register_counters = getattr(app, "_register_counter_source", None)
         if callable(register_counters):
             register_counters(self)
+        register_shutdown = getattr(app, "on_shutdown", None)
+        if self._file_root is not None and callable(register_shutdown):
+            register_shutdown(self._close_file_root)
+
+    async def _close_file_root(self, _app: Any) -> None:
+        async with self._file_root_lock:
+            root_fd = self._file_root_fd
+            self._file_root_fd = None
+            if root_fd is not None:
+                os.close(root_fd)
 
     def tool(
         self,
@@ -940,14 +981,36 @@ class MCP:
                 channel.resolve(message.id, message.result, message.error)
             return Response(b"", status=202)
 
+        if message.id in session.in_flight or message.id in session.requests_in_flight:
+            body = encode_failure(
+                message.id,
+                INVALID_REQUEST,
+                f"this session already has a request in flight with id {message.id!r}; "
+                "wait for it to finish before reusing that id",
+            )
+            return self._reply(body, stream=stream)
+        request_task = None
         try:
-            result = await self._dispatch(request, session, message)
+            if message.method in ("resources/read", "prompts/get"):
+                request_task = asyncio.ensure_future(self._dispatch(request, session, message))
+                session.requests_in_flight[message.id] = request_task
+                await asyncio.wait({request_task})
+                result = _SUPPRESSED if request_task.cancelled() else request_task.result()
+            else:
+                result = await self._dispatch(request, session, message)
         except JsonRpcError as error:
             body = encode_failure(message.id, error.code, error.message, error.data)
         else:
             if result is _SUPPRESSED:
                 return Response(b"", status=202)
             body = encode_success(message.id, result)
+        finally:
+            if request_task is not None:
+                self._sessions.get(session.id)
+                session.requests_in_flight.pop(message.id, None)
+                if not request_task.done():
+                    request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
         return self._reply(body, stream=stream)
 
     async def _get(self, request: Request) -> Any:
@@ -1012,6 +1075,7 @@ class MCP:
             # Reached on a clean close and on the client hanging up, which
             # arrives here as `GeneratorExit`. Either way the session may open
             # another stream, which is what a reconnecting client does.
+            self._sessions.get(session.id)
             session.stream_open = False
 
     async def _session_for(
@@ -1030,7 +1094,7 @@ class MCP:
                 "an Mcp-Session-Id header is required on every message after initialize",
                 identifier=identifier,
             )
-        session = self._sessions.get(session_id)
+        session = self._sessions.peek(session_id)
         if session is None:
             return None, self._transport_error(
                 404,
@@ -1044,6 +1108,14 @@ class MCP:
             # is not, on its own, worth anything to a different caller.
             return None, self._challenge(
                 Unauthenticated("invalid_token", "this token did not open this MCP session")
+            )
+        current = self._sessions.get(session_id)
+        if current is not session:
+            return None, self._transport_error(
+                404,
+                INVALID_REQUEST,
+                "unknown, ended, or idle-expired MCP session; send initialize again",
+                identifier=identifier,
             )
         return session, None
 
@@ -1060,13 +1132,15 @@ class MCP:
             return self._transport_error(
                 400, INVALID_REQUEST, "an Mcp-Session-Id header is required to end a session"
             )
-        session = self._sessions.get(session_id)
+        session = self._sessions.peek(session_id)
         if session is None:
             return self._transport_error(404, INVALID_REQUEST, "unknown or already ended session")
         if not await self._owns(request, session, identity):
             return self._challenge(
                 Unauthenticated("invalid_token", "this token did not open this MCP session")
             )
+        if self._sessions.peek(session_id) is not session:
+            return self._transport_error(404, INVALID_REQUEST, "unknown or already ended session")
         self._sessions.discard(session_id)
         return Response(b"", status=204)
 
@@ -1211,6 +1285,8 @@ class MCP:
             if not isinstance(requested, str | int) or isinstance(requested, bool):
                 return
             task = session.in_flight.get(requested)
+            if task is None:
+                task = session.requests_in_flight.get(requested)
             if task is not None:
                 # Cancelling the task is also what stops anything that call had
                 # outstanding *at the client*: the inner `wait_for` takes the
@@ -1222,6 +1298,7 @@ class MCP:
             # trip to a client that may have nothing to read the answer with;
             # the next `read_file` asks, and pays for it only if anyone cares.
             session.roots = None
+            session.roots_revision += 1
         # `notifications/initialized` needs nothing done, and JSON-RPC says an
         # unknown notification is dropped rather than answered.
 
@@ -1311,7 +1388,10 @@ class MCP:
         # Abuse control first: it is the cheapest check, and a caller that is
         # over its ceiling should not get a policy decision out of the server as
         # a side effect of hammering it.
-        retry_after = self._throttle(tool, session, principal)
+        partition_key = (
+            None if tool.limiter is None or identity is None else _identity_partition_key(identity)
+        )
+        retry_after = self._throttle(tool, session, partition_key)
         if retry_after > 0.0:
             self.throttled += 1
             marker(_record.OUTCOME_THROTTLED)
@@ -1337,7 +1417,8 @@ class MCP:
         # Scoped to the session and the request, so two calls in flight on one
         # session report separately and a task id can never collide with a
         # durable job's in a registry the deployment shares between the two.
-        task_id = f"mcp:{session.id}:{message.id}"
+        request_key = str(message.id) if isinstance(message.id, int) else f"s:{message.id}"
+        task_id = f"mcp:{session.id}:{request_key}"
         # Published before the policy decision, not after, because a Cedar
         # resource generally depends on *which row* is being asked for and the
         # only place that lives is the arguments. A route resolves its resource
@@ -1361,6 +1442,12 @@ class MCP:
             marker(_record.OUTCOME_DENIED)
             raise JsonRpcError(UNAUTHORIZED, denial)
 
+        if message.id in session.in_flight or message.id in session.requests_in_flight:
+            raise JsonRpcError(
+                INVALID_REQUEST,
+                f"this session already has a call in flight with request id "
+                f"{message.id!r}; wait for it to finish before reusing that id",
+            )
         if len(session.in_flight) >= self._limits.max_concurrent_calls:
             self.throttled += 1
             marker(_record.OUTCOME_THROTTLED)
@@ -1390,6 +1477,7 @@ class MCP:
             # from this request being cancelled, which must still propagate.
             await asyncio.wait({task})
         finally:
+            self._sessions.get(session.id)
             session.in_flight.pop(message.id, None)
             if not task.done():
                 task.cancel()
@@ -1451,7 +1539,15 @@ class MCP:
             # that is told so can stop asking. `resources/read` has no `isError`
             # result to carry it, so it is the specification's own code.
             self.resource_errors += 1
-            raise JsonRpcError(RESOURCE_NOT_FOUND, str(error)) from error
+            error_message = str(error)
+            try:
+                _enforce_result_limit(
+                    _text_result(error_message, is_error=True),
+                    self._limits.max_result_bytes,
+                )
+            except ValueError as limit_error:
+                error_message = str(limit_error)
+            raise JsonRpcError(RESOURCE_NOT_FOUND, error_message) from error
         except Exception as error:
             # The same boundary a tool gets, for the same reason: a reader that
             # raises must not take the session down, and only the exception's
@@ -1531,7 +1627,9 @@ class MCP:
             raise JsonRpcError(UNAUTHORIZED, denial)
         self.prompt_renders += 1
         try:
-            return render_messages(prompt, await prompt.handler(request, **kwargs))
+            result = render_messages(prompt, await prompt.handler(request, **kwargs))
+            _enforce_result_limit(result, self._limits.max_result_bytes)
+            return result
         except Exception as error:
             # As for a tool and a resource: the type travels, the message does
             # not, and the failure is counted rather than swallowed.
@@ -1588,6 +1686,12 @@ class MCP:
         spends its allowance twice per call, which is the honest accounting --
         the second half of the work is the expensive half.
         """
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or max_tokens < 1
+        ):
+            raise ValueError("max_tokens must be a positive integer")
         session = context._session
         request = context._request
         started = time.perf_counter()
@@ -1626,7 +1730,10 @@ class MCP:
             identity = await self._identify(request)
             principal = None if identity is None else _identity_principal(identity)
 
-        retry_after = self._throttle(tool, session, principal)
+        partition_key = (
+            None if tool.limiter is None or identity is None else _identity_partition_key(identity)
+        )
+        retry_after = self._throttle(tool, session, partition_key)
         if retry_after > 0.0:
             self.sampling_refusals += 1
             self.throttled += 1
@@ -1734,7 +1841,10 @@ class MCP:
             identity = await self._identify(request)
             principal = None if identity is None else _identity_principal(identity)
 
-        retry_after = self._throttle(tool, session, principal)
+        partition_key = (
+            None if tool.limiter is None or identity is None else _identity_partition_key(identity)
+        )
+        retry_after = self._throttle(tool, session, partition_key)
         if retry_after > 0.0:
             self.elicitation_refusals += 1
             self.throttled += 1
@@ -1796,7 +1906,13 @@ class MCP:
         if "roots" not in session.client_capabilities:
             session.roots = ()
             return ()
+        revision = session.roots_revision
         declared = root_paths(await self._client_request(session, "roots/list", {}))
+        if revision != session.roots_revision:
+            raise ClientRequestError(
+                "the client said its roots changed while roots/list was in flight; "
+                "the stale answer was discarded, so retry the file operation"
+            )
         session.roots = declared
         return declared
 
@@ -1833,12 +1949,17 @@ class MCP:
                 f"({', '.join(declared)}). A client's roots bound what this "
                 "server may read on its behalf, not merely what it prefers."
             )
-        if self._file_root_fd is None:
-            self._file_root_fd = await asyncio.to_thread(_open_root, root)
+        root_fd = self._file_root_fd
+        if root_fd is None:
+            async with self._file_root_lock:
+                root_fd = self._file_root_fd
+                if root_fd is None:
+                    root_fd = await asyncio.to_thread(_open_root, root)
+                    self._file_root_fd = root_fd
         try:
             return await asyncio.to_thread(
                 read_beneath,
-                self._file_root_fd,
+                root_fd,
                 path,
                 max_bytes=self._limits.max_file_bytes,
             )
@@ -1908,7 +2029,7 @@ class MCP:
             )
         for policy in requirement.policies:
             decision = await authorizer.authorize(request, policy)
-            if not decision.allowed:
+            if decision.allowed is not True:
                 reason = decision.reason or "denied"
                 return f"the caller may not {policy.action!r}: {reason}"
         return None
@@ -1947,7 +2068,12 @@ class MCP:
             )
         except ToolError as error:
             self.tool_errors += 1
-            return _text_result(str(error), is_error=True), _record.OUTCOME_TOOL_ERROR
+            result = _text_result(str(error), is_error=True)
+            try:
+                _enforce_result_limit(result, self._limits.max_result_bytes)
+            except ValueError as limit_error:
+                raise JsonRpcError(INTERNAL_ERROR, str(limit_error)) from limit_error
+            return result, _record.OUTCOME_TOOL_ERROR
         except Exception as error:  # noqa: BLE001 - see below; counted, never silent
             # A tool is application code at a protocol boundary, and one that
             # raises must not take the session down with it -- the model is

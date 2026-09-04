@@ -20,6 +20,7 @@ from wreath._agents.remote_mcp import (
     RemoteMCPToolCatalog,
     UnknownToolOutcome,
     _origin,
+    _response_message,
     _sse_objects,
 )
 
@@ -145,9 +146,44 @@ def test_remote_origin_refuses_each_invalid_endpoint_part(
         _origin(endpoint)
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://tools.example\r.evil/mcp",
+        "https://tools.example/mcp\t/../../admin",
+        "https://tools.example/mcp\x7fadmin",
+    ],
+)
+def test_remote_origin_refuses_parser_control_ambiguity(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        _origin(endpoint)
+
+
+def test_remote_origin_requires_text() -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        _origin(cast(Any, 7))
+
+
 def test_remote_origin_normalizes_default_and_preserves_nondefault_ports() -> None:
     assert _origin("https://tools.example:443/mcp") == "https://tools.example"
     assert _origin("https://tools.example:8443/mcp") == "https://tools.example:8443"
+
+
+def test_remote_origin_normalizes_ipv6_and_idna_for_credential_pinning() -> None:
+    assert _origin("https://[2001:db8::1]:443/mcp") == "https://[2001:db8::1]"
+    assert _origin("https://b\N{LATIN SMALL LETTER U WITH DIAERESIS}cher.example/mcp") == (
+        "https://xn--bcher-kva.example"
+    )
+
+
+def test_remote_origin_refuses_an_unencodable_hostname_with_the_correct_form() -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        _origin("https://\ud800.example/mcp")
+
+
+def test_remote_origin_names_the_correct_form_for_an_invalid_port() -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        _origin("https://tools.example:not-a-port/mcp")
 
 
 @pytest.mark.parametrize(
@@ -188,6 +224,20 @@ async def test_initialized_headers_require_protocol_and_omit_absent_session() ->
     }
 
 
+@pytest.mark.parametrize(
+    "token", ["line\r\ninjected", "tab\tvalue", "delete\x7f", cast(Any, 7)]
+)
+async def test_token_provider_cannot_inject_outbound_header_framing(token: Any) -> None:
+    client = RemoteMCPClient(
+        "https://tools.example/mcp",
+        transport=Transport(),
+        token_provider=TokenProvider(token),
+    )
+
+    with pytest.raises(MCPRemoteError, match="token provider"):
+        await client._headers(initialized=False)
+
+
 @pytest.mark.asyncio
 async def test_post_refuses_http_error_status() -> None:
     transport = Transport(
@@ -201,6 +251,14 @@ async def test_post_refuses_http_error_status() -> None:
     client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
 
     with pytest.raises(MCPRemoteError, match="status 429"):
+        await client._post({"jsonrpc": "2.0", "method": "probe"}, initialized=False)
+
+
+async def test_post_refuses_redirect_status_without_interpreting_its_body() -> None:
+    transport = Transport(replace(initialized(), status=302))
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+
+    with pytest.raises(MCPRemoteError, match="status 302"):
         await client._post({"jsonrpc": "2.0", "method": "probe"}, initialized=False)
 
 
@@ -356,6 +414,8 @@ async def test_invocation_refuses_invalid_scope_and_unknown_tool_before_io() -> 
     with pytest.raises(LookupError, match="has no tool 'missing'"):
         await client.invoke("missing", {}, call_id="call", context=context())
 
+    assert client._scope is None
+
 
 @pytest.mark.asyncio
 async def test_close_without_session_skips_delete_and_propagates_transport_failure() -> None:
@@ -406,6 +466,20 @@ async def test_close_does_not_invent_a_note_when_only_session_close_fails() -> N
     assert getattr(caught.value, "__notes__", []) == []
 
 
+async def test_session_close_refuses_an_off_endpoint_response_url() -> None:
+    transport = Transport(
+        MCPHTTPResponse("https://evil.example/mcp", 204, {}, b"")
+    )
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    client._protocol_version = "2025-11-25"
+    client._session_id = "session-1"
+
+    with pytest.raises(MCPRemoteError, match="origin-pinned"):
+        await client.close()
+
+    assert transport.closed is True
+
+
 def test_catalog_refuses_non_positive_and_exceeded_client_ceilings() -> None:
     client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
 
@@ -450,6 +524,43 @@ def test_sse_parser_refuses_the_first_event_beyond_its_ceiling() -> None:
 
     with pytest.raises(MCPRemoteError, match="exceeds event ceiling 1"):
         _sse_objects(body, max_events=1)
+
+
+def test_sse_parser_does_not_treat_unicode_line_boundaries_as_framing() -> None:
+    message = {"jsonrpc": "2.0", "id": 1, "result": {"text": "one\x85two"}}
+    body = b"data: " + json.dumps(message, ensure_ascii=False).encode() + b"\n\n"
+
+    assert _sse_objects(body, max_events=1) == (message,)
+
+
+def test_sse_parser_accepts_each_standard_event_line_ending() -> None:
+    expected = ({"event": 1}, {"event": 2})
+    assert _sse_objects(
+        b'data: {"event":1}\r\rdata: {"event":2}\r\r', max_events=2
+    ) == expected
+    assert _sse_objects(
+        b'data: {"event":1}\r\n\r\ndata: {"event":2}\r\n\r\n', max_events=2
+    ) == expected
+
+
+def test_response_matching_requires_an_exact_integer_id_and_jsonrpc_version() -> None:
+    boolean_id = MCPHTTPResponse(
+        "https://tools.example/mcp",
+        200,
+        {"content-type": "application/json"},
+        b'{"jsonrpc":"2.0","id":true,"result":{}}',
+    )
+    with pytest.raises(MCPRemoteError, match="request id 1"):
+        _response_message(boolean_id, request_id=1, max_events=1)
+
+    wrong_version = MCPHTTPResponse(
+        "https://tools.example/mcp",
+        200,
+        {"content-type": "application/json"},
+        b'{"jsonrpc":"1.0","id":1,"result":{}}',
+    )
+    with pytest.raises(MCPRemoteError, match="JSON-RPC 2.0"):
+        _response_message(wrong_version, request_id=1, max_events=1)
 
 
 @pytest.mark.asyncio

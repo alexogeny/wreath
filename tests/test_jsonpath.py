@@ -3,7 +3,14 @@ from __future__ import annotations
 import pytest
 
 from wreath._json import jsonpath_find as native_jsonpath_find
-from wreath.jsonpath import JSONPathError, _iregexp_fullmatch, compile_jsonpath, jsonpath
+from wreath.jsonpath import (
+    JSONPathError,
+    _IRegexp,
+    _iregexp_fullmatch,
+    _IRegexpError,
+    compile_jsonpath,
+    jsonpath,
+)
 
 STORE = {
     "store": {
@@ -133,6 +140,11 @@ def test_iregexp_refuses_invalid_atoms_and_escapes_without_raising() -> None:
     assert jsonpath("$[?match(@, '\\\\') ]", ["x"]) == []
     assert jsonpath("$[?match(@, '\\\\p{Lu') ]", ["A"]) == []
     assert jsonpath("$[?match(@, '\\\\.') ]", ["."]) == ["."]
+
+
+def test_iregexp_refuses_a_truncated_character_class_atom() -> None:
+    with pytest.raises(_IRegexpError):
+        _IRegexp("", "a").class_atom()
 
 
 @pytest.mark.parametrize(

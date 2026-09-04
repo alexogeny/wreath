@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import pytest
 
@@ -9,6 +10,7 @@ from wreath.platform import (
     BULK_CEILING,
     CONTENT_SECURITY_POLICY,
     PLATFORM_ACTIONS,
+    BulkOutcome,
     PlatformAdmin,
     PlatformError,
     bulk,
@@ -167,6 +169,59 @@ def test_impersonation_ttl_must_be_positive_and_finite(ttl: float) -> None:
         impersonate(operator="ops-1", user="u-9", scope=("read",), ttl=ttl)
 
 
+@pytest.mark.parametrize("ttl", (True, False, "900"))
+def test_impersonation_ttl_must_be_a_number_not_a_coercible_value(ttl: object) -> None:
+    with pytest.raises(PlatformError, match="ttl must be a positive finite number"):
+        impersonate(
+            operator="ops-1", user="u-9", scope=("read",), ttl=cast(float, ttl)
+        )
+
+
+@pytest.mark.parametrize("nested", (0, 1, "false"))
+def test_impersonation_nested_flag_must_be_a_boolean(nested: object) -> None:
+    with pytest.raises(PlatformError, match="nested must be a bool"):
+        impersonate(
+            operator="ops-1",
+            user="u-9",
+            scope=("read",),
+            ttl=60,
+            nested=cast(bool, nested),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("operator", ""), ("operator", "   "), ("user", ""), ("user", "u\n9")),
+)
+def test_impersonation_principals_must_be_nonempty_control_free_strings(
+    field: str, value: str
+) -> None:
+    with pytest.raises(PlatformError, match=field):
+        if field == "operator":
+            impersonate(operator=value, user="u-9", scope=("read",), ttl=60)
+        else:
+            impersonate(operator="ops-1", user=value, scope=("read",), ttl=60)
+
+
+@pytest.mark.parametrize("scope", ("read", ("read", ""), ("read", "write\n")))
+def test_impersonation_scope_must_be_control_free_string_entries(scope: object) -> None:
+    with pytest.raises(PlatformError, match="scope"):
+        impersonate(
+            operator="ops-1", user="u-9", scope=cast(tuple[str, ...], scope), ttl=60
+        )
+
+
+def test_impersonation_permissions_must_be_an_iterable_of_entries_not_a_string() -> None:
+    with pytest.raises(PlatformError, match="user_permissions"):
+        impersonate(
+            operator="ops-1",
+            user="u-9",
+            scope=("read",),
+            ttl=60,
+            user_permissions="read",
+        )
+
+
 def test_impersonation_has_no_default_scope() -> None:
     with pytest.raises(PlatformError, match="scope="):
         impersonate(operator="ops-1", user="u-9", ttl=900)
@@ -199,6 +254,17 @@ def test_an_action_needs_an_operator_and_a_reason() -> None:
         suspend_tenant("acme", reason="abuse")
     with pytest.raises(PlatformError, match="reason="):
         suspend_tenant("acme", operator="ops-1")
+
+
+@pytest.mark.parametrize(
+    ("operator", "reason", "field"),
+    (("   ", "abuse", "operator"), ("ops-1", "\t", "reason"), ("ops\n1", "abuse", "operator")),
+)
+def test_operator_audit_fields_are_nonempty_control_free_strings(
+    operator: str, reason: str, field: str
+) -> None:
+    with pytest.raises(PlatformError, match=field):
+        suspend_tenant("acme", operator=operator, reason=reason)
 
 
 def test_deprovisioning_requires_the_tenant_name_typed_back() -> None:
@@ -255,6 +321,57 @@ def test_a_bulk_action_over_the_ceiling_is_refused() -> None:
         bulk("suspend", keys=keys, operator="ops-1", reason="abuse")
 
 
+def test_duplicate_bulk_keys_are_refused_before_any_action_runs() -> None:
+    seen: list[str] = []
+
+    def apply(key: str) -> str:
+        seen.append(key)
+        return "applied"
+
+    with pytest.raises(PlatformError, match="duplicate key 'a'"):
+        bulk("suspend", keys=("a", "a"), operator="ops-1", reason="abuse", apply=apply)
+    assert seen == []
+
+
+def test_bulk_keys_are_snapshotted_before_an_action_can_mutate_the_selection() -> None:
+    keys = ["a"]
+    seen: list[str] = []
+
+    def apply(key: str) -> str:
+        seen.append(key)
+        if key == "a":
+            keys.extend(f"added-{index}" for index in range(BULK_CEILING + 1))
+        return "applied"
+
+    outcome = bulk("suspend", keys=keys, operator="ops-1", reason="abuse", apply=apply)
+    assert outcome.applied == ("a",)
+    assert seen == ["a"]
+
+
+@pytest.mark.parametrize("keys", ("acme", ("acme", "globex\n")))
+def test_bulk_keys_must_be_control_free_entries_not_a_string(keys: object) -> None:
+    with pytest.raises(PlatformError, match="keys"):
+        bulk(
+            "suspend",
+            keys=cast(tuple[str, ...], keys),
+            operator="ops-1",
+            reason="abuse",
+        )
+
+
+def test_bulk_outcome_cannot_be_rewritten_after_the_action() -> None:
+    outcome = bulk("suspend", keys=("a",), operator="ops-1", reason="abuse")
+    with pytest.raises(TypeError):
+        cast(dict[str, str], outcome.per_key)["a"] = "skipped"
+
+
+def test_bulk_outcome_snapshots_a_directly_supplied_result_mapping() -> None:
+    results = {"a": "applied"}
+    outcome = BulkOutcome(action="suspend", per_key=results)
+    results["a"] = "failed"
+    assert outcome.applied == ("a",)
+
+
 def test_the_console_ships_no_javascript_so_its_csp_needs_no_nonce() -> None:
     assert "default-src 'none'" in CONTENT_SECURITY_POLICY
     assert "script-src" not in CONTENT_SECURITY_POLICY
@@ -267,6 +384,17 @@ def test_a_write_operation_requires_a_csrf_verifier() -> None:
 
 def test_a_read_only_console_needs_no_csrf_verifier() -> None:
     assert _admin().router("/ops")["operations"] == ("list", "inspect")
+
+
+@pytest.mark.parametrize("operations", ("list", ("list", ""), ("list", "inspect\n")))
+def test_console_operations_are_declared_as_control_free_entries(operations: object) -> None:
+    with pytest.raises(PlatformError, match="operations"):
+        _admin(operations=cast(tuple[str, ...], operations))
+
+
+def test_console_requires_a_directory_resolver_at_construction() -> None:
+    with pytest.raises(PlatformError, match="directory.resolve"):
+        PlatformAdmin(directory=object(), authorize=ALLOWED)
 
 
 def test_constructing_the_console_registers_nothing_on_an_application() -> None:

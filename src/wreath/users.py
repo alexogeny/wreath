@@ -20,8 +20,9 @@ in the stdlib-only `wreath._userkit`; this module is the thin wreath glue.
 rather than signing anyone in. `POST /logout` and `GET /me` degrade instead --
 logout reports success having cleared nothing, and `/me` answers 401.
 
-Email delivery is a pluggable `EmailSender`. The default `LogEmailSender` prints
-the link rather than sending it; `SmtpEmailSender` (stdlib `smtplib`, STARTTLS or
+Email delivery is a pluggable `EmailSender`. The default `LogEmailSender` logs a
+redacted delivery notice; an explicit `LogEmailSender(expose_tokens=True)` is a
+local-development escape hatch. `SmtpEmailSender` (stdlib `smtplib`, STARTTLS or
 implicit TLS on port 465) is the shipped production transport.
 """
 
@@ -29,10 +30,10 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from time import monotonic, time
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Protocol, cast
 
 from . import _secondfactor, _userkit
 from ._capability_map import CapabilityMap
@@ -81,6 +82,7 @@ from .response import JSONResponse
 from .router import Router
 
 __all__ = [
+    "AttemptLimiter",
     "BulkSecondFactorRemovalStore",
     "BulkSecondFactorStore",
     "CapturingEmailSender",
@@ -362,7 +364,7 @@ class RegisterInput:
     """
 
     email: str
-    password: str
+    password: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -375,7 +377,7 @@ class LoginInput:
     """
 
     email: str
-    password: str
+    password: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -388,7 +390,7 @@ class TokenInput:
     `{"status": "invalid_token"}` rather than a distinguishing error.
     """
 
-    token: str
+    token: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -418,8 +420,8 @@ class ResetInput:
     refusal from a bad token: both answer 400 `{"status": "invalid_token"}`.
     """
 
-    token: str
-    password: str
+    token: str = field(repr=False)
+    password: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -434,7 +436,7 @@ class CodeInput:
     HMAC is computed, and answers exactly as a wrong code does.
     """
 
-    code: str
+    code: str = field(repr=False)
 
 
 @dataclass(slots=True)
@@ -470,6 +472,19 @@ class WebAuthnAssertionInput:
     client_data: str
     authenticator_data: str
     signature: str
+
+
+class AttemptLimiter(Protocol):
+    """Atomic keyed admission for authentication attempts.
+
+    `RateLimitPolicy` implements this contract. Back it with
+    `PostgresRateLimitStore` when a limit must span workers; `admit_key` then
+    makes the refill, consume, and admission decision in one database
+    statement. It returns `None` when admitted and a refusal response when the
+    key is over budget.
+    """
+
+    async def admit_key(self, key: str) -> Any | None: ...
 
 
 class LoginLimiter:
@@ -600,9 +615,12 @@ async def reset_password_endpoint(
     changed, because reporting recovery while an attacker session survives is
     unsafe.
 
-    Sessions are dropped only for the subject named in the token, and only after
-    the reset succeeded: a token that fails verification changes no password and
-    ends no session.
+    Sessions are dropped only for the subject named in a verified token. The
+    replacement is hashed first but is not persisted until revocation succeeds,
+    so a session-store failure cannot leave the new credential installed while
+    an attacker's existing session survives. Revocation runs again after the
+    compare-and-set so a login racing between the first sweep and the credential
+    change cannot survive the reset.
 
     `session_key` is the session key login wrote the principal under, and it is
     handed to the store rather than assumed: enumeration has to look where the
@@ -624,17 +642,25 @@ async def reset_password_endpoint(
         raise RuntimeError(
             "password reset requires a session store with delete_for(subject) revocation"
         )
-    subject = _userkit._token_subject(token)
-    ok = await _userkit.reset_password(store, secret=secret, token=token, new_password=new_password)
-    if not ok or subject is None:
-        return ok
-    if session_key == "principal":
-        # The historical call, byte for byte, so every store that predates the
-        # second parameter keeps working on the default wiring.
-        await delete_for(subject)
-    else:
-        await delete_for(subject, session_key)
-    return ok
+    prepared = await _userkit._prepare_password_reset(
+        store, secret=secret, token=token, new_password=new_password
+    )
+    if prepared is None:
+        return False
+    subject = prepared[0]
+
+    async def revoke() -> None:
+        if session_key == "principal":
+            await delete_for(subject)
+        else:
+            await delete_for(subject, session_key)
+
+    await revoke()
+    changed = await _userkit._commit_password_reset(store, prepared)
+    if not changed:
+        return False
+    await revoke()
+    return True
 
 
 def _profile(user: UserRecord) -> dict[str, Any]:
@@ -666,10 +692,12 @@ def user_router(
     sessions: Any = None,
     max_login_attempts: int = 10,
     login_window: float = 300.0,
+    login_limiter: AttemptLimiter | None = None,
     max_registration_attempts: int = 20,
     registration_window: float = 60.0,
     max_reset_requests: int = 3,
     reset_window: float = 15 * 60.0,
+    reset_limiter: AttemptLimiter | None = None,
     second_factors: SecondFactorStore | None = None,
     pending_key: str = "pending_second_factor",
     clock: Callable[[], float] = time,
@@ -699,11 +727,16 @@ def user_router(
     `enrolments=` store is cleared there too, whichever store that is.
 
     `max_login_attempts`/`login_window` throttle failed sign-ins per identifier
-    -- in this router only. `max_reset_requests`/`reset_window` independently
-    bound reset-email issuance per normalized identifier while preserving the
-    uniform response. `wreath._userkit.authenticate` stays unguarded for direct
-    callers, and `LoginLimiter` documents what the throttle does and does not
-    protect (in particular that it is per-process).
+    with the local, per-router `LoginLimiter`. `max_reset_requests`/
+    `reset_window` independently bound reset-email issuance per normalized
+    identifier while preserving the uniform response. Those defaults are for a
+    single-process deployment. To enforce a budget across workers, pass
+    separately configured `RateLimitPolicy` instances as `login_limiter` and
+    `reset_limiter`, backed by `PostgresRateLimitStore`. Their `admit_key` calls
+    are the one atomic shared-store boundary before each protected attempt.
+    Shared policies count every admitted attempt; the legacy local login
+    limiter counts failures and clears on success. `_userkit.authenticate`
+    stays unguarded for direct callers.
 
     No response here reveals whether an account exists. Register answers 202 and
     forgot-password answers 200 either way, a failed login answers 401
@@ -760,11 +793,15 @@ def user_router(
             "user_router store must provide compare_and_set_password(user_id, expected, "
             "replacement) for single-use password reset tokens"
         )
+    if login_limiter is not None and not callable(getattr(login_limiter, "admit_key", None)):
+        raise TypeError("user_router login_limiter must provide async admit_key(key)")
+    if reset_limiter is not None and not callable(getattr(reset_limiter, "admit_key", None)):
+        raise TypeError("user_router reset_limiter must provide async admit_key(key)")
     mailer = email_sender if email_sender is not None else LogEmailSender()
     links = link_builder if link_builder is not None else _default_link(base_url, prefix)
     router = Router(prefix=prefix, tags=("users",))
     limiter = LoginLimiter(max_attempts=max_login_attempts, window=login_window)
-    reset_limiter = LoginLimiter(
+    reset_limiter_local = LoginLimiter(
         max_attempts=max_reset_requests,
         window=reset_window,
     )
@@ -802,7 +839,12 @@ def user_router(
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
         identifier = data.email.strip().lower()
-        if not limiter.allow(identifier):
+        shared_refusal = (
+            await login_limiter.admit_key(f"login:{identifier}")
+            if login_limiter is not None
+            else None
+        )
+        if shared_refusal is not None or (login_limiter is None and not limiter.allow(identifier)):
             # Deliberately the same shape as a wrong password plus a
             # Retry-After: saying "too many attempts for *this* account" would
             # confirm the account exists.
@@ -811,9 +853,11 @@ def user_router(
             return refused
         user = await _userkit.authenticate(store, data.email, data.password)
         if user is None:
-            limiter.record_failure(identifier)
+            if login_limiter is None:
+                limiter.record_failure(identifier)
             return JSONResponse({"error": "invalid_credentials"}, status=401)
-        limiter.record_success(identifier)
+        if login_limiter is None:
+            limiter.record_success(identifier)
         rotate_session(request)
         # Whatever this session was before, it is not that any more. Both keys
         # are cleared before either is written: rotation mints a new id but
@@ -929,10 +973,19 @@ def user_router(
     @router.post("/forgot-password")
     async def forgot(request: Any, data: Annotated[ForgotInput, Body()]):
         identifier = data.email.strip().lower()
-        if reset_limiter.allow(identifier):
+        shared_refusal = (
+            await reset_limiter.admit_key(f"password-reset:{identifier}")
+            if reset_limiter is not None
+            else None
+        )
+        allowed = shared_refusal is None and (
+            reset_limiter is not None or reset_limiter_local.allow(identifier)
+        )
+        if allowed:
             # Count issuance attempts whether or not the account exists, keeping
             # both the response and the work decision free of enumeration clues.
-            reset_limiter.record_failure(identifier)
+            if reset_limiter is None:
+                reset_limiter_local.record_failure(identifier)
             await _userkit.start_password_reset(
                 store,
                 mailer,
@@ -2469,6 +2522,15 @@ def second_factor_router(
     # Validate the parameters once, here, rather than on the first request: a
     # router built with an impossible period should fail at import, not answer
     # 500 to the first person trying to sign in.
+    for name, value in (
+        ("digits", digits),
+        ("period", period),
+        ("skew", skew),
+        ("recovery_codes", recovery_codes),
+        ("max_verify_attempts", max_verify_attempts),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
     _secondfactor.totp_code(b"\x00" * _secondfactor.MIN_SECRET_BYTES, 0, digits=digits)
     if skew < 0 or skew > _secondfactor.MAX_SKEW:
         raise ValueError(f"skew must be between 0 and {_secondfactor.MAX_SKEW} steps")

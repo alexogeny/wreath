@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from typing import Any
+
 import pytest
 
+from wreath._fsguard import ContainmentError
 from wreath._native import _core
 from wreath._template_tape import Markup, TemplateRenderError, _tokenize, compile_tape
 from wreath.templates import (
@@ -20,6 +26,47 @@ _LIMIT = 16 * 1024 * 1024
 
 def test_raw_tape_execution_is_not_exposed() -> None:
     assert not hasattr(_core, "template_render")
+
+
+@pytest.mark.parametrize(
+    "tape",
+    [
+        ([1],),
+        ((0,),),
+        ((0, "not bytes"),),
+        ((1, (), 1),),
+        ((5, 999),),
+        ((99,),),
+        ((3,),),
+        ((6,),),
+        ((5, -1),),
+        ((2, "x", ("xs",), 2, 1),),
+        ((4, ("x",), 1, 1), (0, b"unclosed")),
+        ((4, ("x",), 1, 1), (5, 2), (6,)),
+        ((1, ("x",), True),),
+    ],
+)
+def test_native_template_compile_refuses_malformed_tapes_without_crashing(tape: tuple) -> None:
+    script = (
+        "from wreath._native import _core\n"
+        f"tape = {tape!r}\n"
+        "try:\n"
+        "    _core.template_compile(tape)\n"
+        "except (TypeError, ValueError) as error:\n"
+        "    if 'template tape' not in str(error):\n"
+        "        raise SystemExit(f'unexpected refusal: {error}')\n"
+        "else:\n"
+        "    raise SystemExit('malformed tape was accepted')\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
 def render(tape: tuple, context: dict, max_output: int = _LIMIT) -> bytes:
@@ -133,6 +180,22 @@ def test_output_past_the_size_bound_is_refused() -> None:
     assert isinstance(render_error(tape, {"x": "a" * 100}, 10), TemplateRenderError)
 
 
+@pytest.mark.parametrize("max_output", [True, False, 1.5, "10", None])
+def test_template_refuses_non_integer_output_bounds(max_output: Any) -> None:
+    template = Template.from_string("hello")
+
+    with pytest.raises(TypeError, match="max_output must be an integer"):
+        template.render_bytes({}, max_output=max_output)
+
+
+@pytest.mark.parametrize("max_output", [0, -1])
+def test_template_refuses_non_positive_output_bounds(max_output: int) -> None:
+    template = Template.from_string("hello")
+
+    with pytest.raises(ValueError, match="max_output must be a positive integer"):
+        template.render_bytes({}, max_output=max_output)
+
+
 def test_compiled_render_appends_a_tail_in_the_output_allocation() -> None:
     template = Template.from_string("<p>{{ value }}</p>")
 
@@ -243,6 +306,24 @@ def test_directory_include_resolved_at_compile(tmp_path) -> None:
 def test_directory_rejects_traversal(tmp_path) -> None:
     with pytest.raises(TemplateSyntaxError):
         TemplateDirectory(tmp_path).compile("../etc/passwd")
+
+
+def test_directory_refuses_platform_without_secure_descriptor_walk(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("wreath.templates._HAVE_DIR_FD", False)
+    with pytest.raises(ContainmentError, match="openat/dir_fd"):
+        TemplateDirectory(tmp_path)
+
+
+def test_directory_close_releases_its_trusted_root_descriptor(tmp_path) -> None:
+    directory = TemplateDirectory(tmp_path)
+    root_fd = directory._root_fd
+
+    directory.close()
+    directory.close()
+
+    assert directory._root_fd == -1
+    with pytest.raises(OSError):
+        os.fstat(root_fd)
 
 
 def test_include_cycle_detected(tmp_path) -> None:

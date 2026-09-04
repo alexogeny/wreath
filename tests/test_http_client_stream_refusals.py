@@ -7,9 +7,11 @@ import pytest
 
 from wreath.http_client import (
     ClientLimits,
+    ClientTimeout,
     DestinationPolicy,
     HTTPClient,
     ProtocolError,
+    ResponseTimeout,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -38,19 +40,37 @@ def _scripted(response: bytes, *, hang_up: bool = True):
     return handler
 
 
-async def _drain(port: int, *, limits: ClientLimits | None = None) -> None:
+def _hanging(response: bytes):
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(response)
+        await writer.drain()
+        await reader.read()
+
+    return handler
+
+
+async def _drain(
+    port: int,
+    *,
+    limits: ClientLimits | None = None,
+    client_timeout: ClientTimeout | None = None,
+    chunks: list[bytes] | None = None,
+) -> None:
     """Stream `/x` from the scripted upstream, consuming the whole body."""
     client = HTTPClient(
         "s",
         base_url=f"http://127.0.0.1:{port}",
         destination=DestinationPolicy(allow_loopback=True),
         limits=limits or ClientLimits(),
+        timeout=client_timeout or ClientTimeout(),
     )
     await client.start()
     try:
         async with client.stream("GET", "/x") as response:
-            async for _chunk in response.iter_bytes():
-                pass
+            async for chunk in response.iter_bytes():
+                if chunks is not None:
+                    chunks.append(chunk)
     finally:
         await client.close()
 
@@ -62,7 +82,7 @@ async def test_a_chunk_size_line_over_the_limit_is_refused() -> None:
     )
     try:
         with pytest.raises(ProtocolError, match="chunk line exceeds limit"):
-            await _drain(port)
+            await _drain(port, limits=ClientLimits(read_high_water=64))
     finally:
         server.close()
         await server.wait_closed()
@@ -92,6 +112,18 @@ async def test_an_empty_chunk_size_is_refused() -> None:
         await server.wait_closed()
 
 
+async def test_an_upstream_that_dies_mid_chunk_size_line_is_refused() -> None:
+    server, port = await _serve(
+        _scripted(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n1")
+    )
+    try:
+        with pytest.raises(ProtocolError, match="upstream closed mid-chunk line"):
+            await _drain(port)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 async def test_trailers_over_the_header_limit_are_refused() -> None:
     trailer = b"x-pad: " + b"p" * 400 + b"\r\n"
     server, port = await _serve(
@@ -102,6 +134,161 @@ async def test_trailers_over_the_header_limit_are_refused() -> None:
     try:
         with pytest.raises(ProtocolError, match="trailers exceed configured limit"):
             await _drain(port, limits=ClientLimits(max_response_header_bytes=1024))
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_a_trailer_line_over_the_stream_limit_is_refused() -> None:
+    trailer = b"x-pad: " + b"p" * 400 + b"\r\n"
+    server, port = await _serve(
+        _scripted(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n0\r\n"
+            + trailer
+            + b"\r\n"
+        )
+    )
+    try:
+        with pytest.raises(ProtocolError, match="trailers exceed stream limit"):
+            await _drain(port, limits=ClientLimits(read_high_water=64))
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_an_upstream_that_dies_mid_trailer_line_is_refused() -> None:
+    server, port = await _serve(
+        _scripted(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n0\r\nx-partial: value"
+        )
+    )
+    try:
+        with pytest.raises(ProtocolError, match="upstream closed mid-trailer"):
+            await _drain(port)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_a_streaming_body_silence_raises_response_timeout() -> None:
+    server, port = await _serve(
+        _hanging(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n")
+    )
+    try:
+        with pytest.raises(ResponseTimeout, match="timed out reading response body"):
+            await _drain(port, client_timeout=ClientTimeout(response_body=0.01))
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    (
+        (b"HTTP/1.1 200 OK\r\n\r\nx", "close-delimited"),
+        (
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n",
+            "response chunk",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n0\r\nx: ",
+            "response trailer",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nx",
+            "response chunk",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n1\r\nx",
+            "response chunk",
+        ),
+    ),
+    ids=("close-delimited", "chunk-line", "trailer", "chunk-body", "chunk-terminator"),
+)
+async def test_streaming_framing_silence_raises_response_timeout(
+    response: bytes, message: str
+) -> None:
+    server, port = await _serve(_hanging(response))
+    try:
+        with pytest.raises(ResponseTimeout, match=message):
+            await asyncio.wait_for(
+                _drain(port, client_timeout=ClientTimeout(response_body=0.01)), 0.05
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_a_timed_out_stream_does_not_repeat_a_partial_chunk() -> None:
+    response = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nx"
+    server, port = await _serve(_hanging(response))
+    chunks: list[bytes] = []
+    try:
+        with pytest.raises(ResponseTimeout, match="response chunk"):
+            await _drain(
+                port,
+                client_timeout=ClientTimeout(response_body=0.01),
+                chunks=chunks,
+            )
+        assert chunks == [b"x"]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_an_upstream_that_dies_mid_chunk_terminator_is_refused() -> None:
+    server, port = await _serve(
+        _scripted(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n1\r\nx\r")
+    )
+    try:
+        with pytest.raises(ProtocolError, match="upstream closed mid-chunk terminator"):
+            await _drain(port)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_malformed_streaming_trailer_is_refused() -> None:
+    server, port = await _serve(
+        _scripted(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
+            b"0\r\nnot-a-header\r\n\r\n"
+        )
+    )
+    try:
+        with pytest.raises(ProtocolError, match="header"):
+            await _drain(port)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("name", (b"content-length", b"transfer-encoding"))
+async def test_streaming_response_refuses_framing_fields_in_trailers(name: bytes) -> None:
+    server, port = await _serve(
+        _scripted(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
+            b"0\r\n" + name + b": 1\r\n\r\n"
+        )
+    )
+    try:
+        with pytest.raises(ProtocolError, match="framing field"):
+            await _drain(port)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_malformed_streaming_response_framing_is_a_protocol_error() -> None:
+    server, port = await _serve(
+        _scripted(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n"
+            b"transfer-encoding: chunked\r\n\r\n0\r\n\r\n"
+        )
+    )
+    try:
+        with pytest.raises(ProtocolError, match="conflicting"):
+            await _drain(port)
     finally:
         server.close()
         await server.wait_closed()

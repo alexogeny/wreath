@@ -26,8 +26,9 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
+from urllib.parse import urlsplit
 
 from ._b64 import b64url_decode, b64url_encode
 from ._curves import P256_G, P256_N, p256_on_curve, p256_scalarmult_secret
@@ -64,6 +65,41 @@ class PushError(Exception):
 
 
 Point = tuple[int, int] | None
+
+
+def _endpoint_parts(endpoint: str) -> tuple[str, str]:
+    message = (
+        f"push endpoint {endpoint!r} must be an absolute https endpoint "
+        "without credentials or fragment"
+    )
+    if any(ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in endpoint):
+        raise PushError(message)
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as error:
+        raise PushError(message) from error
+    if not parsed.scheme:
+        raise PushError(f"push endpoint {endpoint!r} has no scheme")
+    if (
+        port == 0
+        or parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.fragment
+    ):
+        raise PushError(message)
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise PushError(message) from error
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    if port not in (None, 443):
+        authority += f":{port}"
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return f"https://{authority}", target
 
 
 def _mul(k: int, point: tuple[int, int]) -> Point:
@@ -221,13 +257,40 @@ class VapidKeys:
             reject a token without one.
     """
 
-    private: int
+    private: int = field(repr=False)
     subject: str
 
     def __post_init__(self) -> None:
         if not 1 <= self.private < _N:
             raise PushError("a P-256 private key is in [1, n)")
-        if not self.subject.startswith(("mailto:", "https://")):
+        invalid = any(
+            ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F
+            for character in self.subject
+        )
+        try:
+            parsed = urlsplit(self.subject)
+            port = parsed.port
+            if parsed.scheme == "https" and parsed.hostname is not None:
+                parsed.hostname.encode("idna")
+        except (UnicodeError, ValueError) as error:
+            raise PushError(
+                "the VAPID subject must be a mailto: or https: URL a push service "
+                f"operator can contact you at; got {self.subject!r}"
+            ) from error
+        mailto = (
+            parsed.scheme == "mailto"
+            and not parsed.netloc
+            and bool(parsed.path)
+            and not parsed.fragment
+        )
+        https = (
+            parsed.scheme == "https"
+            and parsed.hostname is not None
+            and parsed.username is None
+            and port != 0
+            and not parsed.fragment
+        )
+        if invalid or not (mailto or https):
             raise PushError(
                 "the VAPID subject must be a mailto: or https: URL a push service "
                 f"operator can contact you at; got {self.subject!r}"
@@ -275,10 +338,7 @@ def vapid_headers(
             f"a VAPID token may not live longer than {MAX_VAPID_LIFETIME} seconds "
             f"(RFC 8292 §2); got {lifetime}"
         )
-    scheme, _, rest = endpoint.partition("://")
-    if not rest:
-        raise PushError(f"push endpoint {endpoint!r} has no scheme")
-    audience = f"{scheme}://{rest.split('/', 1)[0]}"
+    audience, _ = _endpoint_parts(endpoint)
     issued = int(time.time() if now is None else now)
     header = _b64(b'{"typ":"JWT","alg":"ES256"}')
     claims = _b64(
@@ -306,7 +366,7 @@ class PushSubscription:
     #: The client's public key, base64url, unpadded — 65 bytes decoded.
     p256dh: str
     #: The client's 16-byte shared authentication secret, base64url.
-    auth: str
+    auth: str = field(repr=False)
 
     @classmethod
     def from_json(cls, payload: dict[str, object]) -> PushSubscription:
@@ -315,9 +375,22 @@ class PushSubscription:
         if not isinstance(keys, dict):
             raise PushError("a push subscription needs a 'keys' object")
         endpoint = payload.get("endpoint")
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+        if not isinstance(endpoint, str):
             raise PushError("a push subscription needs an https endpoint")
-        return cls(endpoint, str(keys.get("p256dh", "")), str(keys.get("auth", "")))
+        _endpoint_parts(endpoint)
+        p256dh = keys.get("p256dh")
+        if not isinstance(p256dh, str) or len(p256dh) != 87:
+            raise PushError("a push subscription p256dh key is 87 base64url characters")
+        auth = keys.get("auth")
+        if not isinstance(auth, str) or len(auth) != 22:
+            raise PushError("a push subscription auth secret is 22 base64url characters")
+        try:
+            client_key = b64url_decode(p256dh)
+            b64url_decode(auth)
+        except ValueError as error:
+            raise PushError("push subscription p256dh and auth values must be base64url") from error
+        _decode_point(client_key)
+        return cls(endpoint, p256dh, auth)
 
     def client_key(self) -> bytes:
         return b64url_decode(self.p256dh)

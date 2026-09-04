@@ -247,10 +247,14 @@ class LiveDocument:
         max_per_principal: int = 4,
         keepalive: float = DEFAULT_KEEPALIVE,
     ) -> None:
-        if max_subscribers < 0:
-            raise ValueError("max_subscribers must be non-negative")
-        if max_per_principal < 0:
-            raise ValueError("max_per_principal must be non-negative")
+        if type(max_subscribers) is not int or max_subscribers < 0:
+            raise ValueError(
+                "max_subscribers must be non-negative; expected a non-negative integer"
+            )
+        if type(max_per_principal) is not int or max_per_principal < 0:
+            raise ValueError(
+                "max_per_principal must be non-negative; expected a non-negative integer"
+            )
         if not isfinite(keepalive) or keepalive <= 0:
             raise ValueError("keepalive must be finite and positive")
         self._by_principal: dict[str, dict[Subscription, None]] = {}

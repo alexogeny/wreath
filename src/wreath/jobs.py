@@ -42,7 +42,7 @@ from ._doorbell import BACKOFF_CAP as DOORBELL_BACKOFF_CAP  # noqa: F401
 from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
-from ._jobcore import compute_backoff, dedup_key, validate_identifier
+from ._jobcore import check_durable_payload, compute_backoff, dedup_key, validate_identifier
 from ._leased import claim_sql, fenced_update_sql
 from ._nplusone import NPlusOneDetected as _NPlusOneDetected
 from ._pgcatalog import column_exists
@@ -202,6 +202,8 @@ class JobRunner:
         progress: Any = None,
         attempts: Any = None,
     ) -> None:
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+            raise ValueError("concurrency must be a positive integer")
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         # A bare number is seconds, which is what these parameters have always
@@ -210,6 +212,8 @@ class JobRunner:
         poll_interval = Duration.of(poll_interval).total_seconds()
         if lease <= 0 or poll_interval <= 0:
             raise ValueError("lease and poll_interval must be positive")
+        if isinstance(batch, bool) or not isinstance(batch, int):
+            raise ValueError("batch must be a positive integer")
         if batch < 1:
             raise ValueError("batch must be >= 1")
         self._db = database
@@ -394,8 +398,29 @@ class JobRunner:
         _validate_identifier(name, "task name")
         if name in self._tasks:
             raise ValueError(f"duplicate task: {name!r}")
+        if isinstance(retries, bool) or not isinstance(retries, int):
+            raise ValueError("retries must be a non-negative integer")
         if retries < 0:
             raise ValueError("retries cannot be negative")
+        if retries > 2_147_483_646:
+            raise ValueError("retries must be a non-negative integer no greater than 2147483646")
+        if backoff not in {"exp", "linear", "fixed"}:
+            raise ValueError("backoff must be 'exp', 'linear', or 'fixed'")
+        for option, value in (
+            ("backoff_base", backoff_base),
+            ("backoff_factor", backoff_factor),
+            ("backoff_cap", backoff_cap),
+            ("backoff_jitter", backoff_jitter),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{option} must be a non-negative finite number")
+        if backoff_jitter > 1:
+            raise ValueError("backoff_jitter must be between 0 and 1")
         if timeout is not None:
             if not isfinite(timeout):
                 raise ValueError("timeout must be finite")
@@ -699,12 +724,27 @@ class JobRunner:
         if task not in self._tasks:
             raise KeyError(f"unknown task: {task!r} (register with @runner.task)")
         tenant = check_enqueue_tenant(tenant)
+        if type(coalesce) is not bool:
+            raise ValueError("coalesce must be a boolean")
         if coalesce and key is None:
             raise ValueError(
                 "coalesce= needs a key: there is nothing to coalesce onto without "
                 "one, and a silent no-op would read as a merge that happened"
             )
+        if max_attempts is not None and (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= 2_147_483_647
+        ):
+            raise ValueError("max_attempts must be a positive integer no greater than 2147483647")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not -(2**31) <= priority < 2**31
+        ):
+            raise ValueError("priority must be a PostgreSQL integer from -2147483648 to 2147483647")
         payload = json.dumps(list(args))
+        check_durable_payload(len(payload))
         dk = dedup_key(self._name, key) if key is not None else None
         max_att = max_attempts if max_attempts is not None else self._tasks[task].max_attempts
         bound = _telemetry.outbound_context.get()
@@ -1071,8 +1111,13 @@ class JobRunner:
         what makes `launch(key=...)` eventually raise `JobVanished` --
         the retention this table always assumed and never had.
         """
-        if older_than <= 0:
-            raise ValueError("older_than must be positive")
+        if (
+            isinstance(older_than, bool)
+            or not isinstance(older_than, (int, float))
+            or not isfinite(older_than)
+            or older_than <= 0
+        ):
+            raise ValueError("older_than must be a positive finite number")
         await self._exec(
             f"DELETE FROM {self._table} WHERE queue=$1 "
             "AND state IN ('done', 'dead') "
@@ -1397,13 +1442,13 @@ class JobRunner:
         caller's guard would have gone unnoticed.
         """
         recorder = self._attempts
-        if not recorder.captures(
+        if recorder.captures(
             task=record.task,
             outcome=record.outcome,
             attempt=record.attempt,
             max_attempts=record.max_attempts,
             job_id=record.job_id,
-        ):
+        ) is not True:
             return
         recorder.write(record, trace)
 
@@ -1625,6 +1670,10 @@ class JobRunner:
         args = row["args"]
         if isinstance(args, (str, bytes)):
             args = json.loads(args)
+        if args is None:
+            args = []
+        elif not isinstance(args, list):
+            raise ValueError("persisted job arguments must be a JSON array")
         # Asked of the row rather than of `self`, because a claim made before an
         # upgrade can still be in flight after one. Guarding on the key's
         # presence keeps both shapes readable by one function.
@@ -1635,7 +1684,7 @@ class JobRunner:
         return _Claimed(
             id=row["id"],
             task=row["task"],
-            args=list(args or []),
+            args=list(args),
             tenant=row["tenant"],
             attempts=row["attempts"],
             max_attempts=row["max_attempts"],
@@ -1895,6 +1944,9 @@ async def read_jobs(
     a job enqueued outside a traced request both give `None`; telling them apart
     is `wreath schema check`'s job, not this one's.
     """
+    schema = _validate_identifier(schema, "schema")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+        raise ValueError("limit must be an integer from 1 to 10000")
     traced = await _has_trace_column(connection, schema=schema)
     columns = _JOB_COLUMNS + (", trace_context" if traced else "")
     clauses = []
@@ -1907,7 +1959,7 @@ async def read_jobs(
         args.append(queue)
         clauses.append(f"queue = ${len(args)}")
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    args.append(int(limit))
+    args.append(limit)
     rows = await connection.fetch(
         f'SELECT {columns} FROM "{schema}".jobs{where} '
         f"ORDER BY updated_at DESC, id DESC LIMIT ${len(args)}",

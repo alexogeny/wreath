@@ -114,7 +114,7 @@ class SlackDestination:
 
 @dataclass(frozen=True, slots=True)
 class SlackResponseURL:
-    url: str
+    url: str = field(repr=False)
     installation: str
 
 
@@ -657,9 +657,13 @@ class Slack:
         )
 
     def response_url(self, url: str, *, installation: str) -> SlackResponseURL:
+        has_control = any(
+            ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in url
+        )
         parsed = urlsplit(url)
         if (
-            parsed.scheme != "https"
+            has_control
+            or parsed.scheme != "https"
             or parsed.hostname not in _RESPONSE_HOSTS
             or parsed.username is not None
             or parsed.port not in (None, 443)

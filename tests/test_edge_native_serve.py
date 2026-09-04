@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import os
 import socket
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -38,6 +38,21 @@ def test_native_endpoint_preserves_explicit_ports_and_scheme_defaults(
 @pytest.mark.parametrize(
     "url",
     [
+        "http://example.test:0",
+        "http://example.test:notaport",
+        " http://example.test",
+        "http://example.test\t.evil",
+        "http://example.test\x85",
+    ],
+)
+def test_native_endpoint_refuses_ambiguous_origins(url: str) -> None:
+    with pytest.raises(ValueError, match="upstream"):
+        _endpoint(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "http://user:secret@example.test",
         "http://example.test/api",
         "http://example.test?tenant=acme",
@@ -53,14 +68,33 @@ async def test_native_serve_refuses_upstream_urls_that_are_not_origins(url: str)
     ("option", "value", "message"),
     [
         ("connections", 0, "connections must be at least 1"),
+        ("connections", True, "connections must be an integer"),
+        ("connections", 1.5, "connections must be an integer"),
+        ("connections", float("nan"), "connections must be an integer"),
+        ("connections", float("inf"), "connections must be an integer"),
         ("max_body", -1, "max_body must be non-negative"),
+        ("max_body", True, "max_body must be an integer"),
+        ("max_body", 1.5, "max_body must be an integer"),
+        ("max_body", float("nan"), "max_body must be an integer"),
+        ("max_body", float("inf"), "max_body must be an integer"),
+        ("max_waiting", 0, "max_waiting must be at least 1"),
+        ("max_waiting", True, "max_waiting must be an integer"),
+        ("max_waiting", 1.5, "max_waiting must be an integer"),
+        ("max_waiting", float("nan"), "max_waiting must be an integer"),
+        ("max_waiting", float("inf"), "max_waiting must be an integer"),
         ("backlog", 0, "backlog must be at least 1"),
+        ("backlog", True, "backlog must be an integer"),
+        ("backlog", 1.5, "backlog must be an integer"),
+        ("backlog", float("nan"), "backlog must be an integer"),
+        ("backlog", float("inf"), "backlog must be an integer"),
+        ("queue_timeout", 0, "queue_timeout must be finite and positive"),
         ("queue_timeout", float("nan"), "queue_timeout must be finite"),
         ("queue_timeout", float("inf"), "queue_timeout must be finite"),
+        ("queue_timeout", True, "expected a finite positive number of seconds"),
     ],
 )
 async def test_native_serve_refuses_invalid_resource_limits(
-    option: str, value: int | float, message: str
+    option: str, value: Any, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
         await _serve()(

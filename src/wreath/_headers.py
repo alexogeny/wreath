@@ -24,4 +24,8 @@ find_header: Callable[[list[tuple[bytes, bytes]], bytes], bytes | None] = _core.
 #: the headers nobody reads.
 build_header_map: Callable[[list[tuple[bytes, bytes]]], dict[bytes, bytes]] = _core.build_header_map
 
-__all__ = ["build_header_map", "find_header"]
+validate_response_headers: Callable[
+    [list[tuple[bytes, bytes]]], tuple[bool, bytes | None]
+] = _core.validate_response_headers
+
+__all__ = ["build_header_map", "find_header", "validate_response_headers"]

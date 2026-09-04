@@ -47,6 +47,11 @@ class DPoPProof:
 
 
 def _target_uri(uri: str, *, proof: bool) -> str:
+    if any(ord(char) <= 0x20 or 0x7F <= ord(char) <= 0x9F for char in uri):
+        raise DPoPRefusal(
+            "invalid-target-uri",
+            "DPoP target URI must not contain spaces or control characters",
+        )
     try:
         parsed = urlsplit(uri)
         port = parsed.port
@@ -211,8 +216,12 @@ class DPoPVerifier:
                 "stale-proof",
                 "DPoP proof creation time is outside the accepted freshness window",
             )
-        if nonce is not None and claims.get("nonce") != nonce:
-            raise DPoPRefusal("nonce-mismatch", "DPoP proof nonce does not match the server nonce")
+        if nonce is not None:
+            proof_nonce = claims.get("nonce")
+            if not isinstance(proof_nonce, str) or not hmac.compare_digest(proof_nonce, nonce):
+                raise DPoPRefusal(
+                    "nonce-mismatch", "DPoP proof nonce does not match the server nonce"
+                )
         access_token_hash = ""
         if access_token is not None:
             try:

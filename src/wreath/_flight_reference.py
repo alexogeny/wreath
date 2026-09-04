@@ -43,6 +43,30 @@ _CHUNK = struct.Struct(BYTE_ORDER + "4sII")  # tag, byte_length, crc32
 
 _CONTAINER_VERSION = 1
 _FLAG_HAS_EVENTS = 1 << 0
+_KNOWN_FLAGS = _FLAG_HAS_EVENTS
+
+_MAX_RING_RECORDS = 1 << 24
+_MAX_ACTIVE_REQUESTS = 1 << 20
+_MAX_PHASE_SLOTS = 1 << 20
+_MAX_HISTOGRAMS = (1 << 16) + 1
+_MAX_CAPTURE_SLABS = 1 << 16
+_MAX_CAPTURE_BYTES = 1 << 30
+
+
+def _bounded_unsigned(value: object, name: str, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer from 0 through {maximum}")
+    parsed = int(value)
+    if not 0 <= parsed <= maximum:
+        raise ValueError(f"{name} must be an integer from 0 through {maximum}")
+    return parsed
+
+
+def _validate_capture_budget(mode: int, capture_slabs: int, slab_bytes: int) -> None:
+    if mode >= Mode.FORENSIC and capture_slabs * slab_bytes > _MAX_CAPTURE_BYTES:
+        raise ValueError(
+            "capture_slabs * slab_bytes must not exceed 1073741824 bytes"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +103,8 @@ def decode_recording(data: bytes) -> Recording:
         raise SchemaError(f"unsupported container version {container_ver}")
     if schema_ver != SCHEMA_VERSION:
         raise SchemaError(f"unsupported schema version {schema_ver}")
+    if flags & ~_KNOWN_FLAGS:
+        raise SchemaError(f"unsupported container flags {flags:#x}")
     offset = _HEADER.size
     declared_hash = data[offset : offset + IMAGE_HASH_BYTES]
     offset += IMAGE_HASH_BYTES
@@ -300,11 +326,38 @@ class ReferenceRecorder:
         slab_bytes: int = 65536,
         capture_hash_key: tuple[int, int] | None = None,
     ) -> None:
+        mode = _bounded_unsigned(mode, "mode", int(Mode.FORENSIC))
+        worker_id = _bounded_unsigned(worker_id, "worker_id", 0xFFFFFFFF)
+        ring_records = _bounded_unsigned(
+            ring_records, "ring_records", _MAX_RING_RECORDS
+        )
+        active_requests = _bounded_unsigned(
+            active_requests, "active_requests", _MAX_ACTIVE_REQUESTS
+        )
+        histogram_count = _bounded_unsigned(
+            histogram_count, "histogram_count", _MAX_HISTOGRAMS
+        )
+        phase_slots = _bounded_unsigned(phase_slots, "phase_slots", _MAX_PHASE_SLOTS)
+        detailed_slow_us = _bounded_unsigned(
+            detailed_slow_us, "detailed_slow_us", _U64
+        )
+        capture_slabs = _bounded_unsigned(
+            capture_slabs, "capture_slabs", _MAX_CAPTURE_SLABS
+        )
+        slab_bytes = _bounded_unsigned(slab_bytes, "slab_bytes", 0xFFFFFFFF)
         if ring_records & (ring_records - 1):
             raise ValueError("ring_records must be a power of two")
         if not 0.0 <= detailed_sample_rate <= 1.0:
             raise ValueError("detailed_sample_rate must be in [0, 1]")
-        self.mode = int(mode)
+        _validate_capture_budget(mode, capture_slabs, slab_bytes)
+        if capture_hash_key is not None:
+            if type(capture_hash_key) is not tuple or len(capture_hash_key) != 2:
+                raise TypeError("capture_hash_key must be a (k0, k1) tuple")
+            capture_hash_key = (
+                _bounded_unsigned(capture_hash_key[0], "capture_hash_key[0]", _U64),
+                _bounded_unsigned(capture_hash_key[1], "capture_hash_key[1]", _U64),
+            )
+        self.mode = mode
         self._worker_id = worker_id
         # Clock calibration captured at creation, mirroring the native worker: the
         # monotonic base the server's now_ns shares, paired with the wall clock.
@@ -326,7 +379,7 @@ class ReferenceRecorder:
         self._capture_returned: list[int] = []  # sink -> writer return queue
         self._capture_high_water = 0
         k = capture_hash_key or (0, 0)
-        self._hash_k0, self._hash_k1 = k[0] & _U64, k[1] & _U64
+        self._hash_k0, self._hash_k1 = k
         self._ring_records = ring_records
         self._completion_summaries = completion_summaries
         self._ring: list[bytes] = []
@@ -622,7 +675,7 @@ class ReferenceRecorder:
 
     def _publish(self, cell: bytes) -> bool:
         """Append a 64-byte cell to the ring, or count a RING_FULL loss."""
-        if self._ring_records and len(self._ring) >= self._ring_records:
+        if self._ring_records == 0 or len(self._ring) >= self._ring_records:
             self._losses[LossReason.RING_FULL] += 1
             return False
         self._ring.append(cell)

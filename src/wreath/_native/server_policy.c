@@ -868,20 +868,101 @@ method_allowed(PyObject *methods, PyObject *method)
 
 
 static int
+cors_token_char(unsigned char value)
+{
+    return (value >= '0' && value <= '9') ||
+        (value >= 'A' && value <= 'Z') ||
+        (value >= 'a' && value <= 'z') ||
+        value == '!' || value == '#' || value == '$' || value == '%' ||
+        value == '&' || value == '\'' || value == '*' || value == '+' ||
+        value == '-' || value == '.' || value == '^' || value == '_' ||
+        value == '`' || value == '|' || value == '~';
+}
+
+
+static int
+cors_headers_allowed(PyObject *allowed, int allow_all, PyObject *requested)
+{
+    if (requested == NULL) return 1;
+    if (!PyBytes_Check(requested)) return 0;
+    const char *data = PyBytes_AS_STRING(requested);
+    Py_ssize_t length = PyBytes_GET_SIZE(requested);
+    Py_ssize_t start = 0;
+    while (start <= length) {
+        Py_ssize_t end = start;
+        while (end < length && data[end] != ',') end++;
+        Py_ssize_t next = end;
+        Py_ssize_t token_start = start;
+        while (token_start < end && (data[token_start] == ' ' || data[token_start] == '\t'))
+            token_start++;
+        while (end > token_start && (data[end - 1] == ' ' || data[end - 1] == '\t')) end--;
+        if (token_start == end) return 0;
+        for (Py_ssize_t i = token_start; i < end; i++) {
+            if (!cors_token_char((unsigned char)data[i])) return 0;
+        }
+        if (!allow_all) {
+            Py_ssize_t token_size = end - token_start;
+            PyObject *token = PyBytes_FromStringAndSize(NULL, token_size);
+            if (token == NULL) return -1;
+            char *normalized = PyBytes_AS_STRING(token);
+            for (Py_ssize_t i = 0; i < token_size; i++) {
+                normalized[i] = (char)wreath_ascii_lower(
+                    (uint8_t)data[token_start + i]);
+            }
+            int found = PySet_Contains(allowed, token);
+            Py_DECREF(token);
+            if (found <= 0) return found;
+        }
+        if (next == length) return 1;
+        start = next + 1;
+    }
+    return 0;
+}
+
+
+static int
 cors_preflight(WreathPolicyState *state, PyObject *cors, PyObject *method,
                PyObject *headers, WreathPolicyReply *reply)
 {
-    PyObject *origin = find_header(headers, "origin", 6, NULL);
-    if (origin != NULL) state->origin = Py_NewRef(origin);
+    Py_ssize_t origin_count = 0;
+    PyObject *origin = find_header(headers, "origin", 6, &origin_count);
+    if (origin_count == 1) state->origin = Py_NewRef(origin);
     if (PyUnicode_CompareWithASCIIString(method, "OPTIONS") != 0) return 0;
+    Py_ssize_t requested_count = 0;
     PyObject *requested = find_header(
-        headers, "access-control-request-method", 29, NULL);
+        headers, "access-control-request-method", 29, &requested_count);
+    if (origin_count > 1 || requested_count > 1) {
+        Py_CLEAR(state->origin);
+        if (reply_body(reply, 400, "text/plain", "duplicate CORS header", 21) < 0)
+            return -1;
+        return 1;
+    }
     if (origin == NULL || requested == NULL) return 0;
+    Py_ssize_t requested_headers_count = 0;
+    PyObject *requested_headers = find_header(
+        headers, "access-control-request-headers", 30, &requested_headers_count);
+    if (requested_headers_count > 1) {
+        Py_CLEAR(state->origin);
+        if (reply_body(reply, 400, "text/plain", "duplicate CORS header", 21) < 0)
+            return -1;
+        return 1;
+    }
+    int allowed_headers = cors_headers_allowed(
+        PyTuple_GET_ITEM(cors, 5), PyTuple_GET_ITEM(cors, 6) == Py_True,
+        requested_headers);
+    if (allowed_headers < 0) return -1;
+    if (!allowed_headers) {
+        Py_CLEAR(state->origin);
+        if (reply_body(reply, 403, "text/plain", "disallowed header", 17) < 0 ||
+            append_literal(reply->headers, "vary", "origin") < 0) return -1;
+        return 1;
+    }
     int allowed_origin = origin_allowed(cors, origin);
     if (allowed_origin < 0) return -1;
     int allowed_method = method_allowed(PyTuple_GET_ITEM(cors, 2), requested);
     if (allowed_method < 0) return -1;
     if (!allowed_method || !allowed_origin) {
+        Py_CLEAR(state->origin);
         const char *body = allowed_method ? "disallowed origin" : "disallowed method";
         if (reply_body(reply, 403, "text/plain", body, 17) < 0 ||
             append_literal(reply->headers, "vary", "origin") < 0) return -1;
@@ -1046,8 +1127,10 @@ proxy_host:
 
 
 static PyObject *
-cookie_value(PyObject *headers, PyObject *wanted)
+cookie_value(PyObject *headers, PyObject *wanted, int *ambiguous)
 {
+    if (ambiguous != NULL) *ambiguous = 0;
+    PyObject *found = NULL;
     const char *wanted_data = PyBytes_AS_STRING(wanted);
     Py_ssize_t wanted_size = PyBytes_GET_SIZE(wanted);
     Py_ssize_t count = wreath_headers_count(headers);
@@ -1058,7 +1141,10 @@ cookie_value(PyObject *headers, PyObject *wanted)
         Py_ssize_t name_size;
         Py_ssize_t size;
         if (wreath_headers_view(headers, i, &name, &name_size,
-                                &data, &size) < 0) return NULL;
+                                &data, &size) < 0) {
+            Py_XDECREF(found);
+            return NULL;
+        }
         if (name_size != 6 || memcmp(name, "cookie", 6) != 0) continue;
         Py_ssize_t start = 0;
         while (start <= size) {
@@ -1074,14 +1160,24 @@ cookie_value(PyObject *headers, PyObject *wanted)
             if (equals != NULL && equals - (data + low) == wanted_size &&
                 memcmp(data + low, wanted_data, (size_t)wanted_size) == 0) {
                 Py_ssize_t value_start = (equals - data) + 1;
-                return PyUnicode_DecodeLatin1(
+                if (ambiguous == NULL) {
+                    return PyUnicode_DecodeLatin1(
+                        data + value_start, end - value_start, NULL);
+                }
+                if (found != NULL) {
+                    Py_DECREF(found);
+                    *ambiguous = 1;
+                    return NULL;
+                }
+                found = PyUnicode_DecodeLatin1(
                     data + value_start, end - value_start, NULL);
+                if (found == NULL) return NULL;
             }
             if (separator == NULL) break;
             start = separator_at + 1;
         }
     }
-    return NULL;
+    return found;
 }
 
 
@@ -1108,10 +1204,87 @@ csrf_new_token(PyObject *csrf, long long now)
 }
 
 
+typedef struct {
+    PyObject *host;
+    PyObject *origin;
+    PyObject *referer;
+    PyObject *site;
+    PyObject *submitted;
+    Py_ssize_t origin_count;
+    Py_ssize_t referer_count;
+    Py_ssize_t site_count;
+    Py_ssize_t submitted_count;
+} CsrfRequestHeaders;
+
+
 static int
-csrf_origin_valid(WreathPolicyState *state, PyObject *csrf, PyObject *headers)
+csrf_record_header(PyObject *headers, Py_ssize_t index,
+                   PyObject **first, Py_ssize_t *matches)
 {
-    PyObject *host = find_header(headers, "host", 4, NULL);
+    (*matches)++;
+    if (*first != NULL) return 0;
+    *first = wreath_headers_value_borrowed(headers, index);
+    return *first == NULL ? -1 : 0;
+}
+
+
+static int
+csrf_request_headers(PyObject *headers, PyObject *submitted_name,
+                     CsrfRequestHeaders *found)
+{
+    memset(found, 0, sizeof(*found));
+    const char *submitted_data = PyBytes_AS_STRING(submitted_name);
+    Py_ssize_t submitted_size = PyBytes_GET_SIZE(submitted_name);
+    Py_ssize_t count = wreath_headers_count(headers);
+    if (count < 0) return -1;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(headers, i, &name, &name_size,
+                                &value, &value_size) < 0) return -1;
+        if (ascii_equal_ci(name, name_size, "host", 4)) {
+            if (found->host == NULL) {
+                found->host = wreath_headers_value_borrowed(headers, i);
+                if (found->host == NULL) return -1;
+            }
+        }
+        if (ascii_equal_ci(name, name_size, "origin", 6)) {
+            if (csrf_record_header(headers, i, &found->origin,
+                                   &found->origin_count) < 0) return -1;
+        }
+        if (ascii_equal_ci(name, name_size, "referer", 7)) {
+            if (csrf_record_header(headers, i, &found->referer,
+                                   &found->referer_count) < 0) return -1;
+        }
+        if (ascii_equal_ci(name, name_size, "sec-fetch-site", 14)) {
+            if (csrf_record_header(headers, i, &found->site,
+                                   &found->site_count) < 0) return -1;
+        }
+        if (ascii_equal_ci(name, name_size, submitted_data, submitted_size)) {
+            if (csrf_record_header(headers, i, &found->submitted,
+                                   &found->submitted_count) < 0) return -1;
+        }
+    }
+    return 0;
+}
+
+
+static int
+csrf_has_duplicate_security_header(const CsrfRequestHeaders *headers)
+{
+    return headers->origin_count > 1 || headers->referer_count > 1 ||
+        headers->site_count > 1 ||
+        headers->submitted_count > 1;
+}
+
+
+static int
+csrf_origin_valid(WreathPolicyState *state, PyObject *csrf,
+                  const CsrfRequestHeaders *headers)
+{
+    PyObject *host = headers->host;
     if (host == NULL || state->scheme == NULL) return 0;
     PyObject *trusted_hosts = PyTuple_GET_ITEM(csrf, 8);
     if (PyTuple_GET_SIZE(trusted_hosts) > 0) {
@@ -1150,10 +1323,10 @@ csrf_origin_valid(WreathPolicyState *state, PyObject *csrf, PyObject *headers)
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(trusted); i++) {
         PyTuple_SET_ITEM(allowed, i + 1, Py_NewRef(PyTuple_GET_ITEM(trusted, i)));
     }
-    PyObject *candidate = find_header(headers, "origin", 6, NULL);
+    PyObject *candidate = headers->origin;
     PyObject *owned_candidate = NULL;
     if (candidate == NULL) {
-        PyObject *referer = find_header(headers, "referer", 7, NULL);
+        PyObject *referer = headers->referer;
         if (referer != NULL) {
             const char *data = PyBytes_AS_STRING(referer);
             Py_ssize_t size = PyBytes_GET_SIZE(referer);
@@ -1204,11 +1377,17 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
          PyObject *headers, WreathPolicyReply *reply)
 {
     state->csrf_config = csrf;
+    CsrfRequestHeaders request_headers;
+    if (csrf_request_headers(
+            headers, PyTuple_GET_ITEM(csrf, 3), &request_headers) < 0) return -1;
+    if (csrf_has_duplicate_security_header(&request_headers)) {
+        return reply_problem(reply, 403);
+    }
     int safe = PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
         PyUnicode_CompareWithASCIIString(method, "HEAD") == 0 ||
         PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0 ||
         PyUnicode_CompareWithASCIIString(method, "QUERY") == 0;
-    PyObject *site = find_header(headers, "sec-fetch-site", 14, NULL);
+    PyObject *site = request_headers.site;
     if (site != NULL) {
         if (safe || bytes_equal_literal(site, "same-origin", 11) ||
             bytes_equal_literal(site, "none", 4)) {
@@ -1220,7 +1399,11 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
         return reply_problem(reply, 403);
     }
     long long now = (long long)time(NULL);
-    PyObject *cookie = cookie_value(headers, PyTuple_GET_ITEM(csrf, 1));
+    int ambiguous_cookie = 0;
+    PyObject *cookie = cookie_value(
+        headers, PyTuple_GET_ITEM(csrf, 1), safe ? NULL : &ambiguous_cookie);
+    if (cookie == NULL && PyErr_Occurred()) return -1;
+    if (!safe && ambiguous_cookie) return reply_problem(reply, 403);
     if (safe) {
         int valid = 0;
         long long issued = 0;
@@ -1240,7 +1423,7 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
         state->csrf_issue = (unsigned char)renew;
         return state->csrf_token != NULL ? 0 : -1;
     }
-    PyObject *submitted = find_named_header(headers, PyTuple_GET_ITEM(csrf, 3));
+    PyObject *submitted = request_headers.submitted;
     int valid = 0;
     long long issued = now;
     if (cookie != NULL && submitted != NULL) {
@@ -1263,7 +1446,7 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
             }
         }
     }
-    int origin_valid = valid ? csrf_origin_valid(state, csrf, headers) : 0;
+    int origin_valid = valid ? csrf_origin_valid(state, csrf, &request_headers) : 0;
     if (origin_valid < 0) {
         Py_XDECREF(cookie);
         return -1;

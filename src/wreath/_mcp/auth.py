@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from .._auth.backends import BearerTokenBackend, Verifier
 from .._auth.models import Identity
@@ -51,6 +52,32 @@ class Unauthenticated(Exception):
         super().__init__(description or error or "unauthenticated")
         self.error = error
         self.description = description
+
+
+def _require_https_url(value: object, label: str) -> None:
+    message = (
+        f"MCPAuth {label} {value!r} must be an absolute HTTPS URL without "
+        "credentials, controls, or fragment"
+    )
+    if not isinstance(value, str):
+        raise ValueError(message)
+    if any(ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in value):
+        raise ValueError(message)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        if parsed.hostname is not None:
+            parsed.hostname.encode("idna")
+    except (UnicodeError, ValueError) as error:
+        raise ValueError(message) from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or port == 0
+        or parsed.fragment
+    ):
+        raise ValueError(message)
 
 
 def _audience_of(claims: Any) -> frozenset[str]:
@@ -111,12 +138,16 @@ class MCPAuth:
                 "endpoint. It is what a client asks for a token for, and what "
                 "that token's `aud` claim must name."
             )
-        if not tuple(self.authorization_servers):
+        _require_https_url(self.resource, "resource")
+        authorization_servers = tuple(self.authorization_servers)
+        if not authorization_servers:
             raise ValueError(
                 "MCPAuth needs at least one `authorization_servers=` entry. A "
                 "protected-resource document that names none tells a client it "
                 "must authenticate and gives it nowhere to do so."
             )
+        for authorization_server in authorization_servers:
+            _require_https_url(authorization_server, "authorization server")
         if self.verifier is not None:
             # A frozen dataclass, so the compiled backend goes in the same way
             # every other derived field would.

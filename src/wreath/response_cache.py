@@ -20,9 +20,9 @@ Safe by default — a response is **not** cached when it would leak or mislead:
 * never one marked `Cache-Control: no-store` or `private`.
 
 The default key is `scheme + authority + method + path + query` — i.e. a
-**shared/public** cache within one request authority. If a response depends on
-who is asking, pass a `key` that includes the principal (e.g.
-`lambda r: f"{r.identity.id}:{r.path}"`) or don't cache it.
+**shared/public** cache within one request authority, and authenticated callers
+bypass it. A custom `key` is private: Wreath scopes it by tenant, principal
+namespace/type/id, scheme, and authority before it reaches the store.
 
 ## The same signal, one layer out
 
@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from hashlib import blake2b
 from typing import Any, Final
@@ -129,7 +129,14 @@ def _authority_prefix(request: Any) -> str:
             header = getattr(request, "header", None)
             host = header("host") if callable(header) else None
     if not host:
-        return ""
+        scope = getattr(request, "_scope", None)
+        if not isinstance(scope, dict):
+            scope = getattr(request, "scope", None)
+        server = scope.get("server") if isinstance(scope, dict) else None
+        if server is None:
+            return ""
+        server_host, port = server
+        host = str(server_host) if port is None else f"{server_host}:{port}"
     scheme = str(getattr(request, "scheme", "http")).lower()
     authority = str(host).lower()
     return f"{len(scheme.encode('utf-8'))}:{scheme}:{len(authority.encode('utf-8'))}:{authority}:"
@@ -139,9 +146,23 @@ def _tenant_cache_key(request: Any, key: str) -> str:
     state = getattr(request, "state", None)
     tenant = getattr(state, "tenant", None)
     if tenant is None:
-        return key
+        return f"0:{key}"
     value = str(getattr(tenant, "key", tenant))
-    return f"{len(value.encode('utf-8'))}:{value}:{key}"
+    return f"1:{len(value.encode('utf-8'))}:{value}:{key}"
+
+
+def _private_cache_key(request: Any, key: str) -> str:
+    identity = getattr(request, "identity", None)
+    authority = _authority_prefix(request)
+    if identity is None:
+        return f"0:{authority}{key}"
+    namespace = str(getattr(identity, "namespace", ""))
+    kind = str(getattr(identity, "type", type(identity).__name__))
+    subject = str(getattr(identity, "id", identity))
+    framed = "".join(
+        f"{len(value.encode('utf-8'))}:{value}:" for value in (namespace, kind, subject)
+    )
+    return f"1:{framed}{authority}{key}"
 
 
 def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
@@ -234,11 +255,11 @@ class Tags:
     an unprefixed tag from one would purge the other's responses.
     """
 
-    secret: bytes = b""
+    secret: bytes = field(default=b"", repr=False)
     prefix: str = ""
 
     def __post_init__(self) -> None:
-        if isinstance(self.secret, str):
+        if not isinstance(self.secret, (bytes, bytearray)):
             raise TypeError("Tags(secret=...) must be bytes, not str")
         if not self.secret:
             raise ValueError(
@@ -246,6 +267,7 @@ class Tags:
                 "computed by anyone who knows your model names, and computing "
                 "it is all it takes to purge that tag"
             )
+        object.__setattr__(self, "secret", bytes(self.secret))
 
     def key(self, model: Any) -> str:
         """The surrogate key for one model."""
@@ -560,8 +582,10 @@ def cached(
     Args:
         ttl: seconds an entry stays fresh (`None` = until evicted by capacity).
         max_entries: hard ceiling on cached responses (LRU eviction past it).
-        key: builds the cache key from the request (default:
-            scheme+authority+method+path+query).
+        key: builds the application part of a private cache key. Wreath adds
+            tenant, principal, scheme, and authority ownership. The default is
+            the shared scheme+authority+method+path+query key; authenticated
+            callers bypass that shared cache.
         methods: request methods that may be served from cache.
         store: an explicit `BoundedCache` to share across handlers; a
             private one is created if omitted.
@@ -654,7 +678,10 @@ def cached(
                     _apply_header(result, _CACHE_STATUS, status_values["bypass"])
                 return result
             try:
-                cache_key = _tenant_cache_key(request, key(request))
+                base_key = key(request)
+                if not public_key:
+                    base_key = _private_cache_key(request, base_key)
+                cache_key = _tenant_cache_key(request, base_key)
             except _AmbiguousAuthority:
                 result = await handler(request, *args, **kwargs)
                 if status_values is not None:
@@ -701,7 +728,10 @@ def cached(
                 the_store.clear()
                 return None
             try:
-                base = _tenant_cache_key(request, key(request))
+                base_key = key(request)
+                if not public_key:
+                    base_key = _private_cache_key(request, base_key)
+                base = _tenant_cache_key(request, base_key)
             except _AmbiguousAuthority:
                 return None
             if request.method != "QUERY":

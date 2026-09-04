@@ -48,6 +48,8 @@ class Pending:
     __slots__ = ("_futures", "_limit", "_refusals")
 
     def __init__(self, *, limit: int) -> None:
+        if type(limit) is not int:
+            raise ValueError("pending limit must be a positive integer")
         if limit < 1:
             raise ValueError("a pending map must admit at least one question")
         self._futures: dict[str, asyncio.Future[Any]] = {}

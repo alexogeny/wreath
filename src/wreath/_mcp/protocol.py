@@ -120,17 +120,39 @@ def parse_message(payload: Any) -> Message:
         # be correlated with anything and reads as a notification to half the
         # implementations that meet it.
         raise JsonRpcError(INVALID_REQUEST, "a request id must not be null")
-    if has_id and not isinstance(identifier, str | int):
+    if has_id and (isinstance(identifier, bool) or not isinstance(identifier, str | int)):
         raise JsonRpcError(INVALID_REQUEST, "a request id must be a string or an integer")
 
     method = payload.get("method")
     if method is None:
+        if "method" in payload or "params" in payload:
+            raise JsonRpcError(
+                INVALID_REQUEST,
+                "a JSON-RPC response must not carry request members `method` or `params`",
+            )
         if not has_id:
             raise JsonRpcError(INVALID_REQUEST, "a JSON-RPC message must carry a method or an id")
+        if "result" in payload and "error" in payload:
+            raise JsonRpcError(
+                INVALID_REQUEST,
+                "a JSON-RPC response must carry either a `result` or an `error`, not both",
+            )
         error = payload.get("error")
-        if error is not None and not isinstance(error, dict):
+        if "error" in payload and not isinstance(error, dict):
             raise JsonRpcError(INVALID_REQUEST, "a JSON-RPC `error` must be a JSON object")
-        if error is None and "result" not in payload:
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, bool) or not isinstance(code, int):
+                raise JsonRpcError(
+                    INVALID_REQUEST,
+                    "a JSON-RPC `error` must carry an integer `code`",
+                )
+            if not isinstance(error.get("message"), str):
+                raise JsonRpcError(
+                    INVALID_REQUEST,
+                    "a JSON-RPC `error` must carry a string `message`",
+                )
+        if "error" not in payload and "result" not in payload:
             raise JsonRpcError(
                 INVALID_REQUEST,
                 "a JSON-RPC response must carry either a `result` or an `error`",
@@ -145,6 +167,11 @@ def parse_message(payload: Any) -> Message:
         )
     if not isinstance(method, str):
         raise JsonRpcError(INVALID_REQUEST, "a JSON-RPC method must be a string")
+    if "result" in payload or "error" in payload:
+        raise JsonRpcError(
+            INVALID_REQUEST,
+            "a JSON-RPC request must not carry response members `result` or `error`",
+        )
 
     params = payload.get("params")
     if params is None:

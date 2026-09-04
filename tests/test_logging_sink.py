@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Iterator
 
 import pytest
 
@@ -14,6 +15,7 @@ from wreath._logsink import (
     TextRenderer,
     default_renderer,
 )
+from wreath._logsite import SiteRegistry
 from wreath._projector import Projector
 
 
@@ -48,7 +50,7 @@ class FakeRecorder:
 
 
 @pytest.fixture
-def runtime() -> log.LogRuntime:
+def runtime() -> Iterator[log.LogRuntime]:
     with log.testing_runtime(lambda _c: None, level=log.TRACE):
         yield log.installed()
 
@@ -205,7 +207,7 @@ def test_pipeline_hands_records_to_the_sink(runtime: log.LogRuntime) -> None:
 def test_pipeline_uses_the_supplied_renderer(runtime: log.LogRuntime) -> None:
     written: list[str] = []
 
-    def renderer(_registry, _record) -> str:
+    def renderer(registry: SiteRegistry, record: ProjectedLog) -> str:
         return "custom-rendering"
 
     pipeline = LogPipeline(runtime.registry, write=written.append, renderer=renderer)

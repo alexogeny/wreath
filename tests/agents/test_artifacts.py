@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from wreath._agents.artifacts import AgentArtifactManager, ArtifactLimitExceeded, _digest_parts
+from wreath.auth import Identity
 from wreath.objects import MemoryObjectStore, ObjectStat
 from wreath.provenance import Provenance
 
@@ -67,6 +68,26 @@ def test_artifact_digest_refuses_invalid_identity_parts(part: str) -> None:
         _digest_parts("tenant", part)
 
 
+@pytest.mark.parametrize("part", ["a" * 1025, "🪻" * 257])
+def test_artifact_digest_bounds_each_utf8_identity_part(part: str) -> None:
+    with pytest.raises(ValueError, match="at most 1024 UTF-8 bytes"):
+        _digest_parts("tenant", part)
+
+
+def test_artifact_digest_refuses_oversized_part_before_encoding_it() -> None:
+    class EncodeBomb(str):
+        def encode(self, *_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("oversized artifact key part was encoded")
+
+    with pytest.raises(ValueError, match="at most 1024 UTF-8 bytes"):
+        _digest_parts("tenant", EncodeBomb("a" * 1025))
+
+
+def test_artifact_digest_refuses_non_utf8_identity_parts() -> None:
+    with pytest.raises(ValueError, match="must be valid UTF-8"):
+        _digest_parts("tenant", "\ud800")
+
+
 @pytest.mark.asyncio
 async def test_artifact_key_and_metadata_are_identity_bound_and_body_is_written_once() -> None:
     store = Store()
@@ -89,11 +110,35 @@ async def test_artifact_key_and_metadata_are_identity_bound_and_body_is_written_
     assert store.writes == [(artifact.key, body, "text/csv")]
     assert store.writes[0][1] is body
     assert artifact.digest == hashlib.sha256(body).hexdigest()
+    assert (artifact.tenant, artifact.principal_id, artifact.conversation) == (
+        "tenant-a",
+        "user-7",
+        "conversation-2",
+    )
     assert artifact.media_type == "text/csv"
     assert artifact.trust == "tool"
     assert isinstance(artifact.provenance, Provenance)
     assert artifact.provenance.digest.hex() == artifact.digest
     assert artifact.stat.size == 6
+
+
+def test_artifact_key_distinguishes_identity_types_and_framed_namespaces() -> None:
+    manager = AgentArtifactManager(Store(), max_bytes=16, max_artifacts=1)
+    unnamespaced = context(principal="3:foox")
+    unnamespaced.principal = Identity("3:foox", namespace="")
+    namespaced = context(principal="x")
+    namespaced.principal = Identity("x", namespace="foo")
+    user = context(principal="same")
+    user.principal = Identity("same", type="User")
+    service = context(principal="same")
+    service.principal = Identity("same", type="Service")
+
+    assert manager.key(unnamespaced, "report", ordinal=0) != manager.key(
+        namespaced, "report", ordinal=0
+    )
+    assert manager.key(user, "report", ordinal=0) != manager.key(
+        service, "report", ordinal=0
+    )
 
 
 @pytest.mark.asyncio
@@ -132,6 +177,48 @@ async def test_mutable_artifact_body_is_snapshotted_before_storage_can_suspend()
 
 
 @pytest.mark.asyncio
+async def test_artifact_scope_is_snapshotted_before_storage_can_suspend() -> None:
+    class YieldingStore(Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.resume = asyncio.Event()
+
+        async def write(
+            self,
+            key: str,
+            data: bytes | bytearray | memoryview,
+            *,
+            content_type: str | None = None,
+        ) -> ObjectStat:
+            self.started.set()
+            await self.resume.wait()
+            return await super().write(key, data, content_type=content_type)
+
+    store = YieldingStore()
+    manager = AgentArtifactManager(store, max_bytes=16, max_artifacts=1)
+    mutable_context = context()
+    original_key = manager.key(mutable_context, "result", ordinal=0)
+    pending = asyncio.create_task(
+        manager.write(mutable_context, artifact_id="result", ordinal=0, body=b"good")
+    )
+    await store.started.wait()
+    mutable_context.tenant = "tenant-b"
+    mutable_context.principal.id = "user-8"
+    mutable_context.conversation = "conversation-3"
+    store.resume.set()
+
+    artifact = await pending
+
+    assert (artifact.tenant, artifact.principal_id, artifact.conversation) == (
+        "tenant-a",
+        "user-7",
+        "conversation-2",
+    )
+    assert artifact.key == original_key
+
+
+@pytest.mark.asyncio
 async def test_byte_and_count_ceilings_refuse_before_writing() -> None:
     store = Store()
     manager = AgentArtifactManager(store, max_bytes=4, max_artifacts=1)
@@ -147,6 +234,27 @@ async def test_byte_and_count_ceilings_refuse_before_writing() -> None:
     assert manager.key(context(), "first-name", ordinal=0) != manager.key(
         context(), "replacement-name", ordinal=0
     )
+
+
+@pytest.mark.parametrize(
+    "media_type", ["text/plain\r\nx-evil: yes", "text/plain\x7f", "x" * 1025]
+)
+async def test_artifact_media_type_refuses_header_injection_and_oversize(
+    media_type: str,
+) -> None:
+    store = Store()
+    manager = AgentArtifactManager(store, max_bytes=4, max_artifacts=1)
+
+    with pytest.raises(ValueError, match="media_type"):
+        await manager.write(
+            context(),
+            artifact_id="safe",
+            ordinal=0,
+            body=b"body",
+            media_type=media_type,
+        )
+
+    assert store.writes == []
 
 
 @pytest.mark.asyncio

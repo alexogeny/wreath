@@ -60,6 +60,67 @@ def test_database_pool_and_shutdown_timeouts_must_be_finite(window: float) -> No
         Database("main", "postgresql://primary/app", shutdown_timeout=window)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_size", True),
+        ("min_size", 1.5),
+        ("min_size", float("nan")),
+        ("max_size", 1.5),
+        ("max_size", float("inf")),
+        ("max_queue", 1.5),
+        ("max_queue", float("inf")),
+        ("statement_cache_size", 1.5),
+        ("statement_cache_bytes", float("inf")),
+        ("pipeline_depth", 1.5),
+        ("pipeline_depth", float("inf")),
+    ],
+)
+def test_pool_resource_caps_must_be_exact_integers(field: str, value: object) -> None:
+    options: dict[str, Any] = {field: value}
+    with pytest.raises(ValueError, match=rf"pool {field} must be an integer"):
+        PoolConfig(**options)
+
+
+@pytest.mark.parametrize("field", ["acquire_timeout", "command_timeout"])
+def test_pool_timeouts_refuse_booleans(field: str) -> None:
+    options: dict[str, Any] = {field: True}
+    with pytest.raises(ValueError, match="positive and finite"):
+        PoolConfig(**options)
+
+
+def test_database_shutdown_timeout_refuses_a_boolean() -> None:
+    with pytest.raises(ValueError, match="shutdown_timeout must be a finite number"):
+        Database("main", "postgresql://primary/app", shutdown_timeout=True)
+
+
+@pytest.mark.parametrize("timeout", [True, float("nan"), float("inf")])
+def test_advisory_lock_timeout_must_be_a_finite_number(timeout: Any) -> None:
+    db = Database("main", "postgresql://primary/app")
+    with pytest.raises(ValueError, match="lock timeout must be a finite number"):
+        db.try_lock("key", timeout=timeout)
+
+
+@pytest.mark.parametrize("poll_interval", [0.0, True, float("nan"), float("inf")])
+def test_singleton_poll_interval_must_be_finite(poll_interval: Any) -> None:
+    async def work() -> None:
+        return None
+
+    db = Database("main", "postgresql://primary/app")
+    with pytest.raises(ValueError, match="poll_interval must be a positive finite number"):
+        db.run_singleton("key", work, poll_interval=poll_interval)
+
+
+@pytest.mark.asyncio
+async def test_singleton_accepts_a_positive_finite_poll_interval() -> None:
+    async def work() -> None:
+        return None
+
+    db = Database("main", "postgresql://primary/app")
+    runner = db.run_singleton("key", work, poll_interval=0.01)
+    await runner.stop()
+
+
 @pytest.mark.asyncio
 async def test_workloads_use_isolated_pools_with_one_dsn() -> None:
     connector = Connector()

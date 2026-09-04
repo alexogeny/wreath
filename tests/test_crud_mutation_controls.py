@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dis import get_instructions
 from typing import Any, cast
 
 import pytest
@@ -152,6 +153,96 @@ def test_fields_refuses_each_unknown_model_column_at_declaration() -> None:
         )
 
 
+@pytest.mark.parametrize("argument", ["expose", "readonly", "exclude"])
+def test_field_controls_refuse_unknown_columns_at_declaration(argument: str) -> None:
+    with pytest.raises(ValueError, match=rf"Record has no column\(s\) typo; `{argument}` names"):
+        crud_router(Record, lambda _request: _Session(), **{argument: ("typo",)})
+
+
+def test_operation_selection_refuses_unknown_operations_at_declaration() -> None:
+    with pytest.raises(ValueError, match="unknown CRUD operation.*destroy.*expected"):
+        crud_router(Record, lambda _request: _Session(), operations=("retrieve", "destroy"))
+
+
+def test_access_refuses_unknown_rule_kinds_at_declaration() -> None:
+    with pytest.raises(ValueError, match="Access kind.*unprotected.*expected"):
+        Access("unprotected")
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        lambda: Access("roles", (), "all"),
+        lambda: Access("permissions", ("",), "all"),
+        lambda: Access("roles", (1,), "all"),
+        lambda: Access("roles", ("admin",), "some"),
+        lambda: Access("public", ("admin",)),
+        lambda: Access("public", action="read"),
+        lambda: Access("public", resource='Record::"1"'),
+        lambda: Access("cedar", action="", resource='Record::"1"'),
+        lambda: Access("cedar", action=1, resource='Record::"1"'),
+        lambda: Access("public", second_factor=300),
+    ],
+)
+def test_access_direct_construction_refuses_ambiguous_authority(rule: Callable[[], Access]) -> None:
+    with pytest.raises(ValueError):
+        rule()
+
+
+def test_access_direct_construction_snapshots_role_values() -> None:
+    names = ["admin"]
+    rule = Access("roles", names)
+
+    names[0] = "guest"
+
+    assert rule.values == ("admin",)
+
+
+def test_access_refuses_set_mode_on_a_rule_without_set_values() -> None:
+    with pytest.raises(ValueError, match="Access.public.*mode"):
+        Access("public", mode="any")
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        'Record::"{id.__class__}"',
+        'Record::"{id!r}"',
+        'Record::"{id:>8}"',
+        '{kind}::"fixed"',
+        "Record::{id}",
+        'Record::{id}"',
+        'Record::"{id}"suffix',
+    ],
+)
+def test_cedar_resource_templates_refuse_format_language_features(resource: str) -> None:
+    with pytest.raises(ValueError, match="simple path parameter"):
+        Access.cedar(action="record:read", resource=resource)
+
+
+@pytest.mark.parametrize("resource", ['Record::"{id"', 'Record::"id}"'])
+def test_cedar_resource_templates_refuse_each_unmatched_brace(resource: str) -> None:
+    with pytest.raises(ValueError, match="simple path parameter"):
+        Access.cedar(action="record:read", resource=resource)
+
+
+def test_cedar_resource_template_refuses_params_absent_from_an_operation_path() -> None:
+    with pytest.raises(ValueError, match="list.*id.*path parameter"):
+        crud_router(
+            Record,
+            lambda _request: _Session(),
+            operations=("list",),
+            authorize=Access.cedar(action="record:list", resource='Record::"{id}"'),
+        )
+
+
+@pytest.mark.parametrize("page_size", [False, "20", 0, 101, 10**100])
+def test_page_size_is_bounded_at_declaration(page_size: Any) -> None:
+    error = TypeError if isinstance(page_size, bool | str) else ValueError
+    with pytest.raises(error, match="page_size.*1 to 100"):
+        crud_router(Record, lambda _request: _Session(), page_size=page_size)
+
+
 def test_operation_selection_distinguishes_list_from_retrieve() -> None:
     listed = crud_router(Record, lambda _request: _Session(), operations=("list",))
     retrieved = crud_router(Record, lambda _request: _Session(), operations=("retrieve",))
@@ -226,6 +317,56 @@ async def test_list_removes_only_rows_refused_by_the_object_authorizer() -> None
     response = await listing(_Request())
 
     assert [item["name"] for item in json.loads(response.body)["items"]] == ["visible"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [1, "allowed", object()])
+async def test_object_authorizer_refuses_non_boolean_outcomes(answer: object) -> None:
+    session = _Session({1: Record(id=1, name="private", note=None)})
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: session,
+            operations=("retrieve",),
+            object_authorizer=lambda _request, _op, _row: answer,
+        )
+    )[("GET", "/record/{id}")]
+
+    assert (await retrieve(_Request(path_params={"id": "1"}))).status == 403
+
+
+@pytest.mark.asyncio
+async def test_object_authorizer_refuses_a_decision_with_non_boolean_allowed() -> None:
+    from wreath._auth.models import AuthorizationDecision
+
+    session = _Session({1: Record(id=1, name="private", note=None)})
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: session,
+            operations=("retrieve",),
+            object_authorizer=lambda _request, _op, _row: AuthorizationDecision("allowed"),
+        )
+    )[("GET", "/record/{id}")]
+
+    assert (await retrieve(_Request(path_params={"id": "1"}))).status == 403
+
+
+@pytest.mark.asyncio
+async def test_object_authorizer_accepts_an_explicit_allow_decision() -> None:
+    from wreath._auth.models import AuthorizationDecision
+
+    session = _Session({1: Record(id=1, name="visible", note=None)})
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: session,
+            operations=("retrieve",),
+            object_authorizer=lambda _request, _op, _row: AuthorizationDecision(True),
+        )
+    )[("GET", "/record/{id}")]
+
+    assert (await retrieve(_Request(path_params={"id": "1"}))).status == 200
 
 
 @pytest.mark.asyncio
@@ -339,3 +480,67 @@ def test_cedar_static_string_resource_is_not_formatted_per_request() -> None:
     )[("GET", "/record/{id}")]
 
     assert requirement_for(retrieve).policies[0].resource == resource
+
+
+def test_cedar_static_bare_entity_resource_remains_static() -> None:
+    resource = "Record::fixed"
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: _Session(),
+            operations=("retrieve",),
+            authorize=Access.cedar(action="record:read", resource=resource),
+        )
+    )[("GET", "/record/{id}")]
+
+    assert requirement_for(retrieve).policies[0].resource == resource
+
+
+def test_cedar_resource_template_escapes_path_values_as_one_entity_id() -> None:
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: _Session(),
+            operations=("retrieve",),
+            authorize=Access.cedar(action="record:read", resource='Record::"{id}"'),
+        )
+    )[("GET", "/record/{id}")]
+    resource = cast("Callable[[Any], str]", requirement_for(retrieve).policies[0].resource)
+
+    rendered = resource(_Request(path_params={"id": 'a"b\\c'}))
+
+    assert EntityUid.parse(rendered) == EntityUid("Record", 'a"b\\c')
+
+
+def test_single_param_cedar_resource_renderer_has_no_request_time_loop() -> None:
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: _Session(),
+            operations=("retrieve",),
+            authorize=Access.cedar(action="record:read", resource='Record::"{id}"'),
+        )
+    )[("GET", "/record/{id}")]
+    resource = cast("Callable[[Any], str]", requirement_for(retrieve).policies[0].resource)
+
+    assert "FOR_ITER" not in {instruction.opname for instruction in get_instructions(resource)}
+
+
+def test_cedar_resource_template_renders_multiple_path_values() -> None:
+    retrieve = _routes(
+        crud_router(
+            Record,
+            lambda _request: _Session(),
+            prefix="/tenants/{tenant}/records",
+            operations=("retrieve",),
+            authorize=Access.cedar(
+                action="record:read",
+                resource='Record::"{tenant}/{id}/{tenant}"',
+            ),
+        )
+    )[("GET", "/tenants/{tenant}/records/{id}")]
+    resource = cast("Callable[[Any], str]", requirement_for(retrieve).policies[0].resource)
+
+    rendered = resource(_Request(path_params={"tenant": "acme", "id": "7"}))
+
+    assert rendered == 'Record::"acme/7/acme"'

@@ -8,7 +8,9 @@ anyone being able to mutate it underneath a concurrent execution.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
@@ -26,6 +28,14 @@ __all__ = [
 ]
 
 
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Variable:
     """A `$name` reference, resolved against the request's variables."""
@@ -38,6 +48,9 @@ class Argument:
     name: str
     #: A literal (str/int/float/bool/None/list/dict) or a `Variable`.
     value: Any
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", _freeze_value(self.value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +90,9 @@ class VariableDefinition:
     default: Any = None
     has_default: bool = False
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "default", _freeze_value(self.default))
+
 
 @dataclass(frozen=True, slots=True)
 class Operation:
@@ -100,6 +116,9 @@ class Document:
     #: Measured while parsing, so callers never re-walk the tree to find out.
     depth: int = 0
     complexity: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fragments", MappingProxyType(dict(self.fragments)))
 
     def operation(self, name: str | None = None) -> Operation:
         """The named operation, or the only one when a document has just one."""

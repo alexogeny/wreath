@@ -21,7 +21,7 @@ SECRET = "s" * 32
 def _require(condition: object, message: str) -> None:
     """`assert`, except that `python -O` cannot delete it.
 
-    Every check in this file goes through here. A red-team suite that empties
+    Every check in this file goes through here. An adversarial suite that empties
     itself under the one interpreter mode nothing else tests is the pattern this
     file is about, one level up.
     """
@@ -264,8 +264,8 @@ async def test_a_reset_under_a_renamed_session_key_actually_ends_the_session() -
 
     _require(result["reset"] == 200, f"the reset itself failed: {result}")
     _require(
-        store.enumerated == ["account"],
-        f"the reset enumerated by {store.enumerated} rather than the router's key",
+        store.enumerated == ["account", "account"],
+        f"the reset did not revoke on both sides of the credential change: {store.enumerated}",
     )
     _require(result["rows"] == {}, f"the session survived its own password reset: {result}")
 

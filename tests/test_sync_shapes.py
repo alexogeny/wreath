@@ -165,10 +165,29 @@ def test_max_rows_must_be_positive():
         photo_sync(max_rows=0)
 
 
+@pytest.mark.parametrize("keepalive", [True, float("nan"), float("inf"), 0, -1])
+def test_sync_refuses_an_invalid_keepalive_at_construction(keepalive):
+    with pytest.raises(ValueError, match="keepalive must be finite and positive"):
+        photo_sync(keepalive=keepalive)
+
+
+@pytest.mark.parametrize("max_rows", [True, 1.5, float("nan"), float("inf")])
+def test_max_rows_must_be_an_exact_finite_integer(max_rows):
+    with pytest.raises(ValueError, match="positive integer"):
+        photo_sync(max_rows=max_rows)
+
+
 @pytest.mark.parametrize("limit", [0, -1])
 def test_an_explicitly_declared_limit_must_be_positive(limit):
     sync = photo_sync()
     with pytest.raises(UnboundedShape, match="positive limit"):
+        sync.add_shape("mine", lambda principal: Select(limit=5), limit=limit)
+
+
+@pytest.mark.parametrize("limit", [True, 1.5, float("nan"), float("inf")])
+def test_an_explicit_limit_must_be_an_exact_finite_integer(limit):
+    sync = photo_sync()
+    with pytest.raises(UnboundedShape, match="integer"):
         sync.add_shape("mine", lambda principal: Select(limit=5), limit=limit)
 
 
@@ -182,6 +201,21 @@ def test_a_principal_is_keyed_by_sub_then_id_then_its_string():
     assert _principal_id(FakePrincipal("alice")) == "alice"
     assert _principal_id(ById(7)) == "7"
     assert _principal_id("anonymous") == "anonymous"
+
+
+def test_principal_types_do_not_share_a_subscription_quota_key():
+    from wreath.sync import _principal_id
+
+    @dataclass
+    class TypedPrincipal:
+        sub: str
+        type: str
+        namespace: str = "issuer"
+
+    user = _principal_id(TypedPrincipal("same", "User"))
+    service = _principal_id(TypedPrincipal("same", "Service"))
+
+    assert user != service
 
 
 async def test_evaluate_returns_rows_and_an_authoritative_key_set():
@@ -204,6 +238,20 @@ async def test_evaluation_truncates_to_the_declared_bound():
     result = await sync.evaluate(session, "mine", FakePrincipal("alice"))
 
     assert len(result.rows) == 2
+
+
+@pytest.mark.parametrize("runtime_limit", [None, -1, 0, 3])
+async def test_evaluation_refuses_a_query_that_exceeds_its_declared_bound(
+    runtime_limit,
+):
+    sync = photo_sync(max_rows=2)
+    sync.add_shape("mine", lambda principal: Select(limit=runtime_limit), limit=2)
+    session = FakeSession([Row(str(n), "x") for n in range(10)])
+
+    with pytest.raises(SyncError, match="runtime limit"):
+        await sync.evaluate(session, "mine", FakePrincipal("alice"))
+
+    assert session.queries == []
 
 
 async def test_the_shape_is_rebuilt_on_every_evaluation():
@@ -356,6 +404,24 @@ async def test_an_idle_stream_emits_a_keepalive_comment():
     await events.aclose()
 
 
+@pytest.mark.parametrize("keepalive", [True, float("nan"), float("inf"), 0, -1])
+async def test_a_stream_refuses_an_invalid_keepalive_before_its_snapshot(
+    keepalive: float,
+):
+    sync = photo_sync()
+    sync.add_shape("mine", lambda principal: Select(limit=5))
+    session = FakeSession([Row("a", "one")])
+    subscription = sync.subscribe(FakePrincipal("alice"), "mine")
+    assert subscription is not None
+    events = sync_events(subscription, as_session(session), keepalive=keepalive)
+
+    with pytest.raises(ValueError, match="keepalive must be finite and positive"):
+        await anext(events)
+
+    assert session.queries == []
+    assert subscription.closed
+
+
 async def test_a_failing_evaluation_is_counted_and_the_stream_survives():
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
@@ -479,7 +545,7 @@ def test_compiled_model_primary_key_override_keeps_the_public_path():
 
     result = Sync(Overridden)._snapshot([Overridden(id=7, caption="seven")])
 
-    assert result.keys == ("custom:7",)
+    assert result.keys == ("6:custom1:7",)
 
 
 async def test_a_supplied_key_is_used_instead_of_the_primary_key():
@@ -492,7 +558,16 @@ async def test_a_supplied_key_is_used_instead_of_the_primary_key():
     assert result.keys == ("photo-a",)
 
 
-async def test_a_composite_primary_key_becomes_one_colon_joined_key():
+async def test_duplicate_row_keys_are_refused_before_a_client_can_overwrite_one():
+    sync = Sync(Row, key=lambda row: "same")
+    sync.add_shape("mine", lambda principal: Select(limit=5))
+    session = FakeSession([Row("a", "one"), Row("b", "two")])
+
+    with pytest.raises(SyncError, match="duplicate row key 'same'"):
+        await sync.evaluate(session, "mine", FakePrincipal("alice"))
+
+
+async def test_a_composite_primary_key_has_unambiguous_component_framing():
 
     class Composite(Row):
         def _orm_primary_key(self):
@@ -504,7 +579,24 @@ async def test_a_composite_primary_key_becomes_one_colon_joined_key():
 
     result = await sync.evaluate(session, "mine", FakePrincipal("alice"))
 
-    assert result.keys == ("a:eu",)
+    assert result.keys == ("1:a2:eu",)
+
+
+async def test_composite_primary_keys_cannot_collide_across_delimiters():
+    class Composite(Row):
+        def _orm_primary_key(self):
+            return self.id
+
+    sync = Sync(Composite)
+    sync.add_shape("mine", lambda principal: Select(limit=5))
+    first = Composite(("a:b", "c"), "one")
+    second = Composite(("a", "b:c"), "two")
+
+    result = await sync.evaluate(
+        FakeSession([first, second]), "mine", FakePrincipal("alice")
+    )
+
+    assert len(set(result.keys)) == 2
 
 
 def test_the_doorbell_channel_is_derived_from_the_model_or_given():

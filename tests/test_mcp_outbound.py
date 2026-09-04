@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from wreath import Wreath
 from wreath._fsguard import ContainmentError
 from wreath._mcp import roots as mcp_roots
 from wreath._mcp.outbound import ClientChannel
+from wreath._mcp.session import Session
 from wreath.mcp import MCP, PROTOCOL_VERSION, ClientRequestError, MCPLimits, ToolError
 from wreath.testing import TestClient, TestResponse
 
@@ -109,6 +111,24 @@ def build(**kwargs) -> tuple[Wreath, MCP]:
     kwargs.setdefault("limits", MCPLimits(client_request_seconds=0.25))
     mcp = MCP(app, name="camera-trap", version="1.0.0", **kwargs)
     return app, mcp
+
+
+async def test_a_relative_file_root_is_bound_to_the_declaration_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declared_from = tmp_path / "declared-from"
+    later_cwd = tmp_path / "later-cwd"
+    (declared_from / "files").mkdir(parents=True)
+    (later_cwd / "files").mkdir(parents=True)
+    (declared_from / "files" / "note.txt").write_text("declared")
+    (later_cwd / "files" / "note.txt").write_text("later")
+    monkeypatch.chdir(declared_from)
+    _app, mcp = build(file_root="files")
+    monkeypatch.chdir(later_cwd)
+
+    content = await mcp._read_file(Session("session", PROTOCOL_VERSION), "note.txt")
+
+    assert content == b"declared"
 
 
 async def call(client: TestClient, session: str, payload: dict, **headers: str) -> TestResponse:
@@ -864,6 +884,12 @@ async def test_cancelling_the_outer_call_cancels_the_inner_request() -> None:
         parked = asyncio.ensure_future(call(client, session, tool_call(2, "ask")))
         await asyncio.wait_for(entered.wait(), timeout=5)
         asked = await peer.next_request()
+        duplicate = await call(
+            client,
+            session,
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        )
+        assert duplicate.json()["error"]["code"] == -32600
         await call(
             client,
             session,
@@ -1000,6 +1026,34 @@ def test_root_results_keep_only_absolute_file_uris() -> None:
     ) == ("/srv/workspace",)
 
 
+@pytest.mark.parametrize(
+    "uri",
+    (
+        "file:relative/path",
+        "file://remote.test/srv/workspace",
+        "file:////remote.test/srv/workspace",
+        "file:///%2fremote.test/srv/workspace",
+        "file:///srv/workspace?selection=private",
+        "file:///srv/workspace#private",
+        "file:///srv/work space",
+        "file:///srv/work%zzspace",
+        "file:\n///srv/workspace",
+        "file:///srv/work\x00space",
+        "file:///srv/work%0aspace",
+        "https:/srv/workspace",
+        "file://[invalid/srv/workspace",
+    ),
+)
+def test_root_results_drop_ambiguous_or_nonlocal_file_uris(uri: str) -> None:
+    assert mcp_roots.root_paths({"roots": [{"uri": uri}]}) == ()
+
+
+def test_root_results_drop_a_uri_with_a_unicode_surrogate() -> None:
+    uri = f"file:///srv/work{chr(0xD800)}space"
+
+    assert mcp_roots.root_paths({"roots": [{"uri": uri}]}) == ()
+
+
 def test_read_beneath_refuses_non_files(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         mcp_roots,
@@ -1029,6 +1083,25 @@ def test_read_beneath_stops_at_eof(tmp_path) -> None:
         )
     finally:
         mcp_roots.os.close(root_fd)
+
+
+def test_read_beneath_enforces_the_ceiling_on_bytes_actually_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    growing = tmp_path / "growing.txt"
+    growing.write_bytes(b"x" * 64)
+    monkeypatch.setattr(
+        mcp_roots,
+        "open_beneath",
+        lambda _root, _relative: (
+            mcp_roots.os.open(growing, mcp_roots.os.O_RDONLY),
+            SimpleNamespace(st_mode=0o100600, st_size=0),
+        ),
+    )
+
+    with pytest.raises(ContainmentError, match="over.*max_file_bytes"):
+        mcp_roots.read_beneath(100, "growing.txt", max_bytes=8)
 
 
 async def test_a_client_root_confines_a_file_read(tmp_path) -> None:
@@ -1186,6 +1259,32 @@ async def test_a_file_over_the_ceiling_is_refused(tmp_path) -> None:
         assert "max_file_bytes" in result["content"][0]["text"]
 
 
+async def test_file_root_descriptor_is_closed_with_the_application(tmp_path) -> None:
+    (tmp_path / "note.txt").write_text("visible")
+    app, mcp = build(file_root=tmp_path)
+
+    @mcp.tool(description="Reads a file.")
+    async def read(request) -> dict:
+        return {"text": (await request.state.mcp.read_file("note.txt")).decode()}
+
+    descriptor = None
+    try:
+        async with TestClient(app) as client:
+            session = await initialize(client, capabilities={})
+            response = await call(client, session, tool_call(2, "read"))
+            assert response.json()["result"]["isError"] is False
+            descriptor = mcp._file_root_fd
+            assert descriptor is not None
+
+        assert mcp._file_root_fd is None
+        with pytest.raises(OSError):
+            mcp_roots.os.fstat(descriptor)
+    finally:
+        if descriptor is not None and mcp._file_root_fd is not None:
+            mcp_roots.os.close(descriptor)
+            mcp._file_root_fd = None
+
+
 async def test_list_changed_invalidates_the_cached_roots(tmp_path) -> None:
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "note.txt").write_text("here")
@@ -1216,3 +1315,232 @@ async def test_a_client_that_posts_a_server_to_client_method_is_told_which_way_i
         error = answered.json()["error"]
         assert error["code"] == -32601
         assert "server-to-client request" in error["message"]
+
+
+async def test_cancellation_stops_an_in_flight_resource_read() -> None:
+    app, _mcp = build()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @_mcp.resource("camera://slow", description="A slow resource.")
+    async def slow(_request) -> str:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "late"
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        pending = asyncio.create_task(
+            call(
+                client,
+                session,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "resource-call",
+                    "method": "resources/read",
+                    "params": {"uri": "camera://slow"},
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            duplicate = await call(
+                client,
+                session,
+                {"jsonrpc": "2.0", "id": "resource-call", "method": "ping"},
+            )
+            assert duplicate.json()["error"]["code"] == -32600
+            notice = await call(
+                client,
+                session,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "resource-call"},
+                },
+            )
+            assert notice.status == 202
+            await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+            response = await asyncio.wait_for(pending, timeout=1)
+            assert response.status == 202
+            assert response.body == b""
+            assert _session_of(_mcp, session).requests_in_flight == {}
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_cancellation_stops_an_in_flight_prompt_render() -> None:
+    app, mcp = build()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @mcp.prompt(description="A slow prompt.")
+    async def slow(_request) -> str:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "late"
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        pending = asyncio.create_task(
+            call(
+                client,
+                session,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "prompt-call",
+                    "method": "prompts/get",
+                    "params": {"name": "slow"},
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            await call(
+                client,
+                session,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "prompt-call"},
+                },
+            )
+            await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+            response = await asyncio.wait_for(pending, timeout=1)
+            assert response.status == 202
+            assert response.body == b""
+            assert _session_of(mcp, session).requests_in_flight == {}
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_prompt_results_obey_the_serialized_result_limit() -> None:
+    app, mcp = build(
+        limits=MCPLimits(client_request_seconds=0.25, max_result_bytes=64)
+    )
+
+    @mcp.prompt(description="A bounded prompt.")
+    async def bounded(_request) -> str:
+        return "x" * 128
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        response = await call(
+            client,
+            session,
+            {
+                "jsonrpc": "2.0",
+                "id": "bounded-prompt",
+                "method": "prompts/get",
+                "params": {"name": "bounded"},
+            },
+        )
+
+    assert response.json()["error"]["code"] == -32603
+    assert mcp.prompt_errors == 1
+
+
+async def test_a_completed_tool_call_refreshes_the_session_idle_lifetime() -> None:
+    app, mcp = build()
+
+    @mcp.tool(description="A call that outlives the idle window.")
+    async def long_call(request) -> str:
+        request.state.mcp._session.last_seen -= 3600
+        return "done"
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        response = await call(client, session, tool_call(2, "long_call"))
+        ping = await call(
+            client,
+            session,
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        )
+
+    assert response.json()["result"]["isError"] is False
+    assert ping.status == 200
+
+
+async def test_a_completed_resource_read_refreshes_the_session_idle_lifetime() -> None:
+    app, mcp = build()
+
+    @mcp.resource("camera://long-read", description="A long resource read.")
+    async def long_read(request) -> str:
+        request.state.mcp._session.last_seen -= 3600
+        return "done"
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        response = await call(
+            client,
+            session,
+            {
+                "jsonrpc": "2.0",
+                "id": "long-read",
+                "method": "resources/read",
+                "params": {"uri": "camera://long-read"},
+            },
+        )
+        ping = await call(
+            client,
+            session,
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        )
+
+    assert response.json()["result"]["contents"][0]["text"] == "done"
+    assert ping.status == 200
+
+
+async def test_abandoned_resource_request_cancels_its_handler() -> None:
+    app, mcp = build()
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @mcp.resource("camera://abandoned", description="A resource that waits.")
+    async def abandoned(_request) -> str:
+        entered.set()
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "late"
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        pending = asyncio.create_task(
+            call(
+                client,
+                session,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "abandoned",
+                    "method": "resources/read",
+                    "params": {"uri": "camera://abandoned"},
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        try:
+            await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+            assert _session_of(mcp, session).requests_in_flight == {}
+        finally:
+            await client.delete("/mcp", headers={"mcp-session-id": session})

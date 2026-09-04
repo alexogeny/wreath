@@ -37,6 +37,10 @@ class MaintenancePolicy:
     ) -> None:
         if not isinstance(active, bool):
             raise ValueError("MaintenancePolicy active must be a bool")
+        if isinstance(exempt_paths, str):
+            raise ValueError(
+                "MaintenancePolicy exempt_paths must be an iterable of absolute paths"
+            )
         paths = frozenset(exempt_paths)
         for path in paths:
             if not isinstance(path, str) or not path.startswith("/"):

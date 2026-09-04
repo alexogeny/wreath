@@ -34,7 +34,7 @@ import hashlib
 import hmac
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from ._native import _core
@@ -113,12 +113,12 @@ class RsaKey:
 
     n: int
     e: int
-    d: int
-    p: int = 0
-    q: int = 0
-    dp: int = 0
-    dq: int = 0
-    qinv: int = 0
+    d: int = field(repr=False)
+    p: int = field(default=0, repr=False)
+    q: int = field(default=0, repr=False)
+    dp: int = field(default=0, repr=False)
+    dq: int = field(default=0, repr=False)
+    qinv: int = field(default=0, repr=False)
 
     @property
     def size_bytes(self) -> int:
@@ -129,7 +129,12 @@ class RsaKey:
 class Ed25519Key:
     """An Ed25519 private key: the 32-byte seed, per RFC 8032."""
 
-    seed: bytes
+    seed: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.seed, (bytes, bytearray)):
+            raise TypeError("Ed25519 private seed must be bytes")
+        object.__setattr__(self, "seed", bytes(self.seed))
 
 
 def _der_read(data: bytes, offset: int) -> tuple[int, bytes, int]:
@@ -301,7 +306,7 @@ class DkimSigner:
 
     domain: str
     selector: str
-    key: RsaKey | Ed25519Key
+    key: RsaKey | Ed25519Key = field(repr=False)
     headers: tuple[str, ...] = DEFAULT_SIGNED_HEADERS
 
     @property

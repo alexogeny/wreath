@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -15,6 +15,20 @@ from wreath._agents.observability import (
     _truncate_utf8,
 )
 from wreath.recording import BodyCapture, RedactionPolicy
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"input_tokens": True},
+        {"output_tokens": 1.5},
+        {"cached_input_tokens": float("nan")},
+        {"input_tokens": float("inf")},
+    ],
+)
+def test_agent_usage_refuses_non_integer_counters(values: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="usage counts must be integers"):
+        AgentUsage(**values)
 
 
 class Observer:
@@ -77,6 +91,54 @@ def test_capture_policy_rejects_each_invalid_bound() -> None:
             ),
             fields=frozenset({"arguments"}),
         )
+    with pytest.raises(TypeError, match="max_body_bytes must be an integer"):
+        AgentCapturePolicy(
+            RedactionPolicy(
+                dependency=BodyCapture.METADATA,
+                max_body_bytes=cast(Any, 1.5),
+                max_fields=1,
+            ),
+            fields=frozenset({"arguments"}),
+        )
+    with pytest.raises(TypeError, match="max_fields must be an integer"):
+        AgentCapturePolicy(
+            RedactionPolicy(
+                dependency=BodyCapture.METADATA,
+                max_body_bytes=1,
+                max_fields=cast(Any, True),
+            ),
+            fields=frozenset({"arguments"}),
+        )
+
+
+def test_capture_policy_snapshots_mutable_selected_fields() -> None:
+    fields = {"arguments"}
+    capture = AgentCapturePolicy(
+        RedactionPolicy(
+            dependency=BodyCapture.METADATA,
+            max_body_bytes=1,
+            max_fields=1,
+        ),
+        fields=cast(Any, fields),
+    )
+
+    fields.clear()
+    fields.add("secret")
+
+    assert capture.fields == frozenset({"arguments"})
+
+
+@pytest.mark.parametrize("fields", [{""}, {cast(Any, 7)}])
+def test_capture_policy_refuses_invalid_selected_field_names(fields: set[Any]) -> None:
+    with pytest.raises(ValueError, match="fields must be non-empty strings"):
+        AgentCapturePolicy(
+            RedactionPolicy(
+                dependency=BodyCapture.METADATA,
+                max_body_bytes=1,
+                max_fields=1,
+            ),
+            fields=cast(Any, fields),
+        )
 
 
 def test_capture_requires_an_observer() -> None:
@@ -96,6 +158,9 @@ def test_capture_requires_an_observer() -> None:
 def test_utf8_truncation_distinguishes_exact_and_short_bounds() -> None:
     assert _truncate_utf8("é", 2) == ("é", False)
     assert _truncate_utf8("é", 1) == ("", True)
+    assert _truncate_utf8("ascii", 20) == ("ascii", False)
+    assert _truncate_utf8("ascii", 2) == ("as", True)
+    assert _truncate_utf8("x", 0) == ("", True)
 
 
 def test_payload_short_circuits_for_each_absent_input() -> None:
@@ -132,6 +197,16 @@ async def test_observation_rejects_invalid_duration_and_outcome() -> None:
             duration=0,
             outcome=cast("AgentOutcome", "other"),
         )
+
+    for duration in (True, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="duration must be a finite number"):
+            await telemetry.tool(
+                context(),
+                tool="lookup",
+                call_id="call-duration",
+                duration=cast(Any, duration),
+                outcome="failed",
+            )
 
 
 @pytest.mark.asyncio
@@ -188,7 +263,7 @@ async def test_payload_redactor_failure_is_counted_without_escaping(redact: obje
             max_fields=1,
         ),
         fields=frozenset({"result"}),
-        redact=redact,
+        redact=cast(Any, redact),
     )
     telemetry = AgentObservability(observer=observer, capture=capture)
 
@@ -323,8 +398,35 @@ async def test_metadata_capture_keeps_only_lengths() -> None:
     ]
 
 
+@pytest.mark.parametrize("mode", [BodyCapture.METADATA, BodyCapture.HASHED])
+async def test_large_capture_values_are_encoded_in_bounded_chunks(mode: BodyCapture) -> None:
+    class WholeEncodeBomb(str):
+        def encode(self, *_args: Any, **_kwargs: Any) -> bytes:
+            raise AssertionError("capture encoded the whole large value at once")
+
+    observer = Observer()
+    capture = AgentCapturePolicy(
+        RedactionPolicy(dependency=mode, max_body_bytes=64, max_fields=1),
+        fields=frozenset({"arguments"}),
+    )
+    telemetry = AgentObservability(observer=observer, capture=capture)
+    value = WholeEncodeBomb("🪻" * 20_000)
+
+    await telemetry.tool(
+        context(),
+        tool="lookup",
+        call_id="call-large",
+        duration=0,
+        outcome="succeeded",
+        payloads={"arguments": value},
+    )
+
+    assert observer.events[0].payload[0].length == 80_000
+    assert telemetry.recording_errors == 0
+
+
 @pytest.mark.asyncio
-async def test_hashed_capture_records_the_digest_without_content() -> None:
+async def test_hashed_capture_records_an_instance_keyed_digest_without_content() -> None:
     observer = Observer()
     capture = AgentCapturePolicy(
         RedactionPolicy(
@@ -344,8 +446,69 @@ async def test_hashed_capture_records_the_digest_without_content() -> None:
         outcome="succeeded",
         payloads={"arguments": "secret"},
     )
+    await telemetry.tool(
+        context(),
+        tool="lookup",
+        call_id="call-hashed-again",
+        duration=0,
+        outcome="succeeded",
+        payloads={"arguments": "secret"},
+    )
+    other_observer = Observer()
+    other = AgentObservability(observer=other_observer, capture=capture)
+    await other.tool(
+        context(),
+        tool="lookup",
+        call_id="call-other-observer",
+        duration=0,
+        outcome="succeeded",
+        payloads={"arguments": "secret"},
+    )
 
-    assert observer.events[0].payload[0].value == (
+    digest = observer.events[0].payload[0].value
+    assert digest != (
         "2bb80d537b1da3e38bd30361aa855686bde0eacd"
         "7162fef6a25fe97bf527a25b"
     )
+    assert observer.events[1].payload[0].value == digest
+    assert other_observer.events[0].payload[0].value != digest
+
+
+def test_capture_fingerprint_key_exists_only_for_hashed_capture() -> None:
+    observer = Observer()
+    metadata_capture = AgentCapturePolicy(
+        RedactionPolicy(
+            dependency=BodyCapture.METADATA,
+            max_body_bytes=1,
+            max_fields=1,
+        ),
+        fields=frozenset({"arguments"}),
+    )
+    hashed_capture = AgentCapturePolicy(
+        RedactionPolicy(
+            dependency=BodyCapture.HASHED,
+            max_body_bytes=64,
+            max_fields=1,
+        ),
+        fields=frozenset({"arguments"}),
+    )
+
+    assert AgentObservability(observer=observer)._hash_key is None
+    assert AgentObservability(observer=observer, capture=metadata_capture)._hash_key is None
+    assert len(AgentObservability(observer=observer, capture=hashed_capture)._hash_key or b"") == 32
+
+
+def test_hashed_capture_refuses_a_missing_internal_fingerprint_key() -> None:
+    capture = AgentCapturePolicy(
+        RedactionPolicy(
+            dependency=BodyCapture.HASHED,
+            max_body_bytes=64,
+            max_fields=1,
+        ),
+        fields=frozenset({"arguments"}),
+    )
+    telemetry = AgentObservability(observer=Observer(), capture=capture)
+    telemetry._hash_key = None
+
+    with pytest.raises(RuntimeError, match="has no fingerprint key"):
+        telemetry._payload({"arguments": "secret"})

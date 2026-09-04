@@ -95,46 +95,153 @@ static int
 decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
 {
     PyObject *scope_vars[MAX_LOOP_DEPTH];
+    Py_ssize_t loop_starts[MAX_LOOP_DEPTH];
     int scope_depth = 0;
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject *instr = PyTuple_GET_ITEM(tape, i);
+        if (!PyTuple_CheckExact(instr) || PyTuple_GET_SIZE(instr) < 1) {
+            PyErr_Format(PyExc_TypeError,
+                         "template tape instruction %zd must be a non-empty exact tuple", i);
+            return -1;
+        }
+        PyObject *op_object = PyTuple_GET_ITEM(instr, 0);
+        if (!PyLong_CheckExact(op_object)) {
+            PyErr_Format(PyExc_TypeError,
+                         "template tape instruction %zd opcode must be an exact integer", i);
+            return -1;
+        }
         decoded *slot = &out[i];
         slot->line = 0;
         slot->target = 0;
         slot->first = NULL;
         slot->path = NULL;
         slot->binding = -1;
-        long op = PyLong_AsLong(PyTuple_GET_ITEM(instr, 0));
+        long op = PyLong_AsLong(op_object);
         if (op == -1 && PyErr_Occurred()) {
             return -1;
         }
         slot->op = (int)op;
         switch (op) {
         case OP_TEXT:
+            if (PyTuple_GET_SIZE(instr) != 2 ||
+                !PyBytes_CheckExact(PyTuple_GET_ITEM(instr, 1))) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape text instruction %zd must be (opcode, exact bytes)", i);
+                return -1;
+            }
             slot->first = PyTuple_GET_ITEM(instr, 1);
             break;
         case OP_VAR:
+            if (PyTuple_GET_SIZE(instr) != 3) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape variable instruction %zd must have three fields", i);
+                return -1;
+            }
+            if (!PyLong_CheckExact(PyTuple_GET_ITEM(instr, 2))) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape variable instruction %zd line must be an exact integer", i);
+                return -1;
+            }
             slot->first = PyTuple_GET_ITEM(instr, 1);
             slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 2));
             break;
         case OP_IF:
+            if (PyTuple_GET_SIZE(instr) != 4) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape if instruction %zd must have four fields", i);
+                return -1;
+            }
+            if (!PyLong_CheckExact(PyTuple_GET_ITEM(instr, 2)) ||
+                !PyLong_CheckExact(PyTuple_GET_ITEM(instr, 3))) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape if instruction %zd target and line must be exact integers", i);
+                return -1;
+            }
             slot->first = PyTuple_GET_ITEM(instr, 1);
             slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 2));
             slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 3));
             break;
         case OP_JUMP:
+            if (PyTuple_GET_SIZE(instr) != 2) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape jump instruction %zd must have two fields", i);
+                return -1;
+            }
+            if (!PyLong_CheckExact(PyTuple_GET_ITEM(instr, 1))) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape jump instruction %zd target must be an exact integer", i);
+                return -1;
+            }
             slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 1));
             break;
         case OP_FOR:
+            if (PyTuple_GET_SIZE(instr) != 5) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape for instruction %zd must have five fields", i);
+                return -1;
+            }
+            if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(instr, 1)) ||
+                !PyLong_CheckExact(PyTuple_GET_ITEM(instr, 3)) ||
+                !PyLong_CheckExact(PyTuple_GET_ITEM(instr, 4))) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape for instruction %zd needs an exact string variable and exact integer target and line",
+                             i);
+                return -1;
+            }
             slot->first = PyTuple_GET_ITEM(instr, 1);
             slot->path = PyTuple_GET_ITEM(instr, 2);
             slot->target = PyLong_AsSsize_t(PyTuple_GET_ITEM(instr, 3));
             slot->line = (int)PyLong_AsLong(PyTuple_GET_ITEM(instr, 4));
             break;
+        case OP_ENDFOR:
+        case OP_ENDIF:
+            if (PyTuple_GET_SIZE(instr) != 1) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape terminal instruction %zd must have one field", i);
+                return -1;
+            }
+            break;
         default:
-            break;  /* ENDIF and ENDFOR carry no operands; unknown ops none. */
+            PyErr_Format(PyExc_ValueError,
+                         "template tape instruction %zd has invalid opcode %ld", i, op);
+            return -1;
         }
         if (PyErr_Occurred()) {
+            return -1;
+        }
+
+        PyObject *path = NULL;
+        if (op == OP_VAR || op == OP_IF) path = slot->first;
+        else if (op == OP_FOR) path = slot->path;
+        if (path != NULL) {
+            if (!PyTuple_CheckExact(path) || PyTuple_GET_SIZE(path) < 1) {
+                PyErr_Format(PyExc_TypeError,
+                             "template tape instruction %zd lookup path must be a non-empty exact tuple", i);
+                return -1;
+            }
+            for (Py_ssize_t segment = 0; segment < PyTuple_GET_SIZE(path); segment++) {
+                if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(path, segment))) {
+                    PyErr_Format(PyExc_TypeError,
+                                 "template tape instruction %zd lookup path segment %zd must be an exact string",
+                                 i, segment);
+                    return -1;
+                }
+            }
+        }
+        if ((op == OP_VAR || op == OP_IF || op == OP_FOR) && slot->line < 1) {
+            PyErr_Format(PyExc_ValueError,
+                         "template tape instruction %zd line must be a positive integer", i);
+            return -1;
+        }
+        if ((op == OP_IF || op == OP_JUMP) &&
+            (slot->target <= i || slot->target >= n)) {
+            PyErr_Format(PyExc_ValueError,
+                         "template tape instruction %zd jump target is out of range", i);
+            return -1;
+        }
+        if (op == OP_FOR && (slot->target <= i + 1 || slot->target > n)) {
+            PyErr_Format(PyExc_ValueError,
+                         "template tape for instruction %zd end target is out of range", i);
             return -1;
         }
 
@@ -159,12 +266,113 @@ decode_tape(PyObject *tape, Py_ssize_t n, decoded *out)
                 }
             }
         }
-        if (op == OP_FOR && scope_depth < MAX_LOOP_DEPTH) {
+        if (op == OP_FOR) {
+            if (scope_depth >= MAX_LOOP_DEPTH) {
+                PyErr_SetString(PyExc_ValueError,
+                                "template tape loop nesting exceeds 64");
+                return -1;
+            }
+            loop_starts[scope_depth] = i;
             scope_vars[scope_depth++] = slot->first;
-        } else if (op == OP_ENDFOR && scope_depth > 0) {
+        } else if (op == OP_ENDFOR) {
+            if (scope_depth == 0) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape instruction %zd closes no loop", i);
+                return -1;
+            }
             scope_depth--;
+            if (out[loop_starts[scope_depth]].target != i + 1) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape loop ending at instruction %zd has an inconsistent target", i);
+                return -1;
+            }
         }
     }
+    if (scope_depth != 0) {
+        PyErr_SetString(PyExc_ValueError, "template tape has an unclosed loop");
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    int op;
+    Py_ssize_t start;
+    Py_ssize_t jump;
+} control_block;
+
+static int
+validate_control_flow(const decoded *program, Py_ssize_t n)
+{
+    control_block *blocks = NULL;
+    Py_ssize_t depth = 0;
+    if (n > 0) {
+        blocks = PyMem_Malloc((size_t)n * sizeof(control_block));
+        if (blocks == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int op = program[i].op;
+        if (op == OP_IF || op == OP_FOR) {
+            blocks[depth++] = (control_block){op, i, -1};
+            continue;
+        }
+        if (op == OP_JUMP) {
+            if (depth == 0 || blocks[depth - 1].op != OP_IF ||
+                blocks[depth - 1].jump >= 0 ||
+                program[blocks[depth - 1].start].target != i + 1) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape jump instruction %zd is not a valid else branch", i);
+                PyMem_Free(blocks);
+                return -1;
+            }
+            blocks[depth - 1].jump = i;
+            continue;
+        }
+        if (op == OP_ENDIF) {
+            if (depth == 0 || blocks[depth - 1].op != OP_IF) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape instruction %zd closes no if block", i);
+                PyMem_Free(blocks);
+                return -1;
+            }
+            control_block block = blocks[--depth];
+            Py_ssize_t target = block.jump < 0
+                ? program[block.start].target
+                : program[block.jump].target;
+            if (target != i) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape if block ending at instruction %zd has an inconsistent target", i);
+                PyMem_Free(blocks);
+                return -1;
+            }
+            continue;
+        }
+        if (op == OP_ENDFOR) {
+            if (depth == 0 || blocks[depth - 1].op != OP_FOR) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape instruction %zd closes no for block", i);
+                PyMem_Free(blocks);
+                return -1;
+            }
+            control_block block = blocks[--depth];
+            if (program[block.start].target != i + 1) {
+                PyErr_Format(PyExc_ValueError,
+                             "template tape for block ending at instruction %zd has an inconsistent target", i);
+                PyMem_Free(blocks);
+                return -1;
+            }
+        }
+    }
+    if (depth != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "template tape has an unclosed control block");
+        PyMem_Free(blocks);
+        return -1;
+    }
+    PyMem_Free(blocks);
     return 0;
 }
 
@@ -983,7 +1191,8 @@ wreath_template_compile(PyObject *self, PyObject *tape)
             PyMem_Free(compiled);
             return PyErr_NoMemory();
         }
-        if (decode_tape(tape, n, compiled->program) < 0) {
+        if (decode_tape(tape, n, compiled->program) < 0 ||
+            validate_control_flow(compiled->program, n) < 0) {
             Py_DECREF(compiled->tape);
             PyMem_Free(compiled->program);
             PyMem_Free(compiled);
@@ -1001,6 +1210,23 @@ wreath_template_compile(PyObject *self, PyObject *tape)
     return capsule;
 }
 
+static int
+parse_output_bound(PyObject *value, Py_ssize_t *bound)
+{
+    if (!PyLong_CheckExact(value)) {
+        PyErr_SetString(PyExc_TypeError, "max_output must be an integer");
+        return -1;
+    }
+    *bound = PyLong_AsSsize_t(value);
+    if (*bound == -1 && PyErr_Occurred()) return -1;
+    if (*bound < 1) {
+        PyErr_SetString(PyExc_ValueError,
+                        "max_output must be a positive integer");
+        return -1;
+    }
+    return 0;
+}
+
 /* template_render_compiled(program, context, max_output) -> bytes */
 PyObject *
 wreath_template_render_compiled(PyObject *self, PyObject *args)
@@ -1008,10 +1234,12 @@ wreath_template_render_compiled(PyObject *self, PyObject *args)
     (void)self;
     PyObject *capsule;
     PyObject *context;
+    PyObject *max_output_object;
     Py_ssize_t max_output;
-    if (!PyArg_ParseTuple(args, "OOn", &capsule, &context, &max_output)) {
+    if (!PyArg_ParseTuple(args, "OOO", &capsule, &context, &max_output_object)) {
         return NULL;
     }
+    if (parse_output_bound(max_output_object, &max_output) < 0) return NULL;
     if (RenderError == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "templates not configured");
         return NULL;
@@ -1039,10 +1267,12 @@ wreath_template_render_compiled_tail(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *capsule;
     PyObject *context;
     PyObject *tail;
+    PyObject *max_output_object;
     Py_ssize_t max_output;
     if (!PyArg_ParseTuple(
-            args, "OOOn:template_render_compiled_tail", &capsule, &context,
-            &tail, &max_output)) return NULL;
+            args, "OOOO:template_render_compiled_tail", &capsule, &context,
+            &tail, &max_output_object)) return NULL;
+    if (parse_output_bound(max_output_object, &max_output) < 0) return NULL;
     if (RenderError == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "templates not configured");
         return NULL;

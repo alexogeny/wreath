@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -22,6 +23,28 @@ class _InstallationOrganizations:
         if (provider, installation) == ("slack", "T1"):
             return "acme"
         return None
+
+
+def test_invitation_repr_does_not_expose_capability_token() -> None:
+    token = "invitation-capability-secret"
+    invitation = Invitation(token, "acme", "alice@example.com")
+
+    assert token not in repr(invitation)
+
+
+def test_authorization_records_snapshot_mutable_role_inputs() -> None:
+    membership_roles = {"member"}
+    invitation_roles = {"admin"}
+    membership = Membership("acme", "alice", cast(frozenset[str], membership_roles))
+    invitation = Invitation(
+        "token", "acme", "alice@example.com", cast(frozenset[str], invitation_roles)
+    )
+
+    membership_roles.add("admin")
+    invitation_roles.add("owner")
+
+    assert membership.roles == frozenset({"member"})
+    assert invitation.roles == frozenset({"admin"})
 
 
 async def test_chat_federation_reads_the_scim_owned_membership_each_time() -> None:
@@ -155,6 +178,12 @@ async def test_an_undeclared_role_is_refused() -> None:
         await store.add_member("acme", "alice", roles={"amdin"})
 
 
+@pytest.mark.asyncio
+async def test_an_invitation_expiry_must_remain_finite_after_ttl_is_added() -> None:
+    with pytest.raises(ValueError, match="invitation expiry must be finite"):
+        await _store().invite("acme", "alice@example.com", now=1e308, ttl=1e308)
+
+
 def test_a_store_with_no_declared_roles_is_refused() -> None:
     with pytest.raises(ValueError, match="non-empty role vocabulary"):
         InMemoryOrganizationStore(roles=())
@@ -163,6 +192,14 @@ def test_a_store_with_no_declared_roles_is_refused() -> None:
 def test_a_postgres_store_with_no_declared_roles_is_refused() -> None:
     with pytest.raises(ValueError, match="non-empty role vocabulary"):
         PostgresOrganizationStore(object(), roles=())
+
+
+@pytest.mark.parametrize("store_type", [InMemoryOrganizationStore, PostgresOrganizationStore])
+def test_role_vocabulary_refuses_a_string_or_non_string_element(store_type) -> None:
+    for roles in ("admin", [object()], 1):
+        args = () if store_type is InMemoryOrganizationStore else (object(),)
+        with pytest.raises(TypeError, match="roles must be a collection of strings"):
+            store_type(*args, roles=roles)
 
 
 @pytest.mark.asyncio
@@ -402,6 +439,21 @@ class _Database:
 
 def _postgres(database: _Database | None = None) -> PostgresOrganizationStore:
     return PostgresOrganizationStore(database or _Database(), roles=ROLES)
+
+
+@pytest.mark.parametrize("store", [_store(), _postgres()])
+@pytest.mark.parametrize("operation", ["add_member", "invite"])
+async def test_role_assignment_refuses_elements_that_only_stringify_to_a_role(
+    store, operation: str
+) -> None:
+    class PretendsToBeAdmin:
+        def __str__(self) -> str:
+            return "admin"
+
+    assign = getattr(store, operation)
+    args = ("acme", "alice") if operation == "add_member" else ("acme", "a@example.test")
+    with pytest.raises(TypeError, match="roles must be a collection of strings"):
+        await assign(*args, roles=[PretendsToBeAdmin()])
 
 
 def test_the_postgres_store_satisfies_the_public_protocol() -> None:

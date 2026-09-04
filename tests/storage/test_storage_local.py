@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import os
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +23,14 @@ def test_normalize_key_rejects_escapes():
     for bad in ("/abs", "../x", "a/../../b", "", ".", "a/\x00/b"):
         with pytest.raises(ObjectError):
             normalize_key(bad)
+
+
+def test_normalize_key_enforces_s3s_utf8_key_limit_and_refuses_surrogates():
+    assert normalize_key("é" * 512) == "é" * 512
+    with pytest.raises(ObjectError, match="at most 1024 UTF-8 bytes"):
+        normalize_key("é" * 512 + "a")
+    with pytest.raises(ObjectError, match="valid UTF-8"):
+        normalize_key("bad-\ud800-key")
 
 
 def test_roundtrip_and_stat(tmp_path):
@@ -49,6 +59,26 @@ def test_atomic_overwrite_and_ranged_read(tmp_path):
             chunks += c
         assert chunks == b"cdef"
         s.close()
+
+    _run(go())
+
+
+@pytest.mark.parametrize(
+    "byte_range",
+    [(-1, 1), (2, 1), (True, 1), (0, False), (0, 1 << 63), [0, 1]],
+)
+def test_memory_and_local_stores_refuse_malformed_byte_ranges(tmp_path, byte_range):
+    async def go():
+        memory = MemoryObjectStore()
+        local = LocalObjectStore(tmp_path)
+        await memory.write("k", b"data")
+        await local.write("k", b"data")
+        try:
+            for store in (memory, local):
+                with pytest.raises(ObjectError, match="range must be two integers"):
+                    _ = [chunk async for chunk in store.read_stream("k", range=byte_range)]
+        finally:
+            local.close()
 
     _run(go())
 
@@ -94,6 +124,24 @@ def test_list_pushes_a_directory_prefix_into_the_native_walk(tmp_path, monkeypat
     assert len(walked) == 1
     assert walked[0] != os.fspath(tmp_path), "the unrelated archive must not be traversed"
     s.close()
+
+
+def test_listing_remains_bound_to_the_open_root_after_its_path_is_replaced(tmp_path):
+    root = tmp_path / "root"
+
+    async def go():
+        store = LocalObjectStore(root)
+        await store.write("owned.txt", b"ours")
+        moved = tmp_path / "moved"
+        root.rename(moved)
+        root.mkdir()
+        (root / "outside.txt").write_bytes(b"not ours")
+        try:
+            assert [item.key async for item in store.list()] == ["owned.txt"]
+        finally:
+            store.close()
+
+    _run(go())
 
 
 def test_missing_and_delete(tmp_path):
@@ -168,6 +216,58 @@ def test_a_memory_signed_url_expires_the_same_way(monkeypatch):
     assert not s.verify_local_url("a.txt", **args)
 
 
+def test_a_local_signature_is_invalid_at_its_exact_deadline(monkeypatch):
+    store = MemoryObjectStore(url_secret=b"k" * 32)
+    monkeypatch.setattr(objects, "_now", lambda: 500.0)
+    query = _query(store.url("a.txt", expires=60, method="GET"))
+    monkeypatch.setattr(objects, "_now", lambda: 560.0)
+
+    assert not store.verify_local_url(
+        "a.txt",
+        method="GET",
+        expires=int(query["expires"]),
+        signature=query["signature"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "expires", "signature"),
+    [
+        (None, 560, "0" * 64),
+        ("GET", "560", "0" * 64),
+        ("GET", True, "0" * 64),
+        ("GET", 560, b"0" * 64),
+    ],
+)
+def test_malformed_local_signature_fields_are_a_refusal_not_an_error(method, expires, signature):
+    store = MemoryObjectStore(url_secret=b"k" * 32)
+
+    assert not store.verify_local_url(
+        "a.txt", method=method, expires=expires, signature=signature
+    )
+
+
+def test_a_string_deadline_from_an_unparsed_query_is_a_refusal_not_an_error(monkeypatch):
+    store = MemoryObjectStore(url_secret=b"k" * 32)
+    monkeypatch.setattr(objects, "_now", lambda: 500.0)
+    query = _query(store.url("a.txt", expires=60))
+
+    assert not store.verify_local_url(
+        "a.txt",
+        method="GET",
+        expires=cast(Any, query["expires"]),
+        signature=query["signature"],
+    )
+
+
+@pytest.mark.parametrize("expires", [True, 0, -1])
+def test_local_url_refuses_an_invalid_lifetime(expires):
+    store = MemoryObjectStore(url_secret=b"k" * 32)
+
+    with pytest.raises(ValueError, match="expires must be a positive integer"):
+        store.url("a.txt", expires=expires)
+
+
 def test_etags_have_one_format_across_backends(tmp_path):
     async def go():
         mem = MemoryObjectStore()
@@ -178,6 +278,26 @@ def test_etags_have_one_format_across_backends(tmp_path):
         assert (await mem.stat("a.bin")).etag == stats[0].etag
         assert (await local.stat("a.bin")).etag == stats[1].etag
         local.close()
+
+    _run(go())
+
+
+def test_local_atomic_versions_use_sha256_while_public_memory_etags_remain_md5(tmp_path):
+    data = b"attacker-controlled object bytes"
+
+    async def go():
+        memory = MemoryObjectStore()
+        local = LocalObjectStore(tmp_path)
+        try:
+            for store in (memory, local):
+                stat = await store.write("state", data)
+                versioned = await store._upload_read_versioned("state")
+                assert versioned is not None
+                assert versioned[1] == hashlib.sha256(data).hexdigest()
+                if store is memory:
+                    assert stat.etag == hashlib.md5(data, usedforsecurity=False).hexdigest()
+        finally:
+            local.close()
 
     _run(go())
 
@@ -450,6 +570,32 @@ def test_memory_list_matches_the_prefix_it_was_given(tmp_path):
     _run(go())
 
 
+def test_memory_and_local_listing_refuse_an_oversized_prefix_before_walking(tmp_path, monkeypatch):
+    memory = MemoryObjectStore()
+    local = LocalObjectStore(tmp_path)
+    walked = False
+
+    def fail_walk(*args):
+        nonlocal walked
+        walked = True
+        raise AssertionError("oversized prefix reached the filesystem")
+
+    monkeypatch.setattr(objects._core, "local_walk", fail_walk)
+
+    async def go():
+        try:
+            for store in (memory, local):
+                with pytest.raises(
+                    ObjectError, match="prefix must contain at most 1024 UTF-8 bytes"
+                ):
+                    _ = [item async for item in store.list("é" * 513)]
+        finally:
+            local.close()
+
+    _run(go())
+    assert not walked
+
+
 @pytest.mark.parametrize(
     "signature",
     [
@@ -463,3 +609,29 @@ def test_a_non_ascii_signature_is_refused_rather_than_raised(signature):
     assert not store.verify_local_url(
         "reports/q3.csv", method="GET", expires=1_000_900, signature=signature
     )
+
+
+def test_an_oversized_signature_is_refused_before_hmac(monkeypatch):
+    store = MemoryObjectStore(url_secret=_SECRET)
+
+    def fail_sign(*args):
+        raise AssertionError("an invalid signature reached the HMAC operation")
+
+    monkeypatch.setattr(objects, "_sign_local", fail_sign)
+    assert not store.verify_local_url(
+        "reports/q3.csv", method="GET", expires=1_000_900, signature="0" * 100_000
+    )
+
+
+def test_stat_refuses_a_directory_as_not_a_regular_object(tmp_path):
+    (tmp_path / "directory").mkdir()
+    store = LocalObjectStore(tmp_path)
+
+    async def go():
+        try:
+            with pytest.raises(ObjectError, match="not a regular file"):
+                await store.stat("directory")
+        finally:
+            store.close()
+
+    _run(go())

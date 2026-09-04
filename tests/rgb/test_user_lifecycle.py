@@ -71,7 +71,7 @@ class TestResetEndsSessions:
             new_password="a-much-better-one",
         )
         assert done is True
-        assert sessions.deleted_for == [user.id]
+        assert sessions.deleted_for == [user.id, user.id]
         assert "sid-ann" not in sessions.rows
         assert "sid-other" in sessions.rows, "another user's session was dropped"
 

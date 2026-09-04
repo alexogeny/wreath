@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -198,6 +198,58 @@ def test_compatible_configuration_refuses_an_empty_configured_key() -> None:
             transport=Transport([]),
             api_key="",
         )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://models.example\r.evil/v1",
+        "https://models.example/v1\t/../../admin",
+        "https://models.example/v1\x7fadmin",
+    ],
+)
+def test_backplane_base_url_refuses_parser_control_ambiguity(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base_url.*absolute http or https"):
+        OpenAICompatibleBackplane(base_url=base_url, transport=Transport([]))
+
+
+def test_backplane_base_url_must_be_text() -> None:
+    with pytest.raises(ValueError, match="base_url.*absolute http or https"):
+        OpenAICompatibleBackplane(
+            base_url=cast(Any, 7), transport=Transport([])
+        )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: OpenAIResponsesBackplane(
+            api_key="secret\r\nx-injected: yes", transport=Transport([])
+        ),
+        lambda: AnthropicMessagesBackplane(
+            api_key="secret\x7f", transport=Transport([])
+        ),
+        lambda: AnthropicMessagesBackplane(
+            api_key="secret", api_version="version\nextra", transport=Transport([])
+        ),
+        lambda: GeminiGenerateContentBackplane(
+            api_key="secret\tvalue", transport=Transport([])
+        ),
+        lambda: OpenAICompatibleBackplane(
+            base_url="https://models.example/v1",
+            api_key="secret\rvalue",
+            transport=Transport([]),
+        ),
+        lambda: OpenAICompatibleBackplane(
+            base_url="https://models.example/v1",
+            api_key=cast(Any, 7),
+            transport=Transport([]),
+        ),
+    ],
+)
+def test_backplane_credentials_cannot_inject_transport_headers(factory: Any) -> None:
+    with pytest.raises(ValueError, match="header"):
+        factory()
 
 
 @pytest.mark.parametrize(
@@ -1307,3 +1359,112 @@ async def test_http_errors_preserve_status_request_id_and_retryability(
     assert raised.value.request_id == "req_error"
     assert raised.value.retryable is retryable
     assert raised.value.output_started is False
+
+
+async def test_redirect_response_is_never_interpreted_as_provider_success() -> None:
+    transport = Transport(
+        [(302, {}, b'{"id":"redirect-body","output":[],"usage":{}}')]
+    )
+    plane = OpenAIResponsesBackplane(
+        api_key="secret",
+        transport=transport,
+        streaming=False,
+        max_retries=0,
+    )
+
+    with pytest.raises(BackplaneError, match="HTTP 302") as raised:
+        _ = [event async for event in plane.stream(request())]
+
+    assert raised.value.status == 302
+    assert raised.value.retryable is False
+
+
+@pytest.mark.parametrize("status", [True, 99, 600])
+async def test_transport_status_must_be_an_http_status_integer(status: Any) -> None:
+    transport = Transport(
+        [(status, {}, b'{"id":"invalid-status","output":[],"usage":{}}')]
+    )
+    plane = OpenAIResponsesBackplane(
+        api_key="secret",
+        transport=transport,
+        streaming=False,
+        max_retries=0,
+    )
+
+    with pytest.raises(BackplaneError, match="invalid response"):
+        _ = [event async for event in plane.stream(request())]
+
+
+async def test_invalid_response_metadata_closes_body_and_cannot_inject_request_id() -> None:
+    body = ClosableBody(b'{"error":{"message":"refused"}}')
+    transport = Transport(
+        [(400, {"x-request-id": "request\r\ninjected"}, body)]
+    )
+    plane = OpenAIResponsesBackplane(
+        api_key="secret",
+        transport=transport,
+        streaming=False,
+        max_retries=0,
+    )
+
+    with pytest.raises(BackplaneError, match="invalid response header") as raised:
+        _ = [event async for event in plane.stream(request())]
+
+    assert raised.value.request_id is None
+    assert body.closed is True
+
+
+async def test_each_invalid_response_header_form_is_refused_and_closed() -> None:
+    headers: tuple[Mapping[Any, Any], ...] = (
+        {7: "value"},
+        {"": "value"},
+        {"bad name": "value"},
+        {"caf\N{LATIN SMALL LETTER E WITH ACUTE}": "value"},
+        {"x-value": 7},
+        {"x-value": "line\rbreak"},
+        {"x-value": "delete\x7f"},
+    )
+    for raw_headers in headers:
+        body = ClosableBody(b"ignored")
+        plane = OpenAIResponsesBackplane(
+            api_key="secret",
+            transport=Transport([(400, cast(Any, raw_headers), body)]),
+            streaming=False,
+            max_retries=0,
+        )
+
+        with pytest.raises(BackplaneError, match="invalid response header"):
+            _ = [event async for event in plane.stream(request())]
+
+        assert body.closed is True
+
+
+async def test_response_header_horizontal_tab_remains_valid_field_whitespace() -> None:
+    plane = OpenAIResponsesBackplane(
+        api_key="secret",
+        transport=Transport(
+            [(200, {"x-detail": "one\ttwo"}, b'{"id":"ok","output":[],"usage":{}}')]
+        ),
+        streaming=False,
+        max_retries=0,
+    )
+
+    events = [event async for event in plane.stream(request())]
+
+    assert events[-1].kind == "completed"
+
+
+async def test_invalid_response_status_closes_streaming_body() -> None:
+    body = ClosableBody(b"ignored")
+    transport = Transport([(True, {}, body)])
+    plane = OpenAIResponsesBackplane(
+        api_key="secret",
+        transport=transport,
+        streaming=False,
+        max_retries=0,
+    )
+
+    with pytest.raises(BackplaneError, match="invalid response"):
+        _ = [event async for event in plane.stream(request())]
+
+    assert body.closed is True

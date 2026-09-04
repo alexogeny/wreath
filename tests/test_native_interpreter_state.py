@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json as stdlib_json
+import subprocess
+import sys
 from collections.abc import Callable
 
 import pytest
@@ -8,6 +10,28 @@ import pytest
 from wreath._native import _core
 
 native = pytest.mark.skipif(_core is None, reason="native extension not built")
+
+
+@native
+def test_json_fallback_does_not_retain_an_ended_interpreter() -> None:
+    snippet = (
+        "from wreath._native import _core; "
+        "value = chr(34) + chr(0xd800) + chr(34); "
+        "assert _core.json_loads(value) == chr(0xd800)"
+    )
+    script = (
+        "import _testcapi\n"
+        f"snippet = {snippet!r}\n"
+        "assert _testcapi.run_in_subinterp(snippet) == 0\n"
+        "assert _testcapi.run_in_subinterp(snippet) == 0\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 # CPython caches, and shares process-wide, the single-character `bytes` objects

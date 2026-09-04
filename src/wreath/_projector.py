@@ -29,12 +29,13 @@ emitted.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Final
+from typing import Any, Final, cast
 from typing import Protocol as _Protocol
 
 from ._drainthread import DrainThread
@@ -84,6 +85,26 @@ _DEFAULT_RECENT: Final = 1024  # finished traces retained for the Inspector
 _DEFAULT_FAILURES: Final = 256  # failed traces retained separately
 _DEFAULT_PENDING: Final = 8192  # completions awaiting their trailing cells
 _DEFAULT_ROUTES: Final = 4096  # distinct route buckets in the metric table
+
+
+def _positive_number(value: object, name: str) -> None:
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a finite positive number")
+    number = cast(int | float, value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a finite positive number")
+
+
+def _bounded_count(value: object, name: str, *, allow_zero: bool) -> None:
+    minimum = 0 if allow_zero else 1
+    if type(value) is not int or value < minimum:
+        form = "a non-negative integer" if allow_zero else "a positive integer"
+        raise ValueError(f"{name} must be {form}")
+
+
+def _optional_hook(value: object, name: str) -> None:
+    if value is not None and not callable(value):
+        raise TypeError(f"{name} must be callable or None")
 
 
 @dataclass(slots=True)
@@ -273,10 +294,15 @@ class Projector:
         on_log: Callable[[ProjectedLog], None] | None = None,
         on_cells: Callable[[bytes], None] | None = None,
     ) -> None:
-        if interval <= 0:
-            raise ValueError("interval must be positive")
-        if max_cells <= 0:
-            raise ValueError("max_cells must be positive")
+        _positive_number(interval, "interval")
+        _bounded_count(max_cells, "max_cells", allow_zero=False)
+        _bounded_count(recent, "recent", allow_zero=True)
+        _bounded_count(failures, "failures", allow_zero=True)
+        _bounded_count(pending, "pending", allow_zero=False)
+        _bounded_count(max_routes, "max_routes", allow_zero=True)
+        _optional_hook(on_trace, "on_trace")
+        _optional_hook(on_log, "on_log")
+        _optional_hook(on_cells, "on_cells")
         self._recorder = recorder
         # Clock calibration: (epoch_mono_ns, epoch_unix_ns). A completion's
         # end_offset_ms maps to Unix time as epoch_unix + end_offset_ms*1e6, which
@@ -332,6 +358,7 @@ class Projector:
         A final drain on the way out flushes whatever the ring still holds, so
         shutdown does not silently strand recorded cells.
         """
+        _positive_number(timeout, "timeout")
         self._drain.stop(timeout)
 
     def _flush(self) -> None:
@@ -523,13 +550,17 @@ class Projector:
         self, *, recent: int | None = None, failures: int | None = None
     ) -> ProjectorSnapshot:
         """A consistent, copied read of the projector's aggregated state."""
+        if recent is not None:
+            _bounded_count(recent, "recent", allow_zero=True)
+        if failures is not None:
+            _bounded_count(failures, "failures", allow_zero=True)
         with self._lock:
             recent_items = tuple(self._recent)
             failure_items = tuple(self._failures)
             if recent is not None:
-                recent_items = recent_items[-recent:]
+                recent_items = recent_items[-recent:] if recent else ()
             if failures is not None:
-                failure_items = failure_items[-failures:]
+                failure_items = failure_items[-failures:] if failures else ()
             routes = tuple(
                 RouteMetric(
                     route_id=m.route_id,

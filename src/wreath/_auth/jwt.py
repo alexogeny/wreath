@@ -134,8 +134,13 @@ _DIGEST_INFO = {
 class SymmetricKey:
     """An HMAC shared secret. Usable only for HS256/384/512."""
 
-    secret: bytes
+    secret: bytes = field(repr=False)
     family: str = field(default="HS", init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.secret, (bytes, bytearray)):
+            raise TypeError("SymmetricKey secret must be bytes")
+        object.__setattr__(self, "secret", bytes(self.secret))
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +150,10 @@ class RsaPublicKey:
     n: int
     e: int
     family: str = field(default="RSA", init=False)
+
+    def __post_init__(self) -> None:
+        if self.e < 3 or self.e % 2 == 0:
+            raise JwtError("RSA public exponent must be an odd integer of at least 3")
 
     @property
     def size(self) -> int:
@@ -217,8 +226,10 @@ def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
     if kty == "RSA":
         n = int.from_bytes(_b64url_decode(jwk["n"]), "big")
         e = int.from_bytes(_b64url_decode(jwk["e"]), "big")
-        if n <= 0 or e <= 0:
-            raise JwtError("invalid RSA JWK parameters")
+        if n <= 0:
+            raise JwtError("RSA JWK modulus must be positive")
+        if e >= n:
+            raise JwtError("RSA public exponent must be smaller than the modulus")
         if n.bit_length() < MIN_RSA_MODULUS_BITS:
             raise JwtError(
                 f"RSA modulus is {n.bit_length()} bits; at least "
@@ -258,8 +269,10 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
         body.append(line)
     der = base64.b64decode("".join(body))
     n, e = _rsa_public_from_der(der, kind)
-    if n <= 0 or e <= 0:
-        raise JwtError("invalid RSA public key")
+    if n <= 0:
+        raise JwtError("RSA public-key modulus must be positive")
+    if e >= n:
+        raise JwtError("RSA public exponent must be smaller than the modulus")
     if n.bit_length() < MIN_RSA_MODULUS_BITS:
         raise JwtError(
             f"RSA modulus is {n.bit_length()} bits; at least {MIN_RSA_MODULUS_BITS} are required"

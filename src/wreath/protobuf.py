@@ -175,6 +175,23 @@ _DEFAULT_KIND: dict[type, int] = {
     bytes: KIND_BYTES,
 }
 
+_MAP_KEY_KINDS = frozenset(
+    {
+        KIND_INT32,
+        KIND_INT64,
+        KIND_UINT32,
+        KIND_UINT64,
+        KIND_SINT32,
+        KIND_SINT64,
+        KIND_FIXED32,
+        KIND_SFIXED32,
+        KIND_FIXED64,
+        KIND_SFIXED64,
+        KIND_BOOL,
+        KIND_STRING,
+    }
+)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class FieldSpec:
@@ -263,20 +280,47 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
     origin = typing.get_origin(inner)
     if origin is list:
         (item,) = typing.get_args(inner)
+        item_inner, item_optional = _unwrap_optional(item)
+        if item_optional or typing.get_origin(item_inner) in (list, dict):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: a repeated item cannot be optional, repeated, or a map"
+            )
         kind, _sub_flags, subplan, holder = _resolve(item, name, spec)
         if kind == KIND_MESSAGE:
+            if spec.packed is not None:
+                raise ProtobufDeclarationError(
+                    f"field {name!r}: packed is only valid for a repeated scalar field"
+                )
             return kind, flags | FLAG_REPEATED, subplan, holder
+        if spec.packed is not None and kind in (KIND_STRING, KIND_BYTES):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: packed is only valid for a repeated numeric or boolean field"
+            )
         packed = True if spec.packed is None else spec.packed
         if packed and kind not in (KIND_STRING, KIND_BYTES):
             flags |= FLAG_PACKED
         return kind, flags | FLAG_REPEATED, None, holder
     if origin is dict:
+        if spec.kind is not None:
+            raise ProtobufDeclarationError(
+                f"field {name!r}: kind is not valid on a map; declare its key and value types"
+            )
         key_type, value_type = typing.get_args(inner)
+        key_inner, key_optional = _unwrap_optional(key_type)
+        value_inner, value_optional = _unwrap_optional(value_type)
+        if key_optional or typing.get_origin(key_inner) in (list, dict):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: a map key must be an integer, boolean, or string"
+            )
+        if value_optional or typing.get_origin(value_inner) in (list, dict):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: a map value cannot be optional, repeated, or another map"
+            )
         key_kind, _kf, _ks, _kh = _resolve(key_type, name, spec)
         value_kind, _vf, value_sub, value_holder = _resolve(value_type, name, spec)
-        if key_kind in (KIND_DOUBLE, KIND_FLOAT, KIND_MESSAGE):
+        if key_kind not in _MAP_KEY_KINDS:
             raise ProtobufDeclarationError(
-                f"field {name!r}: a map key may not be a float or a message"
+                f"field {name!r}: a map key must be an integer, boolean, or string"
             )
         subplan = (
             (1, key_kind, 0, None),
@@ -405,6 +449,26 @@ def message[T](cls: type[T]) -> type[T]:
                 f"field {name!r}: number {number} is already used by {seen[number]!r}"
             )
         seen[number] = name
+
+        if spec.kind is not None and not isinstance(spec.kind, str):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: kind must be a string naming a protobuf scalar kind"
+            )
+        if spec.packed is not None and type(spec.packed) is not bool:
+            raise ProtobufDeclarationError(
+                f"field {name!r}: packed must be a boolean"
+            )
+        if spec.oneof is not None and (
+            not isinstance(spec.oneof, str) or not spec.oneof
+        ):
+            raise ProtobufDeclarationError(
+                f"field {name!r}: oneof must be a non-empty string group name"
+            )
+        inner, _optional = _unwrap_optional(annotation)
+        if spec.packed is not None and typing.get_origin(inner) is not list:
+            raise ProtobufDeclarationError(
+                f"field {name!r}: packed is only valid for a repeated scalar field"
+            )
 
         kind, flags, subplan, holder = _resolve(annotation, name, spec)
         if spec.oneof is not None:

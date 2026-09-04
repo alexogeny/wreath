@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
+from urllib.parse import quote
 
 from .._auth._ecverify import verify_ed25519
 from .._json import dumps, loads
@@ -177,11 +178,11 @@ class DiscordModal:
 class DiscordInteraction:
     id: str
     application_id: str
-    token: str
+    token: str = field(repr=False)
     kind: str
     actor: DiscordActor
     installation: DiscordInstallation
-    native: Mapping[str, Any]
+    native: Mapping[str, Any] = field(repr=False)
     command: DiscordInvokedCommand | None = None
     component: DiscordComponent | None = None
     modal: DiscordModal | None = None
@@ -357,9 +358,9 @@ class DiscordResponder:
         component: bool = False,
         rate_limiter: DiscordRateLimiter | None = None,
     ) -> None:
-        self._application_id = application_id
+        self._application_id = quote(application_id, safe="")
         self._interaction_id = interaction_id
-        self._token = token
+        self._token = quote(token, safe="")
         self._received_at = received_at
         self._client = client
         self._clock = clock
@@ -406,9 +407,10 @@ class DiscordResponder:
 
     async def edit_followup(self, message_id: str, **message: Any) -> Any:
         self._require_token()
+        message_segment = quote(message_id, safe="")
         return await self._request(
             "PATCH",
-            f"/webhooks/{self._application_id}/{self._token}/messages/{message_id}",
+            f"/webhooks/{self._application_id}/{self._token}/messages/{message_segment}",
             message,
             route="PATCH /webhooks/{application_id}/{token}/messages/{message_id}",
         )

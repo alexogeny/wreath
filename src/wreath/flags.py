@@ -40,7 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
-from ._auth.models import qualified_identity_value
+from ._auth.models import qualified_identity_key, qualified_identity_value
 from .config import read_osenv
 
 FLAG_PREFIX = "WREATH_FLAG_"
@@ -70,10 +70,20 @@ class Flag[T: FlagScalar]:
     default: T
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("flag name cannot be empty")
+        if type(self.name) is not str or not self.name:
+            raise ValueError("flag name must be a non-empty string")
         if type(self.default) not in (bool, str, int, float):
             raise TypeError("flag default must be bool, str, int, or float")
+
+
+def _resolved[T: FlagScalar](flag: Flag[T], value: object) -> T:
+    expected = type(flag.default)
+    if type(value) is not expected:
+        raise TypeError(
+            f"flag {flag.name!r} expects {expected.__name__}; "
+            f"provider returned {type(value).__name__}"
+        )
+    return cast(T, value)
 
 
 @runtime_checkable
@@ -115,7 +125,7 @@ class _LegacyFlagAdapter:
                 "a boolean FlagProvider can resolve only Flag(name, False). "
                 "Implement TypedFlagProvider.resolve(flag, context) for typed flags"
             )
-        return cast(T, self._provider.enabled(flag.name, context))
+        return _resolved(flag, self._provider.enabled(flag.name, context))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._provider, name)
@@ -174,7 +184,7 @@ class OpenFeatureProvider:
             int: self._client.get_integer_value,
             float: self._client.get_float_value,
         }[type(flag.default)]
-        return method(flag.name, flag.default, context)
+        return _resolved(flag, method(flag.name, flag.default, context))
 
     def enabled(self, name: str, context: Mapping[str, Any] | None = None) -> bool:
         """Boolean convenience over the canonical typed provider seam."""
@@ -219,7 +229,7 @@ class FlagSet:
                 f"flag {flag.name!r} was declared as {type(declared.default).__name__}, "
                 f"not {type(flag.default).__name__}"
             )
-        return cast(T, self._provider.resolve(declared, context))
+        return _resolved(flag, self._provider.resolve(declared, context))
 
     def names(self) -> frozenset[str]:
         return frozenset(self._by_name)
@@ -228,6 +238,9 @@ class FlagSet:
 def _subject(context: Mapping[str, Any] | None) -> str:
     if not context:
         return ""
+    identity_key = context.get("_wreath_identity_key")
+    if identity_key:
+        return str(identity_key)
     for key in ("id", "key", "user", "subject"):
         value = context.get(key)
         if value:
@@ -260,6 +273,8 @@ def evaluate_rule(value: str, name: str, context: Mapping[str, Any] | None = Non
         try:
             percent = float(token[:-1])
         except ValueError:
+            return False
+        if not 0 <= percent <= 100:
             return False
         return _bucket(name, _subject(context)) < percent
     return False
@@ -385,7 +400,7 @@ class FlagView:
         context: Mapping[str, Any] | None = None,
     ) -> None:
         self._provider = _flag_resolver(provider)
-        self._context = context
+        self._context = None if context is None else dict(context)
 
     def enabled(self, name: str) -> bool:
         """Whether `name` is on for the bound context."""
@@ -395,7 +410,8 @@ class FlagView:
             # the boolean fast path. Do not allocate and validate a temporary
             # typed declaration for every request-time boolean lookup.
             return provider.enabled(name, self._context)
-        return provider.resolve(Flag(name, False), self._context)
+        flag = Flag(name, False)
+        return _resolved(flag, provider.resolve(flag, self._context))
 
     __contains__ = enabled
 
@@ -423,6 +439,12 @@ def flags_dependency(provider: TypedFlagProvider | FlagProvider):
             if subject is not None:
                 namespace = getattr(identity, "namespace", "")
                 context["id"] = qualified_identity_value(namespace, subject)
+                if type(provider) is FeatureFlags:
+                    context["_wreath_identity_key"] = qualified_identity_key(
+                        str(getattr(identity, "type", "")),
+                        str(namespace),
+                        str(subject),
+                    )
         return FlagView(provider, context)
 
     return _dependency

@@ -23,6 +23,7 @@ from typing import Any, Final, cast
 from urllib.parse import quote, urlsplit
 
 from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
+from ._headers import validate_response_headers as _validate_headers
 from ._json import dumps as _json_dumps
 from ._native import _core
 
@@ -42,6 +43,18 @@ _CONTENT_LENGTH_CACHE_SIZE = 2048
 _CONTENT_LENGTHS = tuple(str(size).encode("ascii") for size in range(_CONTENT_LENGTH_CACHE_SIZE))
 _HTML_TYPE_HEADER = (_CONTENT_TYPE, b"text/html; charset=utf-8")
 _HTML_HEADERS = tuple((_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS)
+def _validate_status(status: int) -> None:
+    if type(status) is not int:
+        raise TypeError(f"status must be an int, not {type(status).__name__}")
+    if status < 100 or status > 599:
+        raise ValueError(f"status must be between 100 and 599, got {status}")
+
+
+def _validate_header_value(value: bytes, label: str) -> None:
+    if not isinstance(value, bytes):
+        raise TypeError(f"{label} must be bytes, not {type(value).__name__}")
+    if any(byte < 0x20 and byte != 0x09 or byte == 0x7F for byte in value):
+        raise ValueError(f"{label} contains a control character")
 
 
 def _set_digest_header(
@@ -102,6 +115,9 @@ class Response:
         media_type: bytes | None = None,
         background: Background | None = None,
     ) -> None:
+        if not isinstance(body, bytes):
+            raise TypeError(f"body must be bytes, not {type(body).__name__}")
+        _validate_status(status)
         # Neither a 204 nor a 304 may carry content (RFC 9110 §6.4.1, §15.4.5),
         # so a body passed with one is dropped here rather than sent. Decided at
         # construction because the status is already being tested for the
@@ -120,6 +136,7 @@ class Response:
                         f"media_type must be bytes, not str: pass "
                         f"b{media_type!r} rather than {media_type!r}"
                     )
+                _validate_header_value(media_type, "media_type")
                 media_type_header = (_CONTENT_TYPE, media_type) if media_type else None
             response_headers: list[tuple[bytes, bytes]] = (
                 [media_type_header] if media_type_header is not None else []
@@ -138,18 +155,21 @@ class Response:
             if media_type is None:
                 media_type = self.media_type
             response_headers = list(headers)
-            has_type = has_length = False
-            for raw_key, _ in response_headers:
-                key = raw_key.lower()
-                if key == _CONTENT_TYPE:
-                    has_type = True
-                elif key == _CONTENT_LENGTH:
-                    has_length = True
-                if has_type and has_length:
-                    break
+            has_type, supplied_length = _validate_headers(response_headers)
+            if media_type is not None:
+                _validate_header_value(media_type, "media_type")
             if media_type and not has_type:
                 response_headers.append((_CONTENT_TYPE, media_type))
-            if not bodyless and not has_length:
+            if supplied_length is not None:
+                if 100 <= status < 200 or status == 204:
+                    raise ValueError(f"status {status} must not carry content-length")
+                expected_length = _content_length(len(self.body))
+                if status != 304 and supplied_length != expected_length:
+                    raise ValueError(
+                        f"content-length must be {expected_length.decode('ascii')} "
+                        f"for this body, got {supplied_length!r}"
+                    )
+            elif not bodyless:
                 response_headers.append((_CONTENT_LENGTH, _content_length(len(body))))
         self._headers = response_headers
 
@@ -336,7 +356,9 @@ class TextResponse(Response):
         self, body: str, status: int = 200, *, background: Background | None = None
     ) -> None:
         encoded = body.encode("utf-8")
-        if type(status) is int and (status == 200 or status not in _STATUS_WITHOUT_BODY):
+        if type(status) is int and 100 <= status <= 599 and (
+            status == 200 or status not in _STATUS_WITHOUT_BODY
+        ):
             self.body = encoded
             self.status = status
             self.background = background
@@ -368,7 +390,9 @@ class JSONResponse(Response):
         self, data: Any, status: int = 200, *, background: Background | None = None
     ) -> None:
         body = _json_dumps(data)
-        if type(status) is int and (status == 200 or status not in _STATUS_WITHOUT_BODY):
+        if type(status) is int and 100 <= status <= 599 and (
+            status == 200 or status not in _STATUS_WITHOUT_BODY
+        ):
             self.body = body
             self.status = status
             self.background = background
@@ -491,15 +515,33 @@ class ProblemDetail:
     detail: str | None = None
     type: str = "about:blank"
     instance: str | None = None
-    extensions: dict[str, Any] = field(default_factory=dict)
+    extensions: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_status(self.status)
+        for name in ("title", "detail", "instance"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"problem {name} must be str or None, not {type(value).__name__}")
+        if not isinstance(self.type, str):
+            raise TypeError(f"problem type must be str, not {type(self.type).__name__}")
+        if not isinstance(self.extensions, Mapping):
+            raise TypeError("problem extensions must be a mapping with string keys")
+        snapshot = dict(self.extensions)
+        if any(not isinstance(name, str) for name in snapshot):
+            raise TypeError("problem extension names must be strings")
+        reserved = {"type", "title", "status", "detail", "instance"}.intersection(snapshot)
+        if reserved:
+            names = ", ".join(sorted(reserved))
+            raise ValueError(f"problem extensions must not replace reserved members: {names}")
+        object.__setattr__(self, "extensions", snapshot)
 
     def as_dict(self) -> dict[str, Any]:
         """The document as a JSON-ready mapping, in RFC 9457 member order.
 
         `type`, `title`, and `status` are always present. `detail` and
-        `instance` appear only when they are not None, and `extensions` is
-        merged last -- so an extension reusing a reserved member name overwrites
-        the value above it. `title` falls back to the `HTTPStatus` phrase for
+        `instance` appear only when they are not None, and validated extensions
+        are merged last. `title` falls back to the `HTTPStatus` phrase for
         `status`, or to `HTTP Error` when the status is not one the stdlib
         knows, so a custom status still yields a complete document.
         """
@@ -667,6 +709,10 @@ class RedirectResponse(Response):
     def __init__(
         self, url: str, status: int = 307, *, background: Background | None = None
     ) -> None:
+        if type(status) is not int:
+            raise TypeError(f"redirect status must be an int, not {type(status).__name__}")
+        if status < 300 or status > 399:
+            raise ValueError(f"redirect status must be between 300 and 399, got {status}")
         # `javascript:` and `data:` in a Location are script execution on the
         # origin that redirected, so the scheme is checked rather than trusted.
         # Parsed rather than string-matched because urlsplit applies the same
@@ -724,6 +770,9 @@ class StreamingResponse:
         *,
         incremental: bool = True,
     ) -> None:
+        _validate_status(status)
+        if status in _STATUS_WITHOUT_BODY:
+            raise ValueError(f"status {status} must not carry a streaming body")
         if type(incremental) is not bool:
             raise TypeError(f"incremental must be bool, not {type(incremental).__name__}")
         response_headers = list(headers) if headers is not None else []
@@ -733,6 +782,7 @@ class StreamingResponse:
                 "incremental=False instead"
             )
         response_headers.append((b"incremental", b"?1" if incremental else b"?0"))
+        _validate_headers(response_headers)
         self.body = body
         self.status = status
         self.headers = response_headers
@@ -1210,6 +1260,7 @@ class FileResponse:
         background: Background | None = None,
         range: tuple[int, int] | None = None,
     ) -> None:
+        _validate_status(status)
         self.path = os.fspath(path)
         self.range = range
         self.status = 206 if range is not None else status
@@ -1221,6 +1272,11 @@ class FileResponse:
         self.headers.append((_CONTENT_TYPE, media_type))
         if filename is not None:
             self.headers.append((b"content-disposition", _disposition(filename)))
+        _has_type, supplied_length = _validate_headers(self.headers)
+        if supplied_length is not None:
+            raise ValueError(
+                "FileResponse headers must not contain content-length; it is generated"
+            )
         self.background = background
         self._fd: int | None = None
         self._stat: os.stat_result | None = None
@@ -1254,6 +1310,7 @@ class FileResponse:
         type, `stat` only for the length, and `status` becomes 206 when `range`
         is given. No `background` callback is attached.
         """
+        _validate_status(status)
         self = cls.__new__(cls)
         self.path = name
         self.range = range
@@ -1262,6 +1319,11 @@ class FileResponse:
         guessed, _ = mimetypes.guess_type(name)
         self.media_type = (guessed or "application/octet-stream").encode("ascii")
         self.headers.append((_CONTENT_TYPE, self.media_type))
+        _has_type, supplied_length = _validate_headers(self.headers)
+        if supplied_length is not None:
+            raise ValueError(
+                "FileResponse headers must not contain content-length; it is generated"
+            )
         self.background = None
         self._fd = fd
         self._stat = stat

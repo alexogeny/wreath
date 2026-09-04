@@ -8,24 +8,33 @@ from wreath._logsink import canonical_json, canonical_text
 from wreath._projector import ProjectedTrace
 
 
-def _trace(**kw: object) -> ProjectedTrace:
-    fields: dict[str, object] = {
-        "request_id": 7,
-        "connection_id": 1,
-        "route_id": 12,
-        "plan_id": 3,
-        "worker_id": 0,
-        "duration_us": 12_400,
-        "status": 200,
-        "terminal": fs.TerminalStatus.OK,
-        "protocol": fs.Protocol.HTTP2,
-        "error_class": 0,
-        "flags": 0,
-        "bytes_in": 10,
-        "bytes_out": 20,
-    }
-    fields.update(kw)
-    return ProjectedTrace(**fields)  # type: ignore[arg-type]
+def _trace(
+    *,
+    status: int = 200,
+    terminal: fs.TerminalStatus = fs.TerminalStatus.OK,
+    error_class: int = 0,
+    trace_id: int = 0,
+    span_id: int = 0,
+    logs: tuple[fs.LogCell, ...] = (),
+) -> ProjectedTrace:
+    return ProjectedTrace(
+        request_id=7,
+        connection_id=1,
+        route_id=12,
+        plan_id=3,
+        worker_id=0,
+        duration_us=12_400,
+        status=status,
+        terminal=terminal,
+        protocol=fs.Protocol.HTTP2,
+        error_class=error_class,
+        flags=0,
+        bytes_in=10,
+        bytes_out=20,
+        trace_id=trace_id,
+        span_id=span_id,
+        logs=logs,
+    )
 
 
 def _merged(records: list[fs.LogCell]) -> dict[str, object]:

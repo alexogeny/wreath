@@ -71,6 +71,20 @@ def signer(agent: str | None = DIRECTORY) -> SigningKey:
     return SigningKey(key_id=KEY_ID, sign=key.sign, agent=agent)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"key_id": "key\r\nInjected: yes"},
+        {"agent": "https://bot.example/\r\nInjected: yes"},
+    ],
+)
+def test_signing_key_refuses_header_control_characters(changes: dict[str, str]):
+    values = {"key_id": KEY_ID, "sign": lambda _base: b"x" * 64, "agent": DIRECTORY}
+    values.update(changes)
+    with pytest.raises(ValueError, match="Structured Fields string"):
+        SigningKey(**values)
+
+
 def directory_document() -> dict:
     return {
         "keys": [
@@ -278,6 +292,21 @@ async def test_a_future_created_is_refused_too():
         assert (await client.get("/probe", headers=headers)).json()["verified"] is False
 
 
+@pytest.mark.parametrize("moment", [float("nan"), float("inf"), True, "now"])
+async def test_a_signature_clock_must_return_a_finite_number(moment: object):
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: moment)
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=signed_headers(clock=now))).json()
+    assert body["reason"] == "signature clock must return a finite number"
+
+
+def test_the_default_signature_clock_uses_system_time(monkeypatch):
+    monkeypatch.setattr("wreath.signatures.time.time", lambda: 42.5)
+
+    assert Signatures()._now() == 42.5
+
+
 async def test_an_expired_signature_is_refused():
     now = 1_700_000_000.0
     signatures = build(max_age=600.0, clock=lambda: now)
@@ -480,10 +509,43 @@ async def test_a_plaintext_directory_is_refused():
         Signatures(directories=("http://bot.example/x",))
 
 
-@pytest.mark.parametrize("max_age", [0, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https:///directory",
+        "https://operator@bot.example/directory",
+        "https://bot.example:0/directory",
+        "https://bot.example:invalid/directory",
+        "https://bot.example/directory#fragment",
+        "https://trusted.example\\@evil.example/directory",
+        "https://bot.example/direc\ntory",
+        "https://bot.example/directory\x7f",
+        "https://bot.example/directory\x80",
+    ),
+)
+def test_malformed_signature_directory_is_refused_at_construction(url):
+    with pytest.raises(ValueError, match="must be https, absolute"):
+        Signatures(directories=(url,))
+
+
+@pytest.mark.parametrize("max_age", [0, float("nan"), float("inf"), True, "60"])
 async def test_max_age_must_be_finite_and_positive(max_age):
     with pytest.raises(ValueError, match="finite and positive"):
         Signatures(max_age=max_age)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"refresh_on_startup": 1}, "refresh_on_startup must be a bool"),
+        ({"clock": 1}, "clock must be callable or None"),
+    ],
+)
+def test_signature_runtime_configuration_refuses_wrong_types(
+    options: dict[str, object], message: str
+):
+    with pytest.raises(ValueError, match=message):
+        Signatures(**options)
 
 
 async def test_installing_an_unconfigured_directory_raises():
@@ -625,6 +687,30 @@ async def test_refresh_installs_keys_and_asks_the_directory_path():
     assert signatures.refreshes == 1
     assert signatures.refresh_errors == 0
     assert client.response is not None and client.response.reads == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_origin", "expected_path"),
+    (
+        ("https://bot.example", "https://bot.example", "/"),
+        (
+            "https://[2001:db8::1]:8443/keys?tenant=one",
+            "https://[2001:db8::1]:8443",
+            "/keys?tenant=one",
+        ),
+    ),
+)
+async def test_directory_refresh_preserves_a_valid_origin_and_target(
+    url, expected_origin, expected_path
+):
+    signatures = Signatures(directories=(url,), refresh_on_startup=False)
+    client = _StubClient(json.dumps(directory_document()).encode())
+    origins = []
+
+    await signatures.refresh(client_factory=lambda origin: origins.append(origin) or client)
+
+    assert origins == [expected_origin]
+    assert client.requested == [expected_path]
 
 
 async def test_refresh_reads_a_streamed_directory_response():
@@ -802,6 +888,29 @@ async def test_a_non_integer_created_is_refused():
     async with TestClient(app_with(signatures)) as client:
         body = (await client.get("/probe", headers=headers)).json()
     assert body["reason"] == "signature has no created parameter"
+
+
+async def test_a_boolean_created_is_refused():
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = _mangle(signed_headers(clock=now), "created=1700000000", "created=?1")
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body["reason"] == "signature has no created parameter"
+
+
+@pytest.mark.parametrize("replacement", ['expires="later"', "expires=?1"])
+async def test_a_non_integer_expires_is_refused(replacement: str):
+    now = 1_700_000_000.0
+    signatures = build(clock=lambda: now)
+    headers = _mangle(
+        signed_headers(clock=now, expires_in=60),
+        "expires=1700000060",
+        replacement,
+    )
+    async with TestClient(app_with(signatures)) as client:
+        body = (await client.get("/probe", headers=headers)).json()
+    assert body["reason"] == "signature expires parameter must be an integer"
 
 
 async def test_a_missing_created_is_refused():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import socket
 import ssl
 from collections.abc import Awaitable, Callable
@@ -13,10 +14,13 @@ import wreath.http_client as http_client_module
 from wreath import Wreath
 from wreath.http_client import (
     ClientClosed,
+    ClientError,
     ClientLimits,
     ClientTimeout,
+    ClientTLS,
     DestinationPolicy,
     DestinationRejected,
+    DNSFailure,
     HTTPClient,
     PoolTimeout,
     ProtocolError,
@@ -25,6 +29,7 @@ from wreath.http_client import (
     RedirectPolicy,
     RequestTimeout,
     RetryPolicy,
+    TracePolicy,
 )
 from wreath.testing import TestClient
 
@@ -39,6 +44,23 @@ async def _serve(
 
 def _local_policy() -> DestinationPolicy:
     return DestinationPolicy(allow_private=True, allow_loopback=True)
+
+
+def _prepare_native_default(client: HTTPClient, target: str, method: str = "GET") -> object:
+    return http_client_module._client_codec.request_default(
+        client,
+        method,
+        target,
+        http_client_module.ClientResponse,
+        http_client_module.ProtocolError,
+        http_client_module.ResponseTooLarge,
+        http_client_module.ResponseTimeout,
+        http_client_module._TransportError,
+        http_client_module.ClientError,
+        http_client_module.RequestTimeout,
+        (),
+        b"",
+    )
 
 
 def _buffered_reader(wire: bytes) -> asyncio.StreamReader:
@@ -161,6 +183,19 @@ async def test_chunk_iterator_stops_at_the_empty_trailer_line() -> None:
     assert [chunk async for chunk in client._iter_chunked(_buffered_reader(b"0\r\n\r\n"))] == []
 
 
+@pytest.mark.parametrize("name", (b"content-length", b"transfer-encoding"))
+@pytest.mark.asyncio
+async def test_buffered_chunk_reader_refuses_framing_fields_in_trailers(name: bytes) -> None:
+    client = HTTPClient(
+        "chunk-framing-trailer-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+
+    with pytest.raises(ProtocolError, match="framing field"):
+        await client._read_chunked(_buffered_reader(b"0\r\n" + name + b": 1\r\n\r\n"))
+
+
 @pytest.mark.asyncio
 async def test_chunk_iterator_yields_buffered_payload_before_the_chunk_is_complete() -> None:
     client = HTTPClient(
@@ -192,6 +227,22 @@ async def test_response_head_skips_informational_status_and_returns_the_final_he
     minor, status, reason, headers = await client._read_head(reader)
 
     assert (minor, status, reason, headers) == (1, 200, b"OK", [(b"content-length", b"0")])
+
+
+@pytest.mark.asyncio
+async def test_response_head_bounds_informational_responses() -> None:
+    client = HTTPClient(
+        "informational-bound-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(
+        b"HTTP/1.1 103 Early Hints\r\n\r\n" * 17
+        + b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+    )
+
+    with pytest.raises(ProtocolError, match="too many informational responses"):
+        await client._read_head(reader)
 
 
 @pytest.mark.parametrize(("over_tls", "keep_open"), [(False, True), (True, False)])
@@ -749,17 +800,402 @@ def test_client_configuration_rejects_invalid_limits_and_timeouts() -> None:
         ClientTimeout(total=0)
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf")])
-def test_client_configuration_rejects_non_finite_timing_bounds(value: float) -> None:
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 10**1000])
+def test_client_configuration_rejects_non_finite_timing_bounds(value: float | int) -> None:
     factories = (
+        lambda: ClientLimits(dns_cache_ttl=value),
         lambda: ClientTimeout(connect=value),
         lambda: RetryPolicy(backoff_base=value),
+        lambda: RetryPolicy(backoff_cap=value),
         lambda: RatePolicy(enabled=True, rate=value, capacity=1, max_wait=1),
+        lambda: RatePolicy(enabled=True, rate=1, capacity=value, max_wait=1),
         lambda: RatePolicy(enabled=True, rate=1, capacity=1, max_wait=value),
     )
     for factory in factories:
         with pytest.raises(ValueError, match="finite"):
             factory()
+
+
+def test_retry_statuses_are_snapshotted_at_policy_construction() -> None:
+    statuses = {503}
+    policy = RetryPolicy(statuses=cast(Any, statuses))
+
+    statuses.clear()
+    statuses.add(200)
+
+    assert policy.statuses == frozenset({503})
+
+
+def test_destination_allowlist_is_snapshotted_at_policy_construction() -> None:
+    schemes = {"https"}
+    hosts = ["example.com"]
+    ports = {443}
+    policy = DestinationPolicy(
+        schemes=cast(Any, schemes),
+        hosts=cast(Any, hosts),
+        ports=cast(Any, ports),
+    )
+
+    schemes.add("http")
+    hosts.append("127.0.0.1")
+    ports.add(80)
+
+    with pytest.raises(DestinationRejected):
+        policy.validate_url(urlsplit("http://127.0.0.1"))
+    assert policy.schemes == frozenset({"https"})
+    assert policy.hosts == ("example.com",)
+    assert policy.ports == frozenset({443})
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    (
+        (lambda: DestinationPolicy(schemes=cast(Any, {1})), "schemes.*strings"),
+        (lambda: DestinationPolicy(hosts=cast(Any, (1,))), "hosts.*strings"),
+        (lambda: DestinationPolicy(ports=cast(Any, {443.0})), "ports.*integers"),
+    ),
+)
+def test_destination_allowlist_elements_require_declared_types(
+    factory: Callable[[], object], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        factory()
+
+
+@pytest.mark.parametrize("port", (0, 65536))
+def test_destination_allowlist_ports_use_wire_port_range(port: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        DestinationPolicy(ports=frozenset({port}))
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: ClientLimits(max_connections=cast(Any, 1.5)),
+        lambda: RetryPolicy(attempts=cast(Any, 1.5)),
+        lambda: RedirectPolicy(max_hops=cast(Any, 1.5)),
+    ),
+)
+def test_integer_resource_bounds_require_integers(factory: Callable[[], object]) -> None:
+    with pytest.raises(TypeError, match="must be an integer"):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: ClientTLS(verify=cast(Any, 0)),
+        lambda: RetryPolicy(idempotent_only=cast(Any, 0)),
+        lambda: RetryPolicy(jitter=cast(Any, "false")),
+        lambda: RatePolicy(enabled=cast(Any, "false")),
+        lambda: RedirectPolicy(enabled=cast(Any, "false"), max_hops=1),
+        lambda: TracePolicy(propagate=cast(Any, "false")),
+        lambda: DestinationPolicy(allow_loopback=cast(Any, "false")),
+    ),
+)
+def test_security_flags_require_booleans(factory: Callable[[], object]) -> None:
+    with pytest.raises(TypeError, match="must be a boolean"):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: ClientLimits(dns_cache_ttl=cast(Any, True)),
+        lambda: ClientTimeout(connect=cast(Any, True)),
+        lambda: RetryPolicy(backoff_base=cast(Any, True)),
+        lambda: RatePolicy(enabled=True, capacity=cast(Any, True), rate=1),
+    ),
+)
+def test_timing_and_rate_bounds_refuse_booleans(factory: Callable[[], object]) -> None:
+    with pytest.raises(TypeError, match="must be an int or float"):
+        factory()
+
+
+def test_retry_statuses_require_integer_status_codes() -> None:
+    with pytest.raises(TypeError, match="status.*integers"):
+        RetryPolicy(statuses=cast(Any, {503.0}))
+
+
+def test_positive_limit_guard_is_required() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        ClientLimits(max_connections=0)
+
+
+def test_valid_trace_policy_does_not_enter_type_refusal() -> None:
+    assert TracePolicy(propagate=True, tracestate=False).tracestate is False
+
+
+@pytest.mark.asyncio
+async def test_oversized_request_headers_are_refused_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def serialize(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized headers reached the allocating serializer")
+
+    monkeypatch.setattr(http_client_module._client_codec, "serialize_request", serialize)
+    client = HTTPClient(
+        "request-header-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        await client._request_flow(
+            "GET",
+            "/",
+            headers=((b"x-large", b"x" * 65),),
+            body=b"",
+            idempotency_key=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_bytes_header_buffers_are_refused_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def serialize(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized header buffer reached the allocating serializer")
+
+    monkeypatch.setattr(http_client_module._client_codec, "serialize_request", serialize)
+    client = HTTPClient(
+        "request-header-buffer-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+        retry=RetryPolicy(attempts=2),
+    )
+    await client.start()
+    name = memoryview(bytearray(72)).cast("Q")
+    value = memoryview(bytearray(72)).cast("Q")
+
+    with pytest.raises(TypeError, match="header names and values must be bytes"):
+        await client.get("/", headers=((b"x", cast(Any, value)),))
+    with pytest.raises(TypeError, match="header names and values must be bytes"):
+        await client.get("/", headers=((cast(Any, name), b"x"),))
+
+
+@pytest.mark.asyncio
+async def test_default_path_bounds_request_headers_before_native_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def request_default(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("oversized headers reached the native allocator")
+
+    monkeypatch.setattr(http_client_module._client_codec, "request_default", request_default)
+    client = HTTPClient(
+        "native-request-header-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        await client.get("/", headers=((b"x-large", b"x" * 65),))
+
+
+def test_default_path_bounds_request_target_before_native_allocation() -> None:
+    client = HTTPClient(
+        "native-request-target-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        _prepare_native_default(client, "/" + "x" * 65)
+
+    assert client._request_plans == {}
+
+
+@pytest.mark.asyncio
+async def test_default_headerless_path_skips_aggregate_header_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def validate(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("ordinary headerless request entered aggregate-size scan")
+
+    async def response() -> object:
+        return http_client_module.ClientResponse(200, (), b"", "1.1")
+
+    def request_default(*_args: object, **_kwargs: object) -> object:
+        return response()
+
+    monkeypatch.setattr(HTTPClient, "_validate_request_head_inputs", validate)
+    monkeypatch.setattr(http_client_module._client_codec, "request_default", request_default)
+    client = HTTPClient("native-request-common", base_url="https://example.com")
+    await client.start()
+
+    result = await client.get("/")
+
+    assert result.status == 200
+
+
+def test_stream_bounds_method_before_uppercase_allocation() -> None:
+    client = HTTPClient(
+        "stream-method-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        client.stream("M" * 65, "/")
+
+
+@pytest.mark.asyncio
+async def test_stream_bounds_headers_before_serialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    def serialize(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized stream headers reached the allocating serializer")
+
+    monkeypatch.setattr(http_client_module._client_codec, "serialize_request", serialize)
+    client = HTTPClient(
+        "stream-header-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        async with client.stream("GET", "/", headers=((b"x-large", b"x" * 65),)):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_is_bounded_before_encoding() -> None:
+    class OversizedKey:
+        def __bool__(self) -> bool:
+            return True
+
+        def __len__(self) -> int:
+            return 65
+
+        def encode(self, *_args: object, **_kwargs: object) -> bytes:
+            raise AssertionError("oversized idempotency key reached encoding")
+
+    client = HTTPClient(
+        "idempotency-key-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        await client._request_flow(
+            "POST",
+            "/",
+            headers=(),
+            body=b"",
+            idempotency_key=cast(Any, OversizedKey()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_policy_path_bounds_method_before_uppercase_allocation() -> None:
+    class OversizedMethod:
+        def __len__(self) -> int:
+            return 65
+
+        def upper(self) -> str:
+            raise AssertionError("oversized method reached uppercase allocation")
+
+    client = HTTPClient(
+        "policy-method-bound",
+        base_url="https://example.com",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        await client._request_flow(
+            cast(Any, OversizedMethod()),
+            "/",
+            headers=(),
+            body=b"",
+            idempotency_key=None,
+        )
+
+
+def test_request_target_is_bounded_before_ascii_allocation() -> None:
+    client = HTTPClient(
+        "request-target-bound",
+        base_url="https://example.com/api",
+        limits=ClientLimits(max_request_header_bytes=64),
+    )
+
+    with pytest.raises(ClientError, match="request headers exceed configured limit"):
+        client._request_target("/" + "x" * 64)
+
+
+@pytest.mark.parametrize("target", ("/safe/../admin", "/safe\\admin", "/%2e%2e/admin"))
+@pytest.mark.asyncio
+async def test_default_native_path_refuses_ambiguous_request_targets(target: str) -> None:
+    reached = False
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal reached
+        reached = True
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+        await writer.drain()
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "native-target-policy",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+    )
+    await client.start()
+    try:
+        with pytest.raises(ValueError, match="separator|dot segment|backslash"):
+            await client.get(target)
+        assert not reached
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "/safe/../admin",
+        "/safe\\admin",
+        "/%2e%2e/admin",
+        "/%2Fadmin",
+        "/%5cadmin",
+    ),
+)
+def test_fused_native_request_refuses_ambiguous_targets_before_caching(target: str) -> None:
+    client = HTTPClient("native-target-unit", base_url="https://example.com")
+
+    with pytest.raises(ValueError, match="separator|dot segment|backslash"):
+        _prepare_native_default(client, target)
+
+    assert client._request_plans == {}
+
+
+def test_fused_native_target_policy_randomized_parity() -> None:
+    rng = random.Random(20260903)
+    alphabet = "abcXYZ012./\\%?# =&é"
+    client = HTTPClient("native-target-parity", base_url="https://example.com")
+
+    for _ in range(2_000):
+        target = "/" + "".join(rng.choice(alphabet) for _ in range(rng.randrange(24)))
+        try:
+            target_bytes = client._request_target(target)
+            http_client_module._client_codec.serialize_request(
+                "GET", target_bytes, b"example.com", headers=(), body=b""
+            )
+        except (ClientError, ValueError):
+            python_accepts = False
+        else:
+            python_accepts = True
+        try:
+            _prepare_native_default(client, target)
+        except (ClientError, ValueError):
+            native_accepts = False
+        else:
+            native_accepts = True
+
+        assert native_accepts is python_accepts, target
 
 
 @pytest.mark.asyncio
@@ -880,6 +1316,49 @@ async def test_redirect_limit_is_checked_before_another_request(
         )
 
     assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("redirect", "status"),
+    (
+        (RedirectPolicy(enabled=False), 302),
+        (RedirectPolicy(enabled=True, max_hops=1), 200),
+    ),
+)
+async def test_redirect_flow_requires_both_an_enabled_policy_and_redirect_status(
+    monkeypatch: pytest.MonkeyPatch,
+    redirect: RedirectPolicy,
+    status: int,
+) -> None:
+    calls = 0
+
+    async def respond(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return http_client_module.ClientResponse(
+            status,
+            ((b"location", b"/unexpected"),),
+            b"",
+            "1.1",
+        )
+
+    monkeypatch.setattr(HTTPClient, "_send_with_retries", respond)
+    monkeypatch.setattr(HTTPClient, "_request_once", respond)
+    client = HTTPClient(
+        "redirect-gate-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+        redirect=redirect,
+    )
+    client._started = True
+
+    response = await client._request_flow(
+        "GET", "/", headers=(), body=b"", idempotency_key=None
+    )
+
+    assert response.status == status
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -1217,6 +1696,44 @@ async def test_cancellation_during_response_closes_owned_connection(phase: str) 
 
 
 @pytest.mark.asyncio
+async def test_concurrent_streams_do_not_share_framing_completion_state() -> None:
+    release = asyncio.Event()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await reader.readuntil(b"\r\n\r\n")
+        target = head.split(b" ", 2)[1]
+        if target == b"/slow":
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\na")
+        else:
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+        await writer.drain()
+        await release.wait()
+        writer.close()
+        await writer.wait_closed()
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "stream-framing-owner",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+    )
+    await client.start()
+    try:
+        async with client.stream("GET", "/slow") as slow:
+            chunks = slow.iter_bytes().__aiter__()
+            assert await chunks.__anext__() == b"a"
+            async with client.stream("GET", "/fast") as fast:
+                assert b"".join([chunk async for chunk in fast.iter_bytes()]) == b"ok"
+
+        assert client.snapshot().idle == 1
+    finally:
+        release.set()
+        await client.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_cancellation_during_retry_backoff_stops_attempts() -> None:
     responded = asyncio.Event()
     requests = 0
@@ -1257,6 +1774,120 @@ async def test_cancellation_during_retry_backoff_stops_attempts() -> None:
     await client.close()
     server.close()
     await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_empty_idempotency_key_cannot_enable_non_idempotent_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = False
+
+    async def send(*_args: object, **_kwargs: object) -> object:
+        nonlocal sent
+        sent = True
+        raise AssertionError("an empty idempotency key reached the transport")
+
+    monkeypatch.setattr(HTTPClient, "_request_once", send)
+    client = HTTPClient(
+        "empty-idempotency-key",
+        base_url="https://example.com",
+        retry=RetryPolicy(attempts=2),
+    )
+    await client.start()
+
+    with pytest.raises(ValueError, match="idempotency_key cannot be empty"):
+        await client.post("/charge", idempotency_key="")
+
+    assert not sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "idempotency_key"),
+    (
+        (RetryPolicy(attempts=2), "charge-1"),
+        (RetryPolicy(attempts=2, idempotent_only=False), None),
+    ),
+)
+async def test_non_idempotent_retry_requires_its_configured_safety_condition(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: RetryPolicy,
+    idempotency_key: str | None,
+) -> None:
+    calls = 0
+
+    async def respond(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return http_client_module.ClientResponse(
+            503 if calls == 1 else 200,
+            (),
+            b"",
+            "1.1",
+        )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(HTTPClient, "_request_once", respond)
+    monkeypatch.setattr(http_client_module.asyncio, "sleep", no_sleep)
+    client = HTTPClient(
+        "retry-safety-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+        retry=policy,
+    )
+
+    response = await client._send_with_retries(
+        "POST", b"request", idempotency_key=idempotency_key
+    )
+
+    assert response.status == 200
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_parameter_cannot_duplicate_a_caller_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = False
+
+    async def send(*_args: object, **_kwargs: object) -> object:
+        nonlocal sent
+        sent = True
+        raise AssertionError("ambiguous idempotency keys reached the transport")
+
+    monkeypatch.setattr(HTTPClient, "_request_once", send)
+    client = HTTPClient("duplicate-idempotency-key", base_url="https://example.com")
+    await client.start()
+
+    with pytest.raises(ValueError, match="both idempotency_key.*header"):
+        await client.post(
+            "/charge",
+            headers=((b"Idempotency-Key", b"caller-value"),),
+            idempotency_key="parameter-value",
+        )
+
+    assert not sent
+
+
+@pytest.mark.asyncio
+async def test_nonempty_idempotency_key_is_sent_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[bytes] = []
+
+    async def send(_client: HTTPClient, _method: str, request: bytes) -> object:
+        requests.append(request)
+        return http_client_module.ClientResponse(200, (), b"", "1.1")
+
+    monkeypatch.setattr(HTTPClient, "_request_once", send)
+    client = HTTPClient("idempotency-key", base_url="https://example.com")
+    await client.start()
+
+    await client.post("/charge", idempotency_key="charge-1")
+
+    assert requests[0].count(b"idempotency-key: charge-1\r\n") == 1
 
 
 @pytest.mark.asyncio
@@ -1326,6 +1957,40 @@ def test_redirect_target_preserves_same_origin_base_path(location: bytes, expect
     client = HTTPClient("redirect-base", base_url="https://example.com/api")
 
     assert client._redirect_target("/api/start", location) == expected
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "\x00https://example.com",
+        " https://example.com",
+        "https://exa\tmple.com",
+        "https://example.com/\napi",
+    ),
+)
+def test_base_url_refuses_characters_urlsplit_would_discard(base_url: str) -> None:
+    with pytest.raises(ValueError, match="control character or space"):
+        HTTPClient("ambiguous-url", base_url=base_url)
+
+
+def test_base_url_refuses_non_ascii_path_at_construction() -> None:
+    with pytest.raises(ValueError, match="base_url path must be ASCII/percent-encoded"):
+        HTTPClient("unicode-base-path", base_url="https://example.com/café")
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        b"\t/api/final",
+        b"/api/fi\tnal",
+        b"https://exa\tmple.com/api/final",
+    ),
+)
+def test_redirect_refuses_characters_urlsplit_would_discard(location: bytes) -> None:
+    client = HTTPClient("ambiguous-redirect", base_url="https://example.com/api")
+
+    with pytest.raises(RedirectError, match="control character or space"):
+        client._redirect_target("/api/start", location)
 
 
 @pytest.mark.asyncio
@@ -1430,9 +2095,28 @@ async def test_client_rejects_non_rfc_chunk_sizes(size: bytes) -> None:
 
 
 @pytest.mark.asyncio
+async def test_buffered_chunk_reader_refuses_an_oversized_chunk_line() -> None:
+    client = HTTPClient(
+        "chunk-line-bound-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(b"1" * 1023 + b"\r\n")
+
+    with pytest.raises(ProtocolError, match="chunk line exceeds limit"):
+        await client._read_chunked(reader)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "trailer",
-    (b" bad: value", b"bad name: value", b"x-test: bad\x01value"),
+    (
+        b" bad: value",
+        b"bad name: value",
+        b"x-test: bad\x01value",
+        b"content-length: 1",
+        b"transfer-encoding: chunked",
+    ),
 )
 async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1453,7 +2137,7 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
     )
     try:
         await client.start()
-        with pytest.raises(ProtocolError, match="header|folding"):
+        with pytest.raises(ProtocolError, match="header|folding|framing field"):
             await client.get("/")
     finally:
         await client.close()
@@ -1521,6 +2205,26 @@ def test_ipv4_compatible_ipv6_keeps_policy_exceptions_independent() -> None:
         DestinationPolicy(allow_private=True).validate_address("::127.0.0.1")
     with pytest.raises(DestinationRejected, match="link-local"):
         DestinationPolicy(allow_private=True).validate_address("::169.254.169.254")
+
+
+@pytest.mark.parametrize(
+    ("address", "reason"),
+    (
+        ("2002:7f00:1::", "loopback"),
+        ("2002:a9fe:a9fe::", "link-local"),
+        ("2001:0000:0808:0808:0000:ffff:80ff:fffe", "loopback"),
+        ("2001:0000:0808:0808:0000:ffff:5601:5601", "link-local"),
+        ("2001:0000:7f00:0001:0000:ffff:f7f7:f7f7", "loopback"),
+        ("2001:0000:a9fe:a9fe:0000:ffff:f7f7:f7f7", "link-local"),
+        ("2001:4860:4860:0000:0000:5efe:7f00:0001", "loopback"),
+        ("2001:4860:4860:0000:0000:5efe:a9fe:a9fe", "link-local"),
+    ),
+)
+def test_ipv6_transition_addresses_cannot_hide_restricted_ipv4_destinations(
+    address: str, reason: str
+) -> None:
+    with pytest.raises(DestinationRejected, match=reason):
+        DestinationPolicy(allow_private=True).validate_address(address)
 
 
 def test_destination_policy_exceptions_do_not_widen_each_other() -> None:
@@ -1626,6 +2330,127 @@ async def test_one_unsafe_dns_answer_refuses_the_whole_resolution(
         await client.close()
 
     assert not connected
+
+
+@pytest.mark.asyncio
+async def test_dns_answer_count_cannot_create_an_unbounded_connection_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    async def oversized_dns(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (f"8.8.{index // 254}.{index % 254 + 1}", 80),
+            )
+            for index in range(65)
+        ]
+
+    monkeypatch.setattr(loop, "getaddrinfo", oversized_dns)
+    client = HTTPClient("dns-bound", base_url="http://example.com")
+
+    with pytest.raises(DNSFailure, match="too many addresses"):
+        await client._resolve()
+
+
+@pytest.mark.asyncio
+async def test_oversized_dns_answer_is_refused_before_address_policy_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    async def oversized_dns(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 80),
+            )
+        ] * 65
+
+    monkeypatch.setattr(loop, "getaddrinfo", oversized_dns)
+    client = HTTPClient("dns-bound-order", base_url="http://example.com")
+
+    with pytest.raises(DNSFailure, match="too many addresses"):
+        await client._resolve()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_dns_answers_do_not_amplify_connection_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    answer = (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        socket.IPPROTO_TCP,
+        "",
+        ("8.8.8.8", 80),
+    )
+
+    async def duplicate_dns(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [answer] * 64
+
+    monkeypatch.setattr(loop, "getaddrinfo", duplicate_dns)
+    client = HTTPClient("dns-deduplicate", base_url="http://example.com")
+
+    assert await client._resolve() == (answer,)
+
+
+@pytest.mark.asyncio
+async def test_streaming_requests_spend_a_configured_rate_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    throttled = False
+
+    async def throttle(_client: HTTPClient) -> None:
+        nonlocal throttled
+        throttled = True
+        raise ClientError("rate token unavailable")
+
+    async def acquire(_client: HTTPClient) -> object:
+        raise AssertionError("stream acquired a connection before rate limiting")
+
+    monkeypatch.setattr(HTTPClient, "_throttle", throttle)
+    monkeypatch.setattr(HTTPClient, "_acquire", acquire)
+    client = HTTPClient(
+        "stream-rate",
+        base_url="https://example.com",
+        rate=RatePolicy(enabled=True, capacity=1, rate=1),
+    )
+    await client.start()
+
+    with pytest.raises(ClientError, match="rate token unavailable"):
+        async with client.stream("GET", "/events"):
+            pass
+
+    assert throttled
+
+
+@pytest.mark.asyncio
+async def test_stream_without_rate_policy_skips_throttle_coroutine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def throttle(_client: HTTPClient) -> None:
+        raise AssertionError("disabled rate policy entered the throttle coroutine")
+
+    async def acquire(_client: HTTPClient) -> object:
+        raise ClientError("acquire reached")
+
+    monkeypatch.setattr(HTTPClient, "_throttle", throttle)
+    monkeypatch.setattr(HTTPClient, "_acquire", acquire)
+    client = HTTPClient("stream-no-rate", base_url="https://example.com")
+    await client.start()
+
+    with pytest.raises(ClientError, match="acquire reached"):
+        async with client.stream("GET", "/events"):
+            pass
 
 
 @pytest.mark.asyncio

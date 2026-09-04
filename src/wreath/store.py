@@ -258,6 +258,7 @@ class Keyed:
     prefix: str = "wreath_store"
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "columns", tuple(self.columns))
         sql_identifier(self.table)
         sql_identifier(self.key, what="key")
         sql_identifier(self.stamp, what="stamp")
@@ -265,6 +266,8 @@ class Keyed:
         for column in self.columns:
             sql_identifier(column.name, what="column")
         if self.ttl is not None:
+            if type(self.ttl) not in (int, float):
+                raise ValueError("ttl must be a number of seconds")
             if not isfinite(self.ttl):
                 raise ValueError("ttl must be finite")
             if self.ttl <= 0:
@@ -661,6 +664,10 @@ class PostgresStore(_Statements):
         never a deadline.
         """
         if idle_seconds is not None:
+            if type(idle_seconds) not in (int, float) or not isfinite(idle_seconds):
+                raise ValueError("idle_seconds must be a finite positive number")
+            if idle_seconds <= 0:
+                raise ValueError("idle_seconds must be a finite positive number")
             return await self.statement("purge_idle").execute(float(idle_seconds))
         if not self._declaration.deadline:
             raise ValueError(
@@ -713,6 +720,10 @@ class MemoryStore(KV):
         # default than a cache would, and `PostgresStore` beside it takes the
         # same shape. `clock is monotonic` becomes `None` so the default keeps
         # the table's C clock rather than paying for a Python call per read.
+        if ttl is not None and (
+            type(ttl) not in (int, float) or not isfinite(ttl) or ttl <= 0
+        ):
+            raise ValueError("ttl must be a finite positive number")
         super().__init__(
             max_entries=max_entries,
             ttl=ttl,

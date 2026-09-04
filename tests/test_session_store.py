@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -8,7 +9,8 @@ from _pgfidelity import check_for
 from wreath import Wreath
 from wreath._b64 import b64url_decode
 from wreath.policy import HttpPolicy
-from wreath.policy.sessions import SessionPolicy, rotate_session
+from wreath.policy.sessions import SessionPolicy, _session_binding, rotate_session
+from wreath.request import Request
 from wreath.session_store import PostgresSessionStore
 from wreath.state import State
 from wreath.testing import TestClient
@@ -64,6 +66,10 @@ class CookieResponse:
         ({"max_age": 0}, "max_age must be positive"),
         ({"cookie": "bad;name"}, "cookie"),
         ({"same_site": "sometimes"}, "samesite"),
+        ({"same_site": None}, "same_site must be strict, lax, or none"),
+        ({"cookie": "__Host-session", "secure": False}, "__Host-"),
+        ({"cookie": "__Secure-session", "secure": False}, "__Secure-"),
+        ({"same_site": "none", "secure": False}, "SameSite=None"),
     ],
 )
 def test_session_policy_refuses_invalid_cookie_configuration(
@@ -71,6 +77,155 @@ def test_session_policy_refuses_invalid_cookie_configuration(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         SessionPolicy(secret="s" * 32, **options)
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("secure", None), ("http_only", "false")],
+)
+def test_session_policy_requires_boolean_cookie_security_flags(
+    option: str,
+    value: object,
+) -> None:
+    with pytest.raises(TypeError, match=rf"session {option} must be bool"):
+        SessionPolicy(secret="s" * 32, **{option: value})
+
+
+def test_session_policy_rejects_boolean_max_age() -> None:
+    with pytest.raises(TypeError, match=r"max_age.*bool"):
+        SessionPolicy(secret="s" * 32, max_age=True)
+
+
+@pytest.mark.parametrize(
+    "cookie_headers",
+    [
+        [b"wreath_session={cookie}; wreath_session=invalid"],
+        [b"wreath_session={cookie}", b"wreath_session=invalid"],
+    ],
+    ids=["one-line", "split-lines"],
+)
+@pytest.mark.parametrize("stored", [False, True])
+@pytest.mark.asyncio
+async def test_session_policy_ignores_ambiguous_session_cookie(
+    cookie_headers: list[bytes],
+    stored: bool,
+) -> None:
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    store = MemoryStore() if stored else None
+    policy = SessionPolicy(secret="s" * 32, store=store)
+    binding_request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/",
+            "headers": [(b"host", b"example.test")],
+        },
+        receive,
+    )
+    binding, _ = _session_binding(binding_request)
+    payload = b"sid" if stored else b'{"user":"ada"}'
+    if store is not None:
+        store.rows["sid"] = {"user": "ada"}
+    cookie = policy._sign(payload, int(time.time()), binding)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/",
+            "headers": [
+                (b"host", b"example.test"),
+                *(
+                    (b"cookie", value.replace(b"{cookie}", cookie.encode()))
+                    for value in cookie_headers
+                ),
+            ],
+        },
+        receive,
+    )
+
+    await policy.before(request)
+
+    assert request.state.session == {}
+
+
+@pytest.mark.parametrize("stored", [False, True])
+@pytest.mark.asyncio
+async def test_cookie_less_session_does_not_scan_raw_cookie_headers(stored: bool) -> None:
+    class CookieLessRequest:
+        cookies: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.state = State()
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"example.test"
+
+        @property
+        def headers(self) -> list[tuple[bytes, bytes]]:
+            raise AssertionError("no configured cookie means there is no ambiguity to scan")
+
+    policy = SessionPolicy(
+        secret="s" * 32,
+        store=MemoryStore() if stored else None,
+    )
+    request = CookieLessRequest()
+
+    await policy.before(request)
+
+    assert request.state.session == {}
+
+
+def test_session_binding_distinguishes_tenants_and_supports_legacy_requests() -> None:
+    class Request:
+        def __init__(self, tenant: str | None = None) -> None:
+            self.state = State()
+            if tenant is not None:
+                self.state.tenant = tenant
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"app.example"
+
+    class LegacyRequest:
+        state = State()
+
+        def header(self, _name: str) -> str:
+            return "app.example"
+
+    unbound, has_tenant = _session_binding(Request())
+    tenant_a, tenant_bound = _session_binding(Request("tenant-a"))
+    tenant_b, _ = _session_binding(Request("tenant-b"))
+    legacy, _ = _session_binding(LegacyRequest())
+
+    assert not has_tenant
+    assert unbound[:8] == b"\0" * 8
+    assert tenant_bound
+    assert len({unbound, tenant_a, tenant_b}) == 3
+    assert legacy == unbound
+
+    class HostlessLegacyRequest:
+        state = State()
+
+        def header(self, _name: str) -> None:
+            return None
+
+    hostless, _ = _session_binding(HostlessLegacyRequest())
+    assert hostless == b"\0" * 16
+
+
+def test_previous_session_secrets_require_bounded_key_material() -> None:
+    payload = b'{"user":"ada"}'
+    old = SessionPolicy(secret="o" * 32)
+    rotated = SessionPolicy(secret="n" * 32, previous_secrets=[bytearray(b"o" * 32)])
+    assert rotated._load(old._sign(payload, int(time.time()))) == ({"user": "ada"}, b"")
+
+    with pytest.raises(ValueError, match=r"previous_secrets\[0\].*at least"):
+        SessionPolicy(secret="n" * 32, previous_secrets=[memoryview(b"short")])
+    with pytest.raises(TypeError, match=r"previous_secrets\[0\].*bytes-like"):
+        SessionPolicy(secret="n" * 32, previous_secrets=[object()])
 
 
 def _app(store: Any) -> tuple[Wreath, MemoryStore]:
@@ -154,6 +309,99 @@ async def test_duplicate_host_neither_recovers_nor_reissues_a_session(
     headers = list(first["headers"])
     assert b'"user":null' in body
     assert all(name != b"set-cookie" for name, _value in headers)
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+async def test_invalid_host_neither_recovers_nor_reissues_a_session(server_side: bool) -> None:
+    store = MemoryStore() if server_side else None
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    payload = b"sid" if server_side else b'{"user":"ada"}'
+    if store is not None:
+        store.rows["sid"] = {"user": "ada"}
+
+    class Request:
+        def __init__(self) -> None:
+            self.state = State()
+            self.cookies = {
+                "wreath_session": middleware._sign(payload, int(time.time())),
+            }
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"example.test/path"
+
+    request = Request()
+    await middleware.before(request)
+    request.state.session["attempt"] = "new"
+    response = CookieResponse()
+    await middleware.after(request, response)
+
+    assert request.state.session == {"attempt": "new"}
+    assert response.cookies == []
+    if store is not None:
+        assert store.loads == 0
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+async def test_tenant_context_refuses_legacy_unbound_sessions(server_side: bool) -> None:
+    store = MemoryStore() if server_side else None
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    payload = b"sid" if server_side else b'{"user":"ada"}'
+    if store is not None:
+        store.rows["sid"] = {"user": "ada"}
+
+    class Request:
+        def __init__(self) -> None:
+            self.state = State()
+            self.state.tenant = "tenant-a"
+            self.cookies = {
+                "wreath_session": middleware._sign(payload, int(time.time())),
+            }
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"app.example"
+
+    request = Request()
+    await middleware.before(request)
+
+    assert request.state.session == {}
+    if store is not None:
+        assert store.loads == 0
+
+
+async def test_valid_bound_session_does_not_retry_legacy_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = SessionPolicy(secret="s" * 32)
+
+    class Request:
+        def __init__(self) -> None:
+            self.state = State()
+            self.cookies: dict[str, str] = {}
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"app.example"
+
+    request = Request()
+    binding, _ = _session_binding(request)
+    request.cookies["wreath_session"] = middleware._sign(
+        b'{"user":"ada"}', int(time.time()), binding
+    )
+    calls: list[bytes] = []
+    original = SessionPolicy._load
+
+    def tracked_load(
+        self: SessionPolicy,
+        value: str,
+        candidate_binding: bytes = b"",
+    ) -> tuple[dict[str, Any], bytes] | None:
+        calls.append(candidate_binding)
+        return original(self, value, candidate_binding)
+
+    monkeypatch.setattr(SessionPolicy, "_load", tracked_load)
+    await middleware.before(request)
+
+    assert request.state.session == {"user": "ada"}
+    assert calls == [binding]
 
 
 async def test_the_cookie_carries_only_an_id_and_contents_live_in_the_store() -> None:
@@ -266,7 +514,14 @@ async def test_without_a_store_the_session_still_travels_in_the_cookie() -> None
         return {"user": request.state.session.get("user")}
 
     client = TestClient(app)
-    token = _cookie(await client.get("/set"))
+    issued = await client.get("/set")
+    header = issued.header("set-cookie") or ""
+    assert "Path=/" in header
+    assert "HttpOnly" in header
+    assert "Secure" in header
+    assert "SameSite=Lax" in header
+    assert "Domain=" not in header
+    token = _cookie(issued)
     assert (await client.get("/get", headers={"cookie": f"wreath_session={token}"})).json() == {
         "user": "ada"
     }
@@ -308,13 +563,34 @@ async def test_previous_secret_reissues_a_host_bound_server_session() -> None:
 
 
 def test_cookie_session_loader_rejects_expiry_and_non_object_json() -> None:
-    import time
-
     middleware = SessionPolicy(secret="s" * 32, max_age=60)
     expired = middleware._sign(b'{"user":"ada"}', int(time.time()) - 61)
     sequence = middleware._sign(b"[]", int(time.time()))
     assert middleware._load(expired) is None
     assert middleware._load(sequence) is None
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["cookie", "stored"])
+def test_session_loader_rejects_timestamps_beyond_clock_skew(
+    monkeypatch: pytest.MonkeyPatch,
+    stored: bool,
+) -> None:
+    now = 2_000_000_000
+    monkeypatch.setattr("wreath.policy.sessions.time.time", lambda: now)
+    middleware = SessionPolicy(secret="s" * 32, max_age=60)
+    payload = b"sid" if stored else b'{"user":"ada"}'
+    load = middleware._load_sid if stored else middleware._load
+
+    assert load(middleware._sign(payload, now + 60)) is not None
+    assert load(middleware._sign(payload, now + 61)) is None
+
+
+def test_stored_session_loader_reports_key_rotation_only_when_requested() -> None:
+    middleware = SessionPolicy(secret="s" * 32)
+    token = middleware._sign(b"sid", int(time.time()))
+
+    assert middleware._load_sid(token) == "sid"
+    assert middleware._load_sid(token, _status=True) == ("sid", False)
 
 
 def test_cookie_session_loader_marks_only_previous_secret_payloads_for_resigning() -> None:
@@ -574,6 +850,106 @@ async def test_a_changed_stored_session_tolerates_a_response_without_cookies() -
     assert store.saves == 1
 
 
+@pytest.mark.parametrize("cookie_capable", [False, True])
+async def test_a_concurrently_revoked_session_is_not_resurrected(cookie_capable: bool) -> None:
+    store = MemoryStore()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada", "changed": True}
+    request.state._session_loaded = b'{"user":"ada"}'
+    request.state._session_sid = "revoked"
+    request.state._session_rotate = False
+    request.state._session_binding = b"binding"
+    response = CookieResponse() if cookie_capable else object()
+
+    assert await middleware._after_stored(request, response) is response
+    assert store.rows == {}
+    assert store.saves == 0
+    if cookie_capable:
+        assert response.cookies[0][0] == "delete:wreath_session"
+
+
+async def test_a_store_without_atomic_update_cannot_resurrect_an_existing_session() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.saves = 0
+
+        async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
+            self.saves += 1
+
+    store = Store()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada", "changed": True}
+    request.state._session_loaded = b'{"user":"ada"}'
+    request.state._session_sid = "possibly-revoked"
+    request.state._session_rotate = False
+    request.state._session_binding = b"binding"
+    response = CookieResponse()
+
+    assert await middleware._after_stored(request, response) is response
+    assert store.saves == 0
+    assert response.cookies[0][0] == "delete:wreath_session"
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+async def test_session_egress_reuses_the_ingress_authority_binding(server_side: bool) -> None:
+    store = MemoryStore() if server_side else None
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+
+    class Request:
+        def __init__(self) -> None:
+            self.state = State()
+            self.state.session = {"user": "ada"}
+            self.state._session_loaded = b"{}"
+            self.state._session_binding = b"known-binding"
+            if server_side:
+                self.state._session_sid = None
+                self.state._session_rotate = False
+                self.state._session_resign = False
+
+        def _single_header(self, _name: bytes) -> bytes:
+            raise AssertionError("egress must reuse the authority checked at ingress")
+
+    response = CookieResponse()
+    await middleware.after(Request(), response)
+
+    assert response.cookies[0][0] == "set:wreath_session"
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+async def test_session_egress_computes_a_missing_authority_binding(server_side: bool) -> None:
+    store = MemoryStore() if server_side else None
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+
+    class Request:
+        def __init__(self) -> None:
+            self.state = State()
+            self.state.session = {"user": "ada"}
+            self.state._session_loaded = b"{}"
+            self.state._session_binding = None
+            if server_side:
+                self.state._session_sid = None
+                self.state._session_rotate = False
+                self.state._session_resign = False
+
+        def _single_header(self, _name: bytes) -> bytes:
+            return b"app.example"
+
+    request = Request()
+    response = CookieResponse()
+    await middleware.after(request, response)
+    token = response.cookies[0][1][0]
+    binding, _ = _session_binding(request)
+
+    if server_side:
+        assert middleware._load_sid(token, binding) is not None
+        assert middleware._load_sid(token) is None
+    else:
+        assert middleware._load(token, binding) is not None
+        assert middleware._load(token) is None
+
+
 async def test_cookie_only_after_tolerates_missing_session_or_cookie_capability() -> None:
     middleware = SessionPolicy(secret="s" * 32)
     missing = StateRequest()
@@ -602,7 +978,7 @@ async def test_a_session_that_cannot_be_serialized_publishes_no_state() -> None:
             self.cookies: dict[str, str] = {}
 
     request = Req()
-    request.cookies = {"wreath_session": middleware._sign(b"sid", 2_000_000_000)}
+    request.cookies = {"wreath_session": middleware._sign(b"sid", int(time.time()))}
 
     with pytest.raises(TypeError):
         await middleware._before_stored(request)

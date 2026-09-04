@@ -264,7 +264,10 @@ async def test_websocket_authentication_can_load_the_global_session() -> None:
     sessions = MemorySessions()
     app = Wreath()
     app.configure_http_policy(
-        HttpPolicy(session=SessionPolicy(secret="s" * 32, store=sessions, secure=False))
+        HttpPolicy(
+            session=SessionPolicy(secret="s" * 32, store=sessions, secure=False),
+            websocket_origin=WebSocketOriginPolicy(["https://app.example"]),
+        )
     )
     app.configure_auth(SessionIdentityBackend())
 
@@ -294,6 +297,60 @@ async def test_websocket_authentication_can_load_the_global_session() -> None:
             },
         ) as websocket:
             assert await websocket.receive_text() == "u1"
+
+
+async def test_session_authenticated_websocket_requires_an_origin_policy() -> None:
+    app = Wreath()
+    app.configure_auth(SessionIdentityBackend())
+
+    @app.websocket("/ws")
+    @authenticated()
+    async def socket(websocket: Any) -> None:
+        await websocket.accept()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"WEBSOCKET /ws require WebSocketOriginPolicy.*browser sessions",
+    ):
+        app._compile_routes()
+
+
+async def test_session_policy_without_websocket_origin_does_not_hide_the_refusal() -> None:
+    app = Wreath(http_policy=HttpPolicy(session=SessionPolicy(secret="s" * 32)))
+    app.configure_auth(SessionIdentityBackend())
+
+    @app.websocket("/ws")
+    @authenticated()
+    async def socket(websocket: Any) -> None:
+        await websocket.accept()
+
+    with pytest.raises(RuntimeError, match=r"WEBSOCKET /ws require WebSocketOriginPolicy"):
+        app._compile_routes()
+
+
+async def test_public_websocket_does_not_require_an_origin_policy_for_session_auth() -> None:
+    app = Wreath()
+    app.configure_auth(SessionIdentityBackend())
+
+    @app.websocket("/ws")
+    async def socket(websocket: Any) -> None:
+        await websocket.accept()
+
+    async with TestClient(app):
+        pass
+
+
+async def test_bearer_authenticated_websocket_does_not_require_an_origin_policy() -> None:
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend(lambda _token: Identity("u1")))
+
+    @app.websocket("/ws")
+    @authenticated()
+    async def socket(websocket: Any) -> None:
+        await websocket.accept()
+
+    async with TestClient(app):
+        pass
 
 
 async def test_duplicate_host_headers_are_rejected_by_trusted_host() -> None:
@@ -460,7 +517,7 @@ async def test_role_check_accepts_any_collection_of_role_names() -> None:
     app.configure_auth(
         backend=BearerTokenBackend(
             lambda token: (
-                Identity(id="1", roles=("admin", "user"))  # type: ignore[arg-type]
+                Identity(id="1", roles=frozenset({"admin", "user"}))
                 if token == "admin"
                 else None
             )

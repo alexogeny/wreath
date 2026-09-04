@@ -48,6 +48,12 @@ def _server(*, token: str | None = None, registry: Any = None) -> InspectorServe
     )
 
 
+def test_config_repr_does_not_expose_capture_token() -> None:
+    token = "inspector-capture-secret"
+
+    assert token not in repr(InspectorConfig("inspector.sock", capture_token=token))
+
+
 def test_config_enforces_both_payload_bounds_and_capture_token_length() -> None:
     with pytest.raises(ValueError, match="max_payload_bytes"):
         InspectorConfig("x.sock", max_payload_bytes=MAX_PAGE_ROWS * 1024 + 1)

@@ -57,6 +57,7 @@ __all__ = [
 _DEFAULT_INTERVAL: Final = 1.0
 _DEFAULT_QUEUE: Final = 4096
 _DEFAULT_BATCH: Final = 512
+_MAX_RESPONSE_DRAIN: Final = 64 * 1024
 
 
 class TraceMetricTransport(_Protocol):
@@ -95,12 +96,24 @@ type _Origin = tuple[str, str, int]
 
 
 def _otlp_origin(url: str) -> _Origin:
-    parsed = urllib.parse.urlsplit(url)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("OTLP endpoint must be an absolute HTTP(S) URL") from error
     scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https"} or parsed.hostname is None:
+    if (
+        any(ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in url)
+        or scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or port == 0
+    ):
         raise ValueError("OTLP endpoint must be an absolute HTTP(S) URL")
-    host = parsed.hostname.encode("idna").decode("ascii").lower()
-    port = parsed.port
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise ValueError("OTLP endpoint must contain a valid hostname") from error
     if port is None:
         port = 443 if scheme == "https" else 80
     return scheme, host, port
@@ -189,6 +202,9 @@ class OtlpHttpExporter:
                 f"unknown OTLP encoding {encoding!r}; expected one of {known}"
             ) from None
         origin = _otlp_origin(endpoint)
+        parsed_endpoint = urllib.parse.urlsplit(endpoint)
+        if parsed_endpoint.query or parsed_endpoint.fragment:
+            raise ValueError("OTLP endpoint must not contain a query or fragment")
         base = endpoint.rstrip("/")
         self._traces_url = f"{base}/v1/traces"
         self._metrics_url = f"{base}/v1/metrics"
@@ -202,9 +218,7 @@ class OtlpHttpExporter:
     def _post_body(self, url: str, body: bytes) -> None:
         req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
         with self._opener.open(req, timeout=self._timeout) as response:
-            # Drain and discard: the OTLP response body is not needed, but leaving
-            # it unread can wedge keep-alive connections.
-            response.read()
+            response.read(_MAX_RESPONSE_DRAIN)
 
     def _post(self, url: str, request: dict[str, Any], signal: str) -> None:
         self._post_body(url, self._encode(request, signal))

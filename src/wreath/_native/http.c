@@ -67,15 +67,13 @@ http_header_line(const uint8_t **cursor, const uint8_t *end,
     return 0;
 }
 
-/* Common request methods and header names are returned as cached objects so
- * steady-state parsing does not allocate a str per method or a bytes per
- * well-known header name.  Lazily initialized; entries stay for the life of
- * the interpreter. */
+/* Common request methods and header names are returned from an immutable cache
+ * owned by the module method or connection protocol that performs the parse.
+ * No Python object is published through process-global native state. */
 /* A string literal paired with its compile-time length, so the per-request
  * match loops below never call strlen on a constant. */
 #define WREATH_LSTR(s) {s, (Py_ssize_t)sizeof(s) - 1}
 
-static PyObject *cached_methods[8];
 static const struct { const char *text; Py_ssize_t len; } METHOD_NAMES[8] = {
     WREATH_LSTR("GET"), WREATH_LSTR("POST"), WREATH_LSTR("PUT"),
     WREATH_LSTR("DELETE"), WREATH_LSTR("PATCH"), WREATH_LSTR("HEAD"),
@@ -83,24 +81,17 @@ static const struct { const char *text; Py_ssize_t len; } METHOD_NAMES[8] = {
 };
 
 static PyObject *
-method_object(const uint8_t *data, Py_ssize_t len)
+method_object(const uint8_t *data, Py_ssize_t len, PyObject *cache)
 {
     for (int i = 0; i < 8; i++) {
         const char *candidate = METHOD_NAMES[i].text;
         if (METHOD_NAMES[i].len == len && memcmp(candidate, data, len) == 0) {
-            if (cached_methods[i] == NULL) {
-                cached_methods[i] = PyUnicode_InternFromString(candidate);
-                if (cached_methods[i] == NULL) {
-                    return NULL;
-                }
-            }
-            return Py_NewRef(cached_methods[i]);
+            return Py_NewRef(PyTuple_GET_ITEM(cache, i));
         }
     }
     return PyUnicode_DecodeASCII((const char *)data, len, "strict");
 }
 
-static PyObject *cached_header_names[16];
 static const struct { const char *text; Py_ssize_t len; } HEADER_NAMES[16] = {
     WREATH_LSTR("host"), WREATH_LSTR("connection"), WREATH_LSTR("accept"),
     WREATH_LSTR("accept-encoding"), WREATH_LSTR("accept-language"),
@@ -112,21 +103,108 @@ static const struct { const char *text; Py_ssize_t len; } HEADER_NAMES[16] = {
 };
 
 static PyObject *
-header_name_object(const uint8_t *lowered, Py_ssize_t len)
+header_name_object(
+    const uint8_t *lowered, Py_ssize_t len, PyObject *cache)
 {
     for (int i = 0; i < 16; i++) {
         const char *candidate = HEADER_NAMES[i].text;
         if (HEADER_NAMES[i].len == len && memcmp(candidate, lowered, len) == 0) {
-            if (cached_header_names[i] == NULL) {
-                cached_header_names[i] = PyBytes_FromString(candidate);
-                if (cached_header_names[i] == NULL) {
-                    return NULL;
-                }
-            }
-            return Py_NewRef(cached_header_names[i]);
+            return Py_NewRef(PyTuple_GET_ITEM(cache, i));
         }
     }
     return PyBytes_FromStringAndSize((const char *)lowered, len);
+}
+
+PyObject *
+wreath_http_method_cache_new(void)
+{
+    PyObject *cache = PyTuple_New(8);
+    if (cache == NULL) return NULL;
+    for (int i = 0; i < 8; i++) {
+        PyObject *method = PyUnicode_InternFromString(METHOD_NAMES[i].text);
+        if (method == NULL) goto error;
+        PyTuple_SET_ITEM(cache, i, method);
+    }
+    return cache;
+
+error:
+    Py_DECREF(cache);
+    return NULL;
+}
+
+PyObject *
+wreath_http_header_name_cache_new(void)
+{
+    PyObject *cache = PyTuple_New(16);
+    if (cache == NULL) return NULL;
+    for (int i = 0; i < 16; i++) {
+        PyObject *name = PyBytes_FromStringAndSize(
+            HEADER_NAMES[i].text, HEADER_NAMES[i].len);
+        if (name == NULL) goto error;
+        PyTuple_SET_ITEM(cache, i, name);
+    }
+    return cache;
+
+error:
+    Py_DECREF(cache);
+    return NULL;
+}
+
+static int
+http_register_parser(
+    PyObject *module, PyMethodDef *definition, PyObject *cache)
+{
+    PyObject *module_name = PyModule_GetNameObject(module);
+    if (module_name == NULL) return -1;
+    PyObject *function = PyCFunction_NewEx(definition, cache, module_name);
+    Py_DECREF(module_name);
+    if (function == NULL) return -1;
+    if (PyModule_AddObject(module, definition->ml_name, function) < 0) {
+        Py_DECREF(function);
+        return -1;
+    }
+    return 0;
+}
+
+static PyMethodDef http_request_parser = {
+    "http_parse_request", wreath_http_parse_request, METH_O,
+    "http_parse_request(data) -> (method, target, minor, headers, consumed) | None"};
+static PyMethodDef http_response_parser = {
+    "http_parse_response", wreath_http_parse_response, METH_O,
+    "http_parse_response(data) -> (minor, status, reason, headers, consumed) | None"};
+static PyMethodDef http_client_response_parser = {
+    "parse_response_head", wreath_http_parse_response, METH_O,
+    "parse_response_head(data) -> (minor, status, reason, headers, consumed) | None"};
+
+int
+wreath_http_register_request_parser(PyObject *module)
+{
+    PyObject *cache = wreath_http_method_cache_new();
+    if (cache == NULL) return -1;
+    int status = http_register_parser(module, &http_request_parser, cache);
+    Py_DECREF(cache);
+    return status;
+}
+
+int
+wreath_http_register_response_parser(PyObject *module)
+{
+    PyObject *cache = wreath_http_header_name_cache_new();
+    if (cache == NULL) return -1;
+    int status = http_register_parser(module, &http_response_parser, cache);
+    Py_DECREF(cache);
+    return status;
+}
+
+int
+wreath_http_register_client_response_parser(PyObject *module)
+{
+    PyObject *cache = wreath_http_header_name_cache_new();
+    if (cache == NULL) return -1;
+    int status = http_register_parser(
+        module, &http_client_response_parser, cache);
+    Py_DECREF(cache);
+    return status;
 }
 
 /* A comma-delimited, case-insensitive token list. Request framing consumes
@@ -163,12 +241,227 @@ header_value_has_token(const char *value, Py_ssize_t size,
     return 0;
 }
 
+static int
+http_hex_digit(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+
+static int
+http_origin_target_valid(const uint8_t *value, Py_ssize_t size)
+{
+    Py_ssize_t segment_start = 1;
+    int in_path = 1;
+    if (size > 1 && value[1] == '/') return 0;
+    if (memchr(value + 1, '%', (size_t)(size - 1)) == NULL &&
+        memchr(value + 1, '\\', (size_t)(size - 1)) == NULL &&
+        memchr(value + 1, '.', (size_t)(size - 1)) == NULL) {
+        return 1;
+    }
+    for (Py_ssize_t i = 1; i < size; i++) {
+        unsigned char c = value[i];
+        if (c > 0x7e) return 0;
+        if (c == '%') {
+            if (i + 2 >= size || !http_hex_digit(value[i + 1]) ||
+                !http_hex_digit(value[i + 2])) {
+                return 0;
+            }
+            if (in_path) {
+                unsigned char decoded = (unsigned char)(
+                    ((value[i + 1] <= '9' ? value[i + 1] - '0'
+                      : (value[i + 1] | 0x20) - 'a' + 10) << 4) |
+                    (value[i + 2] <= '9' ? value[i + 2] - '0'
+                     : (value[i + 2] | 0x20) - 'a' + 10));
+                if (decoded == '.' || decoded == '/' || decoded == '\\') return 0;
+            }
+            i += 2;
+            continue;
+        }
+        if (!in_path) continue;
+        if (c == '\\') return 0;
+        if (c == '/' || c == '?') {
+            Py_ssize_t segment_size = i - segment_start;
+            if ((segment_size == 1 && value[segment_start] == '.') ||
+                (segment_size == 2 && value[segment_start] == '.' &&
+                 value[segment_start + 1] == '.')) {
+                return 0;
+            }
+            segment_start = i + 1;
+            in_path = c != '?';
+        }
+    }
+    if (in_path) {
+        Py_ssize_t segment_size = size - segment_start;
+        if ((segment_size == 1 && value[segment_start] == '.') ||
+            (segment_size == 2 && value[segment_start] == '.' &&
+             value[segment_start + 1] == '.')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+http_reg_name_valid(const char *value, Py_ssize_t size)
+{
+    for (Py_ssize_t i = 0; i < size; i++) {
+        unsigned char c = (unsigned char)value[i];
+        int allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+            c == '~' || c == '!' || c == '$' || c == '&' || c == '\'' ||
+            c == '(' || c == ')' || c == '*' || c == '+' || c == ',' ||
+            c == ';' || c == '=';
+        if (c == '%') {
+            if (i + 2 >= size || !http_hex_digit((unsigned char)value[i + 1]) ||
+                !http_hex_digit((unsigned char)value[i + 2])) {
+                return 0;
+            }
+            i += 2;
+        }
+        else if (!allowed) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+http_ipv4_address_valid(const char *value, Py_ssize_t size)
+{
+    Py_ssize_t start = 0;
+    int parts = 0;
+    while (start < size) {
+        Py_ssize_t end = start;
+        int octet = 0;
+        while (end < size && value[end] != '.') {
+            int digit = (unsigned char)value[end] - '0';
+            if (digit < 0 || digit > 9 || end - start == 3 ||
+                octet > (255 - digit) / 10) {
+                return 0;
+            }
+            octet = octet * 10 + digit;
+            end++;
+        }
+        if (end == start || (end - start > 1 && value[start] == '0')) return 0;
+        parts++;
+        if (end == size) break;
+        start = end + 1;
+    }
+    return parts == 4;
+}
+
+static int
+http_ipv6_address_valid(const char *value, Py_ssize_t size)
+{
+    Py_ssize_t cursor = 0;
+    int groups = 0;
+    int compressed = 0;
+    if (size == 0) return 0;
+    if (value[0] == ':') {
+        if (size < 2 || value[1] != ':') return 0;
+        compressed = 1;
+        cursor = 2;
+        if (cursor == size) return 1;
+    }
+    while (cursor < size) {
+        Py_ssize_t start = cursor;
+        int has_dot = 0;
+        while (cursor < size && value[cursor] != ':') {
+            has_dot |= value[cursor] == '.';
+            cursor++;
+        }
+        if (has_dot) {
+            if (!http_ipv4_address_valid(value + start, size - start)) return 0;
+            groups += 2;
+            cursor = size;
+            break;
+        }
+        if (cursor == start || cursor - start > 4) return 0;
+        for (Py_ssize_t i = start; i < cursor; i++) {
+            if (!http_hex_digit((unsigned char)value[i])) return 0;
+        }
+        groups++;
+        if (cursor == size) break;
+        cursor++;
+        if (cursor == size) return 0;
+        if (value[cursor] == ':') {
+            if (compressed) return 0;
+            compressed = 1;
+            cursor++;
+            if (cursor == size) break;
+        }
+    }
+    return compressed ? groups < 8 : groups == 8;
+}
+
+static int
+http_ipvfuture_valid(const char *value, Py_ssize_t size)
+{
+    Py_ssize_t cursor = 1;
+    if (size < 4 || (value[0] != 'v' && value[0] != 'V')) return 0;
+    while (cursor < size && http_hex_digit((unsigned char)value[cursor])) cursor++;
+    if (cursor == 1 || cursor == size || value[cursor++] != '.' || cursor == size) return 0;
+    for (; cursor < size; cursor++) {
+        unsigned char c = (unsigned char)value[cursor];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+              c == '~' || c == '!' || c == '$' || c == '&' || c == '\'' ||
+              c == '(' || c == ')' || c == '*' || c == '+' || c == ',' ||
+              c == ';' || c == '=' || c == ':')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+http_host_authority_valid(const char *value, Py_ssize_t size)
+{
+    Py_ssize_t host_end = size;
+    Py_ssize_t port_start = -1;
+    if (size == 0) return 0;
+    if (value[0] == '[') {
+        Py_ssize_t close = 1;
+        while (close < size && value[close] != ']') close++;
+        if (close == 1 || close == size ||
+            (!http_ipv6_address_valid(value + 1, close - 1) &&
+             !http_ipvfuture_valid(value + 1, close - 1))) {
+            return 0;
+        }
+        host_end = close + 1;
+        if (host_end < size) {
+            if (value[host_end] != ':') return 0;
+            port_start = host_end + 1;
+        }
+    }
+    else {
+        for (Py_ssize_t i = 0; i < size; i++) {
+            if (value[i] == ':') {
+                host_end = i;
+                port_start = i + 1;
+                break;
+            }
+        }
+        if (host_end == 0 || !http_reg_name_valid(value, host_end)) return 0;
+    }
+    if (port_start < 0) return host_end == size;
+    if (port_start == size) return 0;
+    int port = 0;
+    for (Py_ssize_t i = port_start; i < size; i++) {
+        int digit = (unsigned char)value[i] - '0';
+        if (digit < 0 || digit > 9 || port > (65535 - digit) / 10) return 0;
+        port = port * 10 + digit;
+    }
+    return 1;
+}
+
 int
 wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
     PyObject **method_out, PyObject **target_out, int *minor_out,
     PyObject **headers_out, Py_ssize_t *consumed_out, Py_ssize_t max_headers,
-    WreathHttpRequestMeta *request_meta
+    WreathHttpRequestMeta *request_meta, PyObject *object_cache
 )
 {
     /* The caller has already located the CRLFCRLF that ends the head (the
@@ -220,7 +513,7 @@ wreath_http_parse_request_parts(
     }
     p++;
     target_start = p;
-    while (p < end && *p > ' ' && *p != 0x7f) p++;
+    while (p < end && *p > ' ' && *p < 0x7f) p++;
     target_len = p - target_start;
     if (target_len == 0 || p >= end || *p != ' ') {
         malformed("malformed request target");
@@ -230,7 +523,8 @@ wreath_http_parse_request_parts(
     int is_connect = method_len == 7 && memcmp(method_start, "CONNECT", 7) == 0;
     int is_asterisk = target_len == 1 && target_start[0] == '*';
     if (is_connect || (is_asterisk && !is_options) ||
-        (!is_asterisk && target_start[0] != '/') ||
+        (!is_asterisk &&
+         (target_start[0] != '/' || !http_origin_target_valid(target_start, target_len))) ||
         memchr(target_start, '#', (size_t)target_len) != NULL) {
         malformed("unsupported request target form");
         goto error;
@@ -286,13 +580,17 @@ wreath_http_parse_request_parts(
                 owned[name_offset + i] = (char)(c + ('a' - 'A'));
             }
         }
+        Py_ssize_t value_size = value_end - value_start;
         if (name_len == 4 && memcmp(owned + name_offset, "host", 4) == 0) {
             host_count++;
+            if (!http_host_authority_valid(owned + value_offset, value_size)) {
+                malformed("malformed Host authority");
+                goto error;
+            }
         }
         if (request_meta != NULL && request_meta->err_status == 0) {
             const char *name = owned + name_offset;
             const char *value = owned + value_offset;
-            Py_ssize_t value_size = value_end - value_start;
             if (name_len == 6 && memcmp(name, "expect", 6) == 0) {
                 expect_count++;
                 if (value_size != 12 ||
@@ -413,7 +711,7 @@ wreath_http_parse_request_parts(
             }
         }
     }
-    method = method_object(method_start, method_len);
+    method = method_object(method_start, method_len, object_cache);
     target = method != NULL
         ? PyBytes_FromStringAndSize((const char *)target_start, target_len) : NULL;
     if (target == NULL) goto error;
@@ -431,7 +729,7 @@ error:
 }
 
 PyObject *
-wreath_http_parse_request(PyObject *Py_UNUSED(self), PyObject *arg)
+wreath_http_parse_request(PyObject *self, PyObject *arg)
 {
     Py_buffer view;
     PyObject *method = NULL;
@@ -453,7 +751,7 @@ wreath_http_parse_request(PyObject *Py_UNUSED(self), PyObject *arg)
         view.buf, view.len,
         terminator != NULL ? terminator - (const uint8_t *)view.buf : -1,
         &method, &target, &minor_version, &headers, &consumed, PY_SSIZE_T_MAX,
-        NULL
+        NULL, self
     );
     PyBuffer_Release(&view);
     if (status < 0) return NULL;
@@ -501,7 +799,7 @@ wreath_http_response_head_clear(WreathHttpResponseHead *head)
 int
 wreath_http_parse_response_parts(
     const uint8_t *data, Py_ssize_t size, PyObject *method,
-    WreathHttpResponseHead *head)
+    WreathHttpResponseHead *head, PyObject *object_cache)
 {
     const uint8_t *head_end;
     const uint8_t *p;
@@ -642,7 +940,7 @@ wreath_http_parse_response_parts(
                 lowered[i] = c >= 'A' && c <= 'Z'
                     ? (uint8_t)(c + ('a' - 'A')) : c;
             }
-            name = header_name_object(lowered, name_len);
+            name = header_name_object(lowered, name_len, object_cache);
         } else {
             /* Allocate uninitialised and fill. Copying the source in and
              * lowercasing in place is only safe while `name_len > 64` holds:
@@ -750,7 +1048,8 @@ error:
 }
 
 PyObject *
-wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
+wreath_http_parse_response_cached(
+    PyObject *arg, PyObject *object_cache)
 {
     Py_buffer view;
     WreathHttpResponseHead head;
@@ -761,7 +1060,7 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
     PyObject *result = NULL;
     if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
     int parsed = wreath_http_parse_response_parts(
-        view.buf, view.len, NULL, &head);
+        view.buf, view.len, NULL, &head, object_cache);
     PyBuffer_Release(&view);
     if (parsed < 0) return NULL;
     if (parsed == 0) Py_RETURN_NONE;
@@ -784,6 +1083,12 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
     }
     wreath_http_response_head_clear(&head);
     return result;
+}
+
+PyObject *
+wreath_http_parse_response(PyObject *self, PyObject *arg)
+{
+    return wreath_http_parse_response_cached(arg, self);
 }
 
 static int

@@ -246,7 +246,7 @@ class TLSConfig:
 
     certfile: str | os.PathLike[str]
     keyfile: str | os.PathLike[str]
-    password: str | None = None
+    password: str | None = field(default=None, repr=False)
 
     def build_ssl_context(self, protocols: tuple[HttpProtocolName, ...]) -> SSLContext:
         """Build a server `SSLContext` advertising ALPN for the TCP protocols.

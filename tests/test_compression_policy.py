@@ -621,6 +621,26 @@ def test_minimum_size_and_gzip_level_are_validated() -> None:
             CompressionPolicy(gzip_level=level)
 
 
+@pytest.mark.parametrize(
+    ("argument", "value"),
+    [
+        ("minimum_size", True),
+        ("minimum_size", 1.5),
+        ("gzip_level", False),
+        ("gzip_level", 1.5),
+        ("zstd_level", True),
+        ("zstd_level", 1.5),
+        ("compress_streaming", 1),
+        ("compress_authenticated", 0),
+    ],
+)
+def test_compression_configuration_refuses_coercible_values(
+    argument: str, value: object
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=argument):
+        CompressionPolicy(**{argument: value})
+
+
 @pytest.mark.asyncio
 async def test_no_transform_and_incompressible_types_refuse_zstd_too() -> None:
     app = Wreath()

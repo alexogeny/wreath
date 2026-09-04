@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from fractions import Fraction
+from typing import Any, cast
 
+import pytest
+
+import wreath._mcp.session as session_module
 from wreath import Wreath
 from wreath._mcp.session import Session, SessionStore
 from wreath.mcp import MCP, PROTOCOL_VERSION, MCPLimits
+from wreath.queue import Queue
 from wreath.testing import TestClient, TestResponse
 
 STREAM = {"accept": "text/event-stream"}
@@ -29,6 +35,36 @@ async def initialize(client: TestClient) -> str:
         },
     )
     return header(response, "mcp-session-id") or ""
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_sessions", True),
+        ("max_sessions", 1.5),
+        ("max_sessions", float("nan")),
+        ("max_pending_notifications", True),
+        ("max_pending_notifications", 1.5),
+        ("max_pending_requests", float("inf")),
+        ("max_pending_requests", 1.5),
+        ("max_pending_requests", 0),
+        ("idle_seconds", True),
+        ("idle_seconds", Fraction(1, 2)),
+        ("idle_seconds", 0),
+        ("idle_seconds", float("nan")),
+        ("idle_seconds", float("inf")),
+        ("client_request_seconds", True),
+        ("client_request_seconds", Fraction(1, 2)),
+        ("client_request_seconds", 0),
+        ("client_request_seconds", float("nan")),
+        ("client_request_seconds", float("inf")),
+    ],
+)
+def test_session_store_refuses_malformed_resource_limits(field: str, value: object) -> None:
+    arguments: dict[str, Any] = {"max_sessions": 2, "idle_seconds": None}
+    arguments[field] = value
+    with pytest.raises((TypeError, ValueError), match=field):
+        SessionStore(**arguments)
 
 
 async def call(client: TestClient, session: str, payload: dict) -> dict:
@@ -59,6 +95,35 @@ def build() -> tuple[Wreath, MCP]:
     return app, mcp
 
 
+def live_session(mcp: MCP, identifier: str) -> Session:
+    session = mcp._sessions.get(identifier)
+    assert session is not None
+    return session
+
+
+def test_closing_a_stream_retries_when_the_reader_empties_a_full_queue() -> None:
+    class EmptiedQueue:
+        offers = 0
+
+        def offer(self, _item: object) -> bool:
+            self.offers += 1
+            return self.offers > 1
+
+        def get_nowait(self) -> object:
+            raise session_module.QueueEmpty
+
+    notifications = EmptiedQueue()
+    session = Session(
+        id="session",
+        protocol_version=PROTOCOL_VERSION,
+        notifications=cast(Queue, notifications),
+    )
+
+    session.close_stream()
+
+    assert notifications.offers == 2
+
+
 def test_session_creation_collects_only_due_deadlines() -> None:
     class CountingStore(SessionStore):
         visits = 0
@@ -82,6 +147,20 @@ def test_session_creation_collects_only_due_deadlines() -> None:
     assert store._next_sweep == 111
 
 
+def test_session_creation_never_replaces_an_existing_bearer_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module.secrets, "token_urlsafe", lambda _size: "duplicate")
+    store = SessionStore(max_sessions=2, idle_seconds=None)
+    first = store.create(protocol_version=PROTOCOL_VERSION, client_info={})
+
+    with pytest.raises(RuntimeError, match="duplicate session id"):
+        store.create(protocol_version=PROTOCOL_VERSION, client_info={})
+
+    assert store.get("duplicate") is first
+    assert len(store) == 1
+
+
 def test_session_subscriber_index_tracks_unsubscribe_and_discard() -> None:
     store = SessionStore(max_sessions=2, idle_seconds=None)
     first = store.create(
@@ -102,6 +181,77 @@ def test_session_subscriber_index_tracks_unsubscribe_and_discard() -> None:
     assert store.subscribers("camera://ridge") == [second]
     assert store.discard(second.id)
     assert store.subscribers("camera://ridge") == []
+
+
+async def test_idle_sweep_does_not_collect_a_session_with_an_active_call() -> None:
+    store = SessionStore(max_sessions=2, idle_seconds=1)
+    session = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+    task = asyncio.create_task(asyncio.Event().wait())
+    session.in_flight["active"] = task
+
+    try:
+        assert store.peek(session.id, now=102) is session
+        assert store.sweep(now=102, force=True) == 0
+        assert store.get(session.id, now=102) is session
+        assert task.cancelling() == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_idle_sweep_does_not_collect_a_session_with_an_open_stream() -> None:
+    store = SessionStore(max_sessions=2, idle_seconds=1)
+    session = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+    session.stream_open = True
+
+    assert store.peek(session.id, now=102) is session
+    assert store.sweep(now=102, force=True) == 0
+    assert store.peek(session.id, now=102) is session
+
+    session.stream_open = False
+    assert store.peek(session.id, now=102.5) is session
+    assert store.sweep(now=104, force=True) == 1
+    assert store.peek(session.id, now=104) is None
+
+
+async def test_idle_sweep_does_not_collect_a_session_with_an_active_request() -> None:
+    store = SessionStore(max_sessions=2, idle_seconds=1)
+    session = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+    task = asyncio.create_task(asyncio.Event().wait())
+    session.requests_in_flight["active"] = task
+
+    try:
+        assert store.peek(session.id, now=102) is session
+        assert store.sweep(now=102, force=True) == 0
+        assert task.cancelling() == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_session_peek_honours_a_supplied_clock_without_refreshing() -> None:
+    store = SessionStore(max_sessions=2, idle_seconds=10)
+    session = store.create(
+        protocol_version=PROTOCOL_VERSION,
+        client_info={},
+        now=100,
+    )
+
+    assert store.peek(session.id, now=105) is session
+    assert session.last_seen == 100
+    assert store.peek(session.id, now=110) is None
 
 
 async def test_a_subscriber_is_told_when_the_resource_changes() -> None:
@@ -192,7 +342,9 @@ async def test_a_closed_stream_can_be_reopened() -> None:
         await asyncio.sleep(0)
         # Ending the *stream* rather than the session: the sentinel goes on the
         # queue directly, exactly as a client hanging up would.
-        mcp._sessions.get(session).close_stream()
+        live = live_session(mcp, session)
+        live.last_seen -= 3600
+        live.close_stream()
         await asyncio.wait_for(first, timeout=5)
 
         second = asyncio.ensure_future(client.get("/mcp", headers=headers))
@@ -249,7 +401,7 @@ async def test_a_notification_nobody_reads_is_dropped_and_counted() -> None:
             mcp.notify_resource_updated("camera://ridge")
         assert mcp.notifications_dropped == 3
         assert mcp.stats()["notifications_dropped"] == 3
-        assert mcp._sessions.get(session).dropped == 3
+        assert live_session(mcp, session).dropped == 3
 
 
 async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
@@ -260,7 +412,7 @@ async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
     async def slow_import(request) -> dict:
         reporter = request.state.mcp.progress
         reporter.update(50.0, "halfway")
-        queue = mcp._sessions.get(request.state.mcp.session_id).notifications
+        queue = live_session(mcp, request.state.mcp.session_id).notifications
         for _ in range(500):
             if any(b"halfway" in item for item in queue.snapshot()):
                 break
@@ -304,7 +456,7 @@ async def test_progress_with_no_message_carries_no_message_key() -> None:
     async def quiet_import(request) -> dict:
         reporter = request.state.mcp.progress
         reporter.update(50.0)
-        queue = mcp._sessions.get(request.state.mcp.session_id).notifications
+        queue = live_session(mcp, request.state.mcp.session_id).notifications
         for _ in range(500):
             if any(b"50.0" in item for item in queue.snapshot()):
                 break
@@ -362,7 +514,7 @@ async def test_a_tool_may_report_progress_with_nobody_listening() -> None:
         assert recorded[0] is not None
         assert recorded[0].percent == 10.0
         # Nothing was relayed, because nobody asked to be told.
-        assert len(mcp._sessions.get(session).notifications) == 0
+        assert len(live_session(mcp, session).notifications) == 0
 
 
 async def test_the_stream_belongs_to_the_session_that_opened_it() -> None:

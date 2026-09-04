@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 
@@ -40,6 +41,83 @@ def test_close_is_idempotent(tmp_path) -> None:
     files = StaticFiles(tmp_path)
     files.close()
     files.close()  # must not close a descriptor number somebody else now owns
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"html_index": 1}, "html_index must be a bool"),
+        ({"cache_control": object()}, "cache_control must be CacheControl or None"),
+        ({"max_workers": True}, "max_workers must be a positive integer"),
+        ({"max_workers": 0}, "max_workers must be a positive integer"),
+    ],
+)
+def test_configuration_is_refused_before_resources_are_opened(
+    tmp_path, monkeypatch, options, message
+) -> None:
+    opened = False
+
+    def unexpected_open(_root) -> int:
+        nonlocal opened
+        opened = True
+        raise AssertionError("invalid configuration reached the filesystem")
+
+    monkeypatch.setattr("wreath.staticfiles.open_root", unexpected_open)
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        StaticFiles(tmp_path, **options)
+
+    assert not opened
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_lookup_closes_the_descriptor_it_eventually_opens(
+    tmp_path, monkeypatch
+) -> None:
+    from wreath.request import Request
+
+    entered = threading.Event()
+    release = threading.Event()
+    returned_fd: list[int] = []
+    path = tmp_path / "asset.txt"
+    path.write_bytes(b"safe")
+
+    def blocked_resolve(_self, rest):
+        entered.set()
+        release.wait(timeout=5.0)
+        fd = os.open(path, os.O_RDONLY)
+        returned_fd.append(fd)
+        return fd, os.fstat(fd), rest
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    monkeypatch.setattr(StaticFiles, "_resolve", blocked_resolve)
+    files = StaticFiles(tmp_path, max_workers=1)
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/asset.txt", "headers": []},
+        receive,
+        {"path": "asset.txt"},
+    )
+    task = asyncio.create_task(files(request))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        await asyncio.to_thread(files._executor.shutdown, True)
+        assert returned_fd
+        with pytest.raises(OSError):
+            os.fstat(returned_fd[0])
+    finally:
+        release.set()
+        files.close()
+        for fd in returned_fd:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def test_close_waits_for_work_already_in_the_pool(tmp_path, monkeypatch) -> None:
@@ -86,6 +164,55 @@ async def test_serving_still_works_before_close(tmp_path) -> None:
         os.close(fd)
     finally:
         files.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no named pipes")
+def test_a_named_pipe_is_not_a_static_file(tmp_path) -> None:
+    pipe = tmp_path / "events"
+    os.mkfifo(pipe)
+    held = os.open(pipe, os.O_RDWR | os.O_NONBLOCK)
+    files = StaticFiles(tmp_path)
+    try:
+        assert files._resolve("events") is None
+    finally:
+        files.close()
+        os.close(held)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no named pipes")
+def test_a_named_pipe_cannot_be_served_as_a_directory_index(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    pipe = docs / "index.html"
+    os.mkfifo(pipe)
+    held = os.open(pipe, os.O_RDWR | os.O_NONBLOCK)
+    files = StaticFiles(tmp_path)
+    try:
+        assert files._resolve("docs/") is None
+    finally:
+        files.close()
+        os.close(held)
+
+
+def test_containment_fails_closed_without_nofollow(tmp_path, monkeypatch) -> None:
+    import wreath._fsguard as guard
+
+    (tmp_path / "asset.txt").write_text("safe")
+    root_fd = guard.open_root(tmp_path)
+    monkeypatch.setattr(guard, "_O_NOFOLLOW", 0)
+    try:
+        with pytest.raises(guard.ContainmentError, match="O_NOFOLLOW"):
+            guard.open_beneath(root_fd, "asset.txt")
+    finally:
+        os.close(root_fd)
+
+
+def test_root_open_fails_closed_without_nofollow(tmp_path, monkeypatch) -> None:
+    import wreath._fsguard as guard
+
+    monkeypatch.setattr(guard, "_O_NOFOLLOW", 0)
+    with pytest.raises(guard.ContainmentError, match="O_NOFOLLOW"):
+        guard.open_root(tmp_path)
 
 
 # `Wreath.static()` builds the instance itself and stores it only as an opaque
@@ -176,6 +303,17 @@ async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_directory_without_an_index_is_not_redirected(tmp_path) -> None:
+    (tmp_path / "empty").mkdir()
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        response = await client.get("/assets/empty")
+
+    assert response.status == 404
+
+
+@pytest.mark.asyncio
 async def test_a_directory_redirect_preserves_encoded_path_delimiters(tmp_path) -> None:
     from wreath.request import Request
 
@@ -193,6 +331,62 @@ async def test_a_directory_redirect_preserves_encoded_path_delimiters(tmp_path) 
             "raw_path": b"/assets/docs%3Fdraft",
             "headers": [],
         },
+        receive,
+        {"path": "docs?draft"},
+    )
+    files = StaticFiles(tmp_path)
+    try:
+        response = await files(request)
+    finally:
+        files.close()
+
+    assert response.status == 308
+    assert dict(response.headers)[b"location"] == b"/assets/docs%3Fdraft/"
+
+
+@pytest.mark.asyncio
+async def test_a_directory_redirect_percent_encodes_non_ascii_raw_path_bytes(tmp_path) -> None:
+    from wreath.request import Request
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.html").write_bytes(b"index")
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/assets/docs",
+            "raw_path": b"/assets/docs\xff",
+            "headers": [],
+        },
+        receive,
+        {"path": "docs"},
+    )
+    files = StaticFiles(tmp_path)
+    try:
+        response = await files(request)
+    finally:
+        files.close()
+
+    assert response.status == 308
+    assert dict(response.headers)[b"location"] == b"/assets/docs%FF/"
+
+
+@pytest.mark.asyncio
+async def test_a_directory_redirect_encodes_delimiters_without_raw_path(tmp_path) -> None:
+    from wreath.request import Request
+
+    (tmp_path / "docs?draft").mkdir()
+    (tmp_path / "docs?draft" / "index.html").write_bytes(b"draft")
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/assets/docs?draft", "headers": []},
         receive,
         {"path": "docs?draft"},
     )
@@ -248,7 +442,9 @@ async def test_cache_control_is_sent_when_configured_and_absent_when_not(
     async with TestClient(app) as client:
         response = await client.get("/assets/a.txt")
         assert response.status == 200
-        assert b"max-age=60" in response.header("cache-control").encode()
+        header = response.header("cache-control")
+        assert header is not None
+        assert b"max-age=60" in header.encode()
 
     bare = _static_app(tmp_path, cache_control=None)
     async with TestClient(bare) as client:
@@ -276,6 +472,28 @@ async def test_a_matching_etag_is_answered_304_with_no_body(tmp_path) -> None:
         # A stale validator still gets the body, so this is not "304 always".
         stale = await client.get("/assets/a.txt", headers={"if-none-match": '"nope"'})
         assert stale.status == 200 and stale.body == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_etag_changes_when_same_size_content_reuses_the_mtime(tmp_path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"old")
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        first = await client.get("/assets/a.txt")
+        etag = first.header("etag")
+        assert etag is not None
+        mtime_ns = path.stat().st_mtime_ns
+
+        path.write_bytes(b"new")
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+
+        changed = await client.get("/assets/a.txt", headers={"if-none-match": etag})
+
+    assert changed.status == 200
+    assert changed.body == b"new"
+    assert changed.header("etag") != etag
 
 
 @pytest.mark.asyncio

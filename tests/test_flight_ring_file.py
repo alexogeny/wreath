@@ -5,6 +5,7 @@ import signal
 import struct
 import subprocess
 import sys
+from typing import Any, cast
 
 import pytest
 
@@ -383,6 +384,12 @@ def test_a_file_that_is_not_a_ring_file_is_refused(tmp_path) -> None:
     path.write_bytes(b"\x00" * (RING_FILE_HEADER_BYTES + CELL_SIZE))
     with pytest.raises(Exception, match="not a wreath ring file"):
         read_ring_file(path)
+
+
+def test_ring_file_geometry_refuses_invalid_record_counts() -> None:
+    for count in (-1, 0, 3, True):
+        with pytest.raises((TypeError, ValueError), match="positive power of two"):
+            ring_file_bytes(cast(Any, count))
 
 
 def test_a_truncated_file_is_refused_rather_than_half_read(ring_path) -> None:

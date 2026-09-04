@@ -118,6 +118,21 @@ def test_a_store_ttl_must_be_finite_at_declaration(ttl: float) -> None:
         _declaration(ttl=ttl)
 
 
+def test_a_store_ttl_refuses_a_boolean() -> None:
+    with pytest.raises(ValueError, match="number of seconds"):
+        _declaration(ttl=True)
+
+
+def test_a_store_snapshots_its_column_declaration() -> None:
+    columns: Any = [Column("body", "text")]
+    declaration = Keyed(table="things", columns=columns)
+
+    columns[0] = Column("injected", "text); DROP TABLE users; --")
+
+    assert declaration.columns == (Column("body", "text"),)
+    assert "DROP TABLE" not in declaration.schema_sql()
+
+
 async def test_the_store_touches_no_database_until_a_statement_runs() -> None:
     store = PostgresStore(object(), _declaration(ttl=60.0, claim=True))
     assert store.table == "things"
@@ -233,6 +248,13 @@ async def test_purge_can_instead_drop_rows_untouched_for_a_while() -> None:
     assert database.statements["wreath_thing_purge_idle_things"].calls == [(3600.0,)]
 
 
+@pytest.mark.parametrize("idle_seconds", [0.0, -1.0, float("nan"), float("inf"), True])
+async def test_purge_idle_window_must_be_a_finite_positive_number(idle_seconds: Any) -> None:
+    store = PostgresStore(_FakeDatabase(), _declaration(stamp="updated", deadline=False))
+    with pytest.raises(ValueError, match="idle_seconds must be a finite positive number"):
+        await store.purge(idle_seconds)
+
+
 async def test_a_last_touched_stamp_has_no_deadline_to_purge_by() -> None:
     store = PostgresStore(_FakeDatabase(), _declaration(stamp="updated", deadline=False))
     with pytest.raises(ValueError, match="idle_seconds"):
@@ -319,6 +341,12 @@ def test_a_memory_store_without_a_ttl_expires_nothing() -> None:
     store.set("k", "payload")
     clock[0] += 1_000_000.0
     assert store.read("k") == "payload"
+
+
+@pytest.mark.parametrize("ttl", [True, float("inf")])
+def test_a_memory_store_ttl_must_be_a_finite_number(ttl: Any) -> None:
+    with pytest.raises(ValueError, match="ttl must be a finite positive number"):
+        MemoryStore(ttl=ttl)
 
 
 def test_a_memory_claim_expires_on_the_ttl() -> None:

@@ -58,9 +58,25 @@ def _record_ai_refusal(target: Any) -> None:
 
 
 def _strings(values: tuple[str, ...], *, field: str) -> frozenset[str]:
-    if any(not isinstance(value, str) or not value for value in values):
-        raise ValueError(f"traffic class {field} values must be non-empty strings")
+    if any(
+        not isinstance(value, str)
+        or not value
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        for value in values
+    ):
+        raise ValueError(
+            f"traffic class {field} values must be non-empty strings without control characters"
+        )
     return frozenset(values)
+
+
+def _is_printable_ascii(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value.isascii()
+        and all(0x20 <= ord(character) < 0x7F for character in value)
+    )
 
 
 def _membership[T](values: tuple[T, ...]) -> tuple[T, ...] | frozenset[T]:
@@ -198,8 +214,23 @@ class TrafficClass:
     deny: bool = False
 
     def __post_init__(self) -> None:
-        if not self.name or not self.name.isascii():
-            raise ValueError("traffic class name must be non-empty ASCII")
+        if not _is_printable_ascii(self.name):
+            raise ValueError("traffic class name must be non-empty printable ASCII")
+        for field in (
+            "countries",
+            "browsers",
+            "ip_versions",
+            "address_sources",
+            "agent_identities",
+        ):
+            if type(getattr(self, field)) is not tuple:
+                raise TypeError(f"traffic class {field} must be a tuple")
+        for field in ("claimed_agent", "verified_agent", "mobile"):
+            value = getattr(self, field)
+            if value is not None and type(value) is not bool:
+                raise TypeError(f"traffic class {field} must be bool or None")
+        if type(self.deny) is not bool:
+            raise TypeError("traffic class deny must be a bool")
         countries = _strings(self.countries, field="countries")
         invalid_country = next(
             (
@@ -217,8 +248,11 @@ class TrafficClass:
                 f"traffic class country {invalid_country!r} must be an uppercase "
                 "two-letter ISO code"
             )
-        if any(version not in (4, 6) for version in self.ip_versions):
-            raise ValueError("traffic class ip_versions may contain only 4 and 6")
+        if any(
+            type(version) is not int or version not in (4, 6)
+            for version in self.ip_versions
+        ):
+            raise ValueError("traffic class ip_versions may contain only 4 and 6 as integers")
         invalid_source = next(
             (source for source in self.address_sources if source not in {"socket", "forwarded"}),
             None,
@@ -352,13 +386,20 @@ class TrafficPolicy:
     ) -> None:
         if not isinstance(provider, ClientFactsProvider):
             raise TypeError("traffic policy provider must be a ClientFactsProvider")
+        if type(classes) is not tuple:
+            raise TypeError("traffic policy classes must be a tuple of TrafficClass declarations")
         if not classes:
             raise ValueError(
                 "traffic policy needs at least one TrafficClass; omit the policy "
                 "when every request uses the default"
             )
-        if not default or not default.isascii():
-            raise ValueError("traffic policy default class must be non-empty ASCII")
+        for index, declaration in enumerate(classes):
+            if not isinstance(declaration, TrafficClass):
+                raise TypeError(
+                    f"traffic policy classes[{index}] must be a TrafficClass declaration"
+                )
+        if not _is_printable_ascii(default):
+            raise ValueError("traffic policy default class must be non-empty printable ASCII")
         names = [declaration.name for declaration in classes]
         duplicate = _core.first_duplicate(names)
         if duplicate is not None:

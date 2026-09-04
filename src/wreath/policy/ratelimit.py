@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping
 from time import monotonic
 from typing import Any, Protocol
 
-from .._auth.models import qualified_identity_value
+from .._auth.models import qualified_identity_key
 from .._native import _core
 from ..request import Request
 from ..response import ProblemResponse
@@ -97,6 +97,8 @@ class MemoryRateLimitStore:
     __slots__ = ("_bucket", "_max_entries", "_policy")
 
     def __init__(self, *, max_entries: int = 10000) -> None:
+        if type(max_entries) is not int or max_entries <= 0:
+            raise ValueError("max_entries must be a positive integer")
         self._max_entries = max_entries
         self._bucket: Any = None
         self._policy: tuple[float, float] | None = None
@@ -336,9 +338,11 @@ def principal_key(request: Request) -> str | None:
     into one bucket and lets one caller earn a fresh allowance per device. For
     an authenticated API the principal is the honest key.
 
-    An authenticated caller is keyed on `type:id` from `request.identity` — the
-    same identity the Cedar policies authorize with, so there is one answer to
-    "who is this" rather than two that can disagree.
+    An authenticated caller is keyed on a length-framed type, namespace, and id
+    from `request.identity` — the same identity the Cedar policies authorize
+    with, so delimiters inside one component cannot collide with another
+    principal and there is one answer to "who is this" rather than two that can
+    disagree.
 
     Anonymous callers fall back to their address, because a single shared
     "anonymous" bucket is a denial of service you inflict on yourself. The
@@ -357,10 +361,11 @@ def principal_key(request: Request) -> str | None:
     """
     identity = request.identity
     if identity is not None:
-        identity_id = qualified_identity_value(
-            str(getattr(identity, "namespace", "")), str(identity.id)
+        return qualified_identity_key(
+            str(identity.type),
+            str(getattr(identity, "namespace", "")),
+            str(identity.id),
         )
-        return f"{identity.type}:{identity_id}"
     client = request.client
     return f"ip:{client[0]}" if client else None
 
@@ -448,15 +453,23 @@ class RateLimitPolicy:
         quota: Any = None,
         _route_scoped: bool = False,
     ) -> None:
-        if not math.isfinite(limit) or limit <= 0:
-            raise ValueError("limit must be positive and finite")
-        if not math.isfinite(window) or window <= 0.0:
-            raise ValueError("window must be positive and finite")
-        if not math.isfinite(cost) or cost <= 0.0:
-            raise ValueError("cost must be positive and finite")
-        capacity = float(limit if burst is None else burst)
-        if not math.isfinite(capacity):
-            raise ValueError("burst must be positive and finite")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be positive and finite; use an integer")
+        try:
+            numeric_limit = float(limit)
+        except OverflowError:
+            raise ValueError("limit must be positive and finite; use an integer") from None
+        if type(window) not in (int, float) or not math.isfinite(window) or window <= 0.0:
+            raise ValueError("window must be a positive finite number")
+        if type(cost) not in (int, float) or not math.isfinite(cost) or cost <= 0.0:
+            raise ValueError("cost must be a positive finite number")
+        selected_burst = limit if burst is None else burst
+        if type(selected_burst) is not int or selected_burst <= 0:
+            raise ValueError("burst must be positive and finite; use an integer")
+        try:
+            capacity = float(selected_burst)
+        except OverflowError:
+            raise ValueError("burst must be positive and finite; use an integer") from None
         if capacity < cost:
             raise ValueError("burst must be at least the per-request cost")
         if key is principal_key and not _route_scoped:
@@ -480,7 +493,7 @@ class RateLimitPolicy:
                 "quotas"
             )
         selected = store if store is not None else MemoryRateLimitStore()
-        selected.configure(capacity, limit / window)
+        selected.configure(capacity, numeric_limit / window)
         # Attached to a *refusal* only. Advertising the policy on every response
         # meant a global `_egress` stage, and `wreath-request-trace` priced that at
         # +18 boundary crossings per request -- real work on every successful
@@ -615,7 +628,7 @@ class RateLimitPolicy:
         )
 
     def _identify(self, request: Request) -> str | None:
-        if self._exempt is not None and self._exempt(request):
+        if self._exempt is not None and self._exempt(request) is True:
             return None
         return self._key(request) or self.UNKEYED
 
@@ -641,7 +654,15 @@ class RateLimitPolicy:
             if self._try_acquire is not None
             else await self._store.acquire(key, self._cost, monotonic())
         )
-        return self._limited(retry_after) if retry_after > 0.0 else None
+        if retry_after == 0.0:
+            return None
+        if (
+            type(retry_after) not in (int, float)
+            or retry_after < 0.0
+            or not math.isfinite(retry_after)
+        ):
+            raise RuntimeError("rate-limit store must return a non-negative finite wait")
+        return self._limited(retry_after)
 
     # The rate limit is decided *before* the quota, deliberately. A throttled
     # request did no work, so charging its cost against a monthly allowance
@@ -656,7 +677,13 @@ class RateLimitPolicy:
         if key is None:
             return None
         retry_after = self._try_acquire(key, self._cost, monotonic())
-        if retry_after > 0.0:
+        if retry_after != 0.0:
+            if (
+                type(retry_after) not in (int, float)
+                or retry_after < 0.0
+                or not math.isfinite(retry_after)
+            ):
+                raise RuntimeError("rate-limit store must return a non-negative finite wait")
             return self._limited(retry_after)
         quota = self._quota
         return None if quota is None else quota.spend_sync(request)
@@ -673,7 +700,13 @@ class RateLimitPolicy:
         # whose saving is noise beside the work beside it is a survivor waiting
         # to happen, not an optimisation.
         retry_after = await self._store.acquire(key, self._cost, monotonic())
-        if retry_after > 0.0:
+        if retry_after != 0.0:
+            if (
+                type(retry_after) not in (int, float)
+                or retry_after < 0.0
+                or not math.isfinite(retry_after)
+            ):
+                raise RuntimeError("rate-limit store must return a non-negative finite wait")
             return self._limited(retry_after)
         quota = self._quota
         if quota is None:

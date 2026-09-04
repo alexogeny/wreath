@@ -448,6 +448,63 @@ async def test_tenant_policy_never_borrows_another_tenants_candidate() -> None:
         _ = [item async for item in route.stream(request("unknown"))]
 
 
+async def test_request_routing_metadata_is_snapshotted_at_construction() -> None:
+    acme = Backplane("acme", [[ModelResponseEvent.text_delta("acme")]])
+    beta = Backplane("beta", [[ModelResponseEvent.text_delta("beta")]])
+    route = router(
+        candidate("acme-model", acme),
+        candidate("beta-model", beta),
+        policies=(
+            policy("acme", "acme-model"),
+            policy("beta", "beta-model"),
+        ),
+    )
+    metadata = {"tenant": "acme"}
+    model_request = ModelRequest(
+        "profile-placeholder",
+        (ModelMessage("user", "hello"),),
+        metadata=metadata,
+    )
+
+    metadata["tenant"] = "beta"
+    events = [item.text async for item in route.stream(model_request)]
+
+    assert events == ["acme"]
+    assert beta.requests == []
+
+
+@pytest.mark.parametrize(
+    "required",
+    [["vision"], {"vision": True}],
+    ids=["list", "mapping"],
+)
+async def test_request_routing_fact_sequences_are_snapshotted_at_construction(
+    required: Any,
+) -> None:
+    chat = Backplane("chat", [[ModelResponseEvent.text_delta("chat")]])
+    vision = Backplane("vision", [[ModelResponseEvent.text_delta("vision")]])
+    route = router(
+        candidate("chat-model", chat, capabilities=frozenset({"chat"})),
+        candidate("vision-model", vision, capabilities=frozenset({"chat", "vision"})),
+    )
+    model_request = ModelRequest(
+        "profile-placeholder",
+        (ModelMessage("user", "hello"),),
+        metadata={"tenant": "acme", "required_capabilities": required},
+    )
+
+    required.clear()
+    events = [item.text async for item in route.stream(model_request)]
+
+    assert events == ["vision"]
+    assert chat.requests == []
+
+
+def test_model_request_refuses_non_mapping_metadata_at_construction() -> None:
+    with pytest.raises(TypeError, match="metadata must be a mapping"):
+        replace(request(), metadata=cast(Any, []))
+
+
 @pytest.mark.parametrize(
     ("metadata", "message"),
     [

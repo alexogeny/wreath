@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import struct
+from typing import Any, cast
 
 import pytest
 
@@ -157,6 +159,14 @@ def test_a_multi_string_txt_record_is_joined() -> None:
     assert parsed == ("v=DKIM1; k=rsa; p=AAAABBBBCCCC",)
 
 
+@pytest.mark.parametrize("record", [b"\xffa", _txt(b"first") + b"\x05no"])
+def test_a_txt_segment_cannot_exceed_its_rdata(record: bytes) -> None:
+    from wreath._dns import _parse
+
+    with pytest.raises(ValueError, match="truncated DNS TXT string"):
+        _parse(_response(7, record), 7)
+
+
 def test_an_nxdomain_is_an_empty_answer_not_an_error() -> None:
     from wreath._dns import _parse
 
@@ -184,6 +194,34 @@ def test_a_truncated_answer_is_refused_rather_than_half_parsed() -> None:
         _parse(_response(7, _txt(b"v=spf1"))[:-4], 7)
 
 
+@pytest.mark.parametrize(
+    ("flags", "questions"),
+    [(0x0180, 1), (0x8980, 1), (0x8180, 0), (0x8380, 1)],
+)
+def test_a_packet_that_is_not_a_complete_standard_response_is_refused(
+    flags: int, questions: int
+) -> None:
+    from wreath._dns import _parse
+
+    packet = struct.pack("!HHHHHH", 7, flags, questions, 0, 0, 0)
+    if questions:
+        packet += b"\x07example\x03com\x00" + struct.pack("!HH", 16, 1)
+    with pytest.raises(ValueError, match="standard response|question|truncated"):
+        _parse(packet, 7)
+
+
+@pytest.mark.parametrize(("query_type", "query_class"), [(1, 1), (16, 3)])
+def test_a_response_for_another_question_kind_is_refused(
+    query_type: int, query_class: int
+) -> None:
+    from wreath._dns import _parse
+
+    packet = struct.pack("!HHHHHH", 7, 0x8180, 1, 0, 0, 0)
+    packet += b"\x07example\x03com\x00" + struct.pack("!HH", query_type, query_class)
+    with pytest.raises(ValueError, match="IN TXT"):
+        _parse(packet, 7)
+
+
 def test_a_lookup_with_no_nameserver_reports_that_it_could_not_tell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,10 +231,98 @@ def test_a_lookup_with_no_nameserver_reports_that_it_could_not_tell(
     assert answer.error == "no nameserver configured (set WREATH_DNS_SERVER)"
 
 
+def test_resolver_discovery_cannot_multiply_the_timeout_without_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    attempts = 0
+
+    class FailingUdp:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise OSError("unreachable")
+
+    monkeypatch.setattr(socket, "socket", FailingUdp)
+    monkeypatch.setattr(
+        "wreath._dns._nameservers",
+        lambda: [f"192.0.2.{index}" for index in range(1, 20)],
+    )
+    answer = resolve_txt("example.com", timeout=0.01)
+    assert not answer.resolved
+    assert attempts == 3
+
+
 def test_an_over_long_name_is_refused_without_a_socket() -> None:
     answer = resolve_txt("a" * 300 + ".example.com", server="203.0.113.1")
     assert not answer.resolved
     assert "at most 255" in (answer.error or "")
+
+
+def test_a_name_whose_wire_encoding_exceeds_the_dns_limit_is_refused() -> None:
+    name = ".".join(["a" * 63] * 4)
+    answer = resolve_txt(name, server="203.0.113.1")
+    assert not answer.resolved
+    assert "at most 255 octets" in (answer.error or "")
+
+
+@pytest.mark.parametrize("name", [None, True, b"example.com", "exam\x00ple.com"])
+def test_a_malformed_query_name_is_reported_without_touching_a_socket(
+    monkeypatch: pytest.MonkeyPatch, name: object
+) -> None:
+    monkeypatch.setattr(
+        "socket.socket", lambda *_args, **_kwargs: pytest.fail("invalid query opened a socket")
+    )
+    answer = resolve_txt(cast(Any, name), server="203.0.113.1")
+    assert not answer.resolved
+    assert "name" in (answer.error or "")
+
+
+@pytest.mark.parametrize(
+    "timeout", [True, 0, -1, math.inf, math.nan, "3", 31, 10**100]
+)
+def test_an_invalid_timeout_is_reported_without_touching_a_socket(
+    monkeypatch: pytest.MonkeyPatch, timeout: object
+) -> None:
+    monkeypatch.setattr(
+        "socket.socket", lambda *_args, **_kwargs: pytest.fail("invalid timeout opened a socket")
+    )
+    answer = resolve_txt("example.com", timeout=cast(Any, timeout), server="203.0.113.1")
+    assert not answer.resolved
+    assert "timeout" in (answer.error or "")
+
+
+@pytest.mark.parametrize("server", [True, 7, "", "resolver.example.com"])
+def test_an_invalid_nameserver_is_reported_without_touching_a_socket(
+    monkeypatch: pytest.MonkeyPatch, server: object
+) -> None:
+    monkeypatch.setattr(
+        "socket.socket", lambda *_args, **_kwargs: pytest.fail("invalid server opened a socket")
+    )
+    answer = resolve_txt("example.com", server=cast(Any, server))
+    assert not answer.resolved
+    assert "nameserver" in (answer.error or "")
+
+
+def test_a_dns_answer_snapshots_mutable_record_input() -> None:
+    records = ["v=spf1 -all"]
+    answer = DnsAnswer("example.com", cast(Any, records))
+    records.append("attacker-controlled")
+    assert answer.records == ("v=spf1 -all",)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: DnsAnswer(cast(Any, b"example.com")),
+        lambda: DnsAnswer("example.com", cast(Any, (7,))),
+        lambda: DnsAnswer("example.com", error=cast(Any, False)),
+    ],
+)
+def test_a_dns_answer_refuses_malformed_public_state(build: Any) -> None:
+    with pytest.raises(TypeError, match="name|records|error"):
+        build()
 
 
 def test_a_truncated_udp_answer_is_retried_over_tcp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,7 +348,10 @@ def test_a_truncated_udp_answer_is_retried_over_tcp(monkeypatch: pytest.MonkeyPa
             # Header with TC set, and a deliberately useless body: a resolver
             # that returns this instead of re-asking has silently lost the key.
             header = struct.pack("!HHHHHH", self._id, 0x8380, 1, 0, 0, 0)
-            return header + b"\x07example\x03com\x00" + struct.pack("!HH", 16, 1), ("", 53)
+            return header + b"\x07example\x03com\x00" + struct.pack("!HH", 16, 1), (
+                "203.0.113.1",
+                53,
+            )
 
     def fake_tcp(packet: bytes, address: str, timeout: float) -> bytes:
         asked_over_tcp.append(packet)
@@ -255,13 +384,63 @@ def test_a_response_shorter_than_the_dns_header_is_reported(
         def settimeout(self, timeout: float) -> None: ...
         def sendto(self, packet: bytes, address: tuple[str, int]) -> None: ...
         def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
-            return b"", ("", 53)
+            return b"", ("203.0.113.1", 53)
 
     monkeypatch.setattr(socket, "socket", FakeUdp)
     answer = resolve_txt("example.com", server="203.0.113.1")
 
     assert not answer.resolved
     assert "203.0.113.1" in (answer.error or "")
+
+
+def test_a_udp_answer_from_another_endpoint_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    class FakeUdp:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        def __enter__(self) -> FakeUdp:
+            return self
+
+        def __exit__(self, *exc: object) -> None: ...
+        def settimeout(self, timeout: float) -> None: ...
+        def sendto(self, packet: bytes, address: tuple[str, int]) -> None:
+            self._id = struct.unpack("!H", packet[:2])[0]
+
+        def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+            return _response(self._id, _txt(b"v=spf1 +all")), ("198.51.100.20", 53)
+
+    monkeypatch.setattr(socket, "socket", FakeUdp)
+    answer = resolve_txt("example.com", server="203.0.113.1")
+    assert not answer.resolved
+    assert "unexpected endpoint" in (answer.error or "")
+
+
+def test_a_response_for_another_dns_name_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    class FakeUdp:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        def __enter__(self) -> FakeUdp:
+            return self
+
+        def __exit__(self, *exc: object) -> None: ...
+        def settimeout(self, timeout: float) -> None: ...
+        def sendto(self, packet: bytes, address: tuple[str, int]) -> None:
+            self._id = struct.unpack("!H", packet[:2])[0]
+
+        def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+            packet = _response(self._id, _txt(b"v=spf1 +all"))
+            packet = packet[:12] + b"\x04evil\x04test\x00" + packet[25:]
+            return packet, ("203.0.113.1", 53)
+
+    monkeypatch.setattr(socket, "socket", FakeUdp)
+    answer = resolve_txt("example.com", server="203.0.113.1")
+    assert not answer.resolved
+    assert "question name" in (answer.error or "")
 
 
 def test_an_untruncated_answer_is_not_re_asked_over_tcp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,11 +462,12 @@ def test_an_untruncated_answer_is_not_re_asked_over_tcp(monkeypatch: pytest.Monk
             self._id = struct.unpack("!H", packet[:2])[0]
 
         def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
-            return _response(self._id, _txt(b"v=spf1 -all")), ("", 53)
+            return _response(self._id, _txt(b"v=spf1 -all")), ("203.0.113.1", 53)
 
     monkeypatch.setattr(socket, "socket", FakeUdp)
     monkeypatch.setattr(_dns, "_over_tcp", lambda p, a, t: tcp_calls.append(p) or b"")
     answer = _dns.resolve_txt("example.com", server="203.0.113.1")
 
     assert tcp_calls == []
+    assert answer.name == "example.com"
     assert answer.records == ("v=spf1 -all",)

@@ -76,7 +76,13 @@ def _default_entities(request: Request) -> object:
     return (CedarEntity(uid, attrs=identity.attributes, parents=parents),)
 
 
-def _with_entities(entities: object, additions: object) -> object:
+def _with_entities(
+    entities: object,
+    additions: object,
+    *,
+    protected: EntityUid | None = None,
+    protected_action: EntityUid | None = None,
+) -> object:
     """Add resolved Cedar entities, with the newest definition winning by uid."""
     if additions is None:
         return entities
@@ -91,6 +97,14 @@ def _with_entities(entities: object, additions: object) -> object:
     for item in additions:
         if not isinstance(item, CedarEntity):
             raise TypeError("resource_entities must contain only CedarEntity instances")
+        if protected is not None and item.uid == protected:
+            raise ValueError(
+                f"resource entities cannot redefine authenticated principal {protected}"
+            )
+        if protected_action is not None and item.uid == protected_action:
+            raise ValueError(
+                f"resource entities cannot redefine authorized action {protected_action}"
+            )
         checked.append(item)
     if entities is None:
         return tuple(checked)
@@ -402,7 +416,7 @@ def _resolve_quota(
     identity = request.identity
     if identity is None:
         return EMPTY
-    return provider.for_identity(identity)
+    return frozenset(provider.for_identity(identity))
 
 
 def _default_context(request: Request) -> Mapping[str, object]:
@@ -678,12 +692,13 @@ class CedarAuthorizer:
         # calls, and because the two vocabularies are read in tests.
         self._flag_names = self._facts[0].vocabulary
         self._region_names = self._facts[1].vocabulary
-        # Whether any policy can tell a delegated request from a direct one. If
-        # none can, the second evaluation below is provably identical to the
-        # first and is skipped; a request with no delegation never makes it.
+        # Whether any policy can tell a delegated request from a direct one. An
+        # engine may prove that it reads none of the delegation fields; an
+        # opaque engine cannot make that proof and therefore takes both passes.
+        # A request with no delegation never reaches the second pass.
         reads = getattr(engine, "reads_context", None)
-        self._delegation_visible = bool(
-            callable(reads) and (reads("delegated") or reads("actor") or reads("delegation_depth"))
+        self._delegation_visible = not callable(reads) or bool(
+            reads("delegated") or reads("actor") or reads("delegation_depth")
         )
         self._reads_now = None if not callable(reads) else bool(reads("now"))
         _validate_org_roles(self._facts[3].vocabulary, organizations)
@@ -908,10 +923,22 @@ class CedarAuthorizer:
             resource_entity = raw_resource if isinstance(raw_resource, CedarEntity) else None
             resource_ref = resource_entity.uid if resource_entity is not None else raw_resource
             resource = await _resolve(self._resource(resource_ref, request))
-            entities = _with_entities(base_entities, resource_entity)
+            protected = principal if isinstance(principal, EntityUid) else None
+            protected_action = action if isinstance(action, EntityUid) else None
+            entities = _with_entities(
+                base_entities,
+                resource_entity,
+                protected=protected,
+                protected_action=protected_action,
+            )
             if self._resource_entities is not None:
                 additions = await _resolve(self._resource_entities(resource, request))
-                entities = _with_entities(entities, additions)
+                entities = _with_entities(
+                    entities,
+                    additions,
+                    protected=protected,
+                    protected_action=protected_action,
+                )
             decision = await self._evaluate(principal, action, resource, context, entities)
             decisions.append(decision)
             if stop_on_denied and not decision.allowed:
@@ -988,10 +1015,22 @@ class CedarAuthorizer:
         principal, action, entities, context = await self._query_base(
             request, identity, requirement.action
         )
-        entities = _with_entities(entities, resource_entity)
+        protected = principal if isinstance(principal, EntityUid) else None
+        protected_action = action if isinstance(action, EntityUid) else None
+        entities = _with_entities(
+            entities,
+            resource_entity,
+            protected=protected,
+            protected_action=protected_action,
+        )
         if self._resource_entities is not None:
             additions = await _resolve(self._resource_entities(resource, request))
-            entities = _with_entities(entities, additions)
+            entities = _with_entities(
+                entities,
+                additions,
+                protected=protected,
+                protected_action=protected_action,
+            )
         # Pass one: the delegating principal's own authority, evaluated exactly
         # as if they had made this request themselves.
         decision = await self._evaluate(principal, action, resource, context, entities)

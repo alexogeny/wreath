@@ -131,6 +131,8 @@ def second_factor(*, max_age: float = 300.0) -> Callable[[Any], Any]:
             less can never be satisfied, while a non-finite window cannot
             express recency.
     """
+    if isinstance(max_age, bool) or not isinstance(max_age, int | float):
+        raise TypeError("second-factor max_age must be a positive finite number")
     if not isfinite(max_age) or max_age <= 0:
         raise ValueError("second-factor max_age must be a positive finite number")
 
@@ -207,8 +209,8 @@ def authorize(
         ValueError: `action` is empty.
     """
     value = action.value if isinstance(action, StrEnum) else action
-    if not value:
-        raise ValueError("authorization action is required")
+    if not isinstance(value, str) or not value:
+        raise ValueError("authorization action is required and must be a non-empty string")
 
     def decorate(endpoint: Any) -> Any:
         return add_policy(endpoint, value, resource)
@@ -274,6 +276,8 @@ def permissions(*values: str, mode: Mode = "all") -> Callable[[Any], Any]:
 def _set(values: tuple[str, ...], mode: Mode, kind: str) -> frozenset[str]:
     if mode not in ("all", "any"):
         raise ValueError(f"{kind} mode must be 'all' or 'any'")
+    if any(not isinstance(value, str) for value in values):
+        raise TypeError(f"{kind} values must be non-empty strings")
     normalized = frozenset(value for value in values if value)
     if not normalized:
         raise ValueError(f"at least one {kind} is required")

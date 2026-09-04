@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 from _pgfidelity import check_for
 
 from wreath._compression import _RenderedFragments
 from wreath.policy import IdempotencyPolicy
+from wreath.policy.idempotency import _request_authority
 from wreath.request import Request
 from wreath.response import Response
 
@@ -14,6 +17,12 @@ pytestmark = pytest.mark.asyncio
 def test_idempotency_refuses_a_negative_response_body_ceiling() -> None:
     with pytest.raises(ValueError, match="max_body_bytes must be non-negative"):
         IdempotencyPolicy(max_body_bytes=-1)
+
+
+@pytest.mark.parametrize("max_body_bytes", [True, 1.5, float("nan"), float("inf")])
+def test_idempotency_response_body_ceiling_requires_an_integer(max_body_bytes: Any) -> None:
+    with pytest.raises(ValueError, match="max_body_bytes must be an integer"):
+        IdempotencyPolicy(max_body_bytes=max_body_bytes)
 
 
 async def _receive() -> dict:
@@ -42,6 +51,9 @@ def _request(
     key: str | None = "k1",
     principal: str | None = "alice",
     principal_type: str = "User",
+    scheme: str = "http",
+    authority: str | None = "x",
+    server: tuple[str, int | None] = ("x", 80),
 ) -> Request:
     """A request, authenticated as ``principal`` unless it is ``None``.
 
@@ -51,16 +63,18 @@ def _request(
     """
     from wreath._auth.models import Identity
 
-    headers = [(b"host", b"x")]
+    headers = [] if authority is None else [(b"host", authority.encode())]
     if key is not None:
         headers.append((b"idempotency-key", key.encode()))
     scope = {
         "type": "http",
         "method": method,
+        "scheme": scheme,
         "path": path,
         "raw_path": path.encode(),
         "query_string": b"",
         "headers": headers,
+        "server": server,
     }
     request = Request(scope, _receive)
     if principal is not None:
@@ -89,6 +103,112 @@ async def test_idempotency_scope_distinguishes_raw_targets_a_proxy_forwards_diff
     encoded.scope["raw_path"] = b"/files/%72eport"
 
     assert policy._key(canonical) != policy._key(encoded)
+
+
+async def test_idempotency_scope_distinguishes_request_schemes() -> None:
+    policy = IdempotencyPolicy()
+
+    assert policy._key(_request(scheme="http")) != policy._key(_request(scheme="https"))
+
+
+async def test_idempotency_scope_distinguishes_request_authorities() -> None:
+    policy = IdempotencyPolicy()
+
+    assert policy._key(_request(authority="api.example")) != policy._key(
+        _request(authority="admin.example")
+    )
+
+
+async def test_idempotency_scope_uses_server_when_host_is_absent() -> None:
+    policy = IdempotencyPolicy()
+
+    assert policy._key(_request(authority=None, server=("api.example", 443))) != policy._key(
+        _request(authority=None, server=("admin.example", 443))
+    )
+    assert policy._key(_request(authority=None, server=("api.example", 443))) != policy._key(
+        _request(authority=None, server=("api.example", 8443))
+    )
+
+
+def test_authority_supports_header_only_request_doubles() -> None:
+    class HeaderOnly:
+        _scope = {"server": ("fallback.example", 443)}
+
+        def header(self, _name: str) -> str:
+            return "header.example"
+
+    assert _request_authority(cast(Any, HeaderOnly())) == "header.example"
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        (None, ""),
+        ({"server": ("fallback.example", None)}, "fallback.example"),
+    ],
+)
+def test_header_only_request_doubles_fall_back_to_their_private_scope(
+    scope: object, expected: str
+) -> None:
+    class HeaderFallback:
+        _scope = scope
+
+        @staticmethod
+        def header(_name: str) -> None:
+            return None
+
+    assert _request_authority(cast(Any, HeaderFallback())) == expected
+
+
+@pytest.mark.parametrize(
+    ("server", "expected"),
+    [
+        (None, ""),
+        (("host.example", None), "host.example"),
+        (("host.example", 8443), "host.example:8443"),
+    ],
+)
+def test_authority_falls_back_to_the_available_scope_server(server: object, expected: str) -> None:
+    class ScopeOnly:
+        scope = {"server": server}
+
+        @staticmethod
+        def _single_header(_name: bytes) -> None:
+            return None
+
+    assert _request_authority(cast(Any, ScopeOnly())) == expected
+
+
+def test_authority_prefers_the_private_scope_used_by_request_parsing() -> None:
+    class SplitScope:
+        _scope = {"server": ("parsed.example", 443)}
+        scope = {"server": ("other.example", 80)}
+
+        @staticmethod
+        def _single_header(_name: bytes) -> None:
+            return None
+
+    assert _request_authority(cast(Any, SplitScope())) == "parsed.example:443"
+
+
+async def test_a_missing_idempotency_header_does_not_build_a_store_key() -> None:
+    class ProbePolicy(IdempotencyPolicy):
+        def _key(self, *args: Any, **kwargs: Any) -> str | None:
+            raise AssertionError("a missing header has no key to build")
+
+    assert await ProbePolicy().action(_request(key=None)) is None
+
+
+async def test_duplicate_host_is_refused_before_idempotency_reservation() -> None:
+    policy = IdempotencyPolicy()
+    request = _request()
+    request.headers.append((b"host", b"other.example"))
+
+    response = await policy.action(request)
+
+    assert response is not None
+    assert response.status == 400
+    assert b"Host" in response.body
 
 
 async def test_fragment_response_replay_keeps_the_complete_body() -> None:
@@ -351,7 +471,7 @@ async def test_the_memory_store_treats_a_lost_claim_as_full() -> None:
             return None
 
     store = MemoryIdempotencyStore()
-    store._store = LostClaim()
+    store._store = cast(Any, LostClaim())
     assert await store.reserve("lost") == ("full", None)
 
 

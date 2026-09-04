@@ -308,6 +308,28 @@ async def test_an_organization_id_that_would_break_the_entity_reference_is_refus
         )
 
 
+@pytest.mark.parametrize(
+    ("organization", "fragment"),
+    [
+        ("acme:admin", "must not contain ':'"),
+        ("acme\nadmin", "must not contain controls"),
+        ("acme\x85admin", "must not contain controls"),
+    ],
+)
+def test_an_organization_id_must_be_safe_for_data_and_policy_namespaces(
+    organization: str,
+    fragment: str,
+) -> None:
+    fixture = directory()
+    with pytest.raises(ValueError, match=fragment):
+        scim_router(
+            fixture.app,
+            users=fixture.users,
+            organizations=fixture.organizations,
+            organization=organization,
+        )
+
+
 @pytest.mark.asyncio
 async def test_provisioning_a_user_makes_cedar_permit_them() -> None:
     fixture = directory()
@@ -449,6 +471,24 @@ async def test_an_account_that_already_exists_is_adopted_rather_than_duplicated(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{"password": "replacement"}, {"active": False}])
+async def test_adoption_cannot_change_a_standalone_accounts_security_state(
+    extra: dict[str, object],
+) -> None:
+    fixture = directory()
+    existing = await fixture.users.create("alice@example.com", "existing-password-hash")
+    async with fixture.client() as client:
+        response = await provision(client, "alice@example.com", **extra)
+    assert response.status == 400
+    assert response.json()["scimType"] == "mutability"
+    stored = await fixture.users.get_by_id(existing.id)
+    assert stored is not None
+    assert stored.hashed_password == "existing-password-hash"
+    assert stored.is_active is True
+    assert await fixture.organizations.members("acme") == ()
+
+
+@pytest.mark.asyncio
 async def test_an_address_a_renamed_account_no_longer_carries_is_free() -> None:
     fixture = directory()
     async with fixture.client() as client:
@@ -518,6 +558,31 @@ async def test_a_password_sent_on_creation_is_hashed_and_usable() -> None:
     assert record.hashed_password.startswith("scrypt$")
     assert verify_password("correct horse", record.hashed_password)
     assert fixture.revoked_session_users == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_a_password_over_the_hashing_ceiling_is_a_scim_refusal() -> None:
+    fixture = directory()
+    async with fixture.client() as client:
+        response = await provision(client, "alice@example.com", password="x" * 1025)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidValue"
+    assert "at most 1024 UTF-8 bytes" in response.json()["detail"]
+    assert await fixture.organizations.members("acme") == ()
+
+
+@pytest.mark.asyncio
+async def test_an_unpaired_surrogate_password_is_a_scim_refusal() -> None:
+    fixture = directory()
+    async with fixture.client() as client:
+        response = await client.post(
+            "/scim/v2/Users",
+            content=b'{"userName":"alice@example.com","password":"\\ud800"}',
+            headers=AUTH,
+        )
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidValue"
+    assert "valid Unicode" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -687,6 +752,77 @@ async def test_cursor_is_bound_to_the_initial_count_and_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cursor_is_bound_to_its_resource_and_organization() -> None:
+    users = InMemoryUserStore()
+    organizations = InMemoryOrganizationStore(roles=ROLES)
+    app = Wreath()
+    policy = POLICY + """
+permit(principal == User::"directory", action == Action::"scim_read",
+       resource == Organization::"globex");
+permit(principal == User::"directory", action == Action::"scim_write",
+       resource == Organization::"globex");
+"""
+    app.configure_auth(
+        BearerTokenBackend(lambda token: Identity("directory")),
+        CedarAuthorizer(
+            engine=CedarPolicies(policy),
+            organizations=Memberships(organizations),
+        ),
+    )
+    app.include_router(
+        scim_router(
+            app,
+            users=users,
+            organizations=organizations,
+            organization=lambda request: request.path_params["tenant"],
+            prefix="/scim/v2/{tenant}",
+            cursor_secret=b"shared-cursor-secret-that-is-long-enough",
+        )
+    )
+    async with TestClient(app) as client:
+        for index in range(2):
+            await client.post(
+                "/scim/v2/acme/Users",
+                json={"userName": f"user{index}@example.com"},
+                headers=AUTH,
+            )
+        first = (
+            await client.get("/scim/v2/acme/Users?cursor&count=1", headers=AUTH)
+        ).json()
+        cursor = first["nextCursor"]
+        wrong_resource = await client.get(
+            f"/scim/v2/acme/Groups?cursor={cursor}&count=1", headers=AUTH
+        )
+        wrong_org = await client.get(
+            f"/scim/v2/globex/Users?cursor={cursor}&count=1", headers=AUTH
+        )
+    assert wrong_resource.status == 400
+    assert wrong_resource.json()["scimType"] == "invalidCursor"
+    assert wrong_org.status == 400
+    assert wrong_org.json()["scimType"] == "invalidCursor"
+
+
+@pytest.mark.asyncio
+async def test_cursor_signatures_are_compared_in_constant_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wreath._scim.router as router_module
+
+    compared: list[tuple[str, str]] = []
+    original = router_module.hmac.compare_digest
+
+    def observed(left: str, right: str) -> bool:
+        compared.append((left, right))
+        return original(left, right)
+
+    monkeypatch.setattr(router_module.hmac, "compare_digest", observed)
+    async with directory().client() as client:
+        response = await client.get("/scim/v2/Users?cursor=forged.value&count=2", headers=AUTH)
+    assert response.status == 400
+    assert compared and compared[-1][0] == "value"
+
+
+@pytest.mark.asyncio
 async def test_a_forged_cursor_is_refused() -> None:
     async with directory().client() as client:
         response = await client.get("/scim/v2/Users?cursor=forged.value&count=2", headers=AUTH)
@@ -796,6 +932,92 @@ async def test_a_count_that_is_not_a_number_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    ["count=1&count=2", "count=1&COUNT=2"],
+    ids=("same-case", "mixed-case"),
+)
+async def test_ambiguous_get_query_parameters_are_refused(query: str) -> None:
+    async with directory().client() as client:
+        response = await client.get(f"/scim/v2/Users?{query}", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidSyntax"
+    assert "more than once" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_query_field_count_is_bounded_before_materialization() -> None:
+    query = "&".join(f"extension{index}=x" for index in range(17))
+    async with directory().client() as client:
+        response = await client.get(f"/scim/v2/Users?{query}", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidSyntax"
+    assert "at most 16 fields" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_search_body_member_count_is_bounded_before_normalization() -> None:
+    body = {"schemas": [SEARCH_BODY], **{f"extension{index}": "x" for index in range(16)}}
+    async with directory().client() as client:
+        response = await client.post("/scim/v2/Users/.search", json=body, headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidSyntax"
+    assert "at most 16 members" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_query_bytes_are_bounded_before_decoding() -> None:
+    query = "extension=" + "x" * 8192
+    async with directory().client() as client:
+        response = await client.get(f"/scim/v2/Users?{query}", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidSyntax"
+    assert "at most 8192 bytes" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_and_search_refuse_ignored_or_incomplete_query_parameters() -> None:
+    async with directory().client() as client:
+        unknown = await client.get("/scim/v2/Users?filtre=userName%20pr", headers=AUTH)
+        projection = await client.get("/scim/v2/Users?attributes=userName", headers=AUTH)
+        get_order = await client.get("/scim/v2/Users?sortOrder=descending", headers=AUTH)
+        search_order = await client.post(
+            "/scim/v2/Users/.search",
+            json={"schemas": [SEARCH_BODY], "sortOrder": "descending"},
+            headers=AUTH,
+        )
+    assert unknown.status == 400
+    assert unknown.json()["scimType"] == "invalidSyntax"
+    assert projection.status == 400
+    assert projection.json()["scimType"] == "invalidValue"
+    assert get_order.status == 400
+    assert get_order.json()["scimType"] == "invalidValue"
+    assert search_order.status == 400
+    assert search_order.json()["scimType"] == "invalidValue"
+
+
+@pytest.mark.asyncio
+async def test_individual_resources_do_not_silently_ignore_query_parameters() -> None:
+    async with directory().client() as client:
+        await provision(client, "alice@example.com")
+        user_projection = await client.get(
+            "/scim/v2/Users/1?attributes=userName",
+            headers=AUTH,
+        )
+        user_filter = await client.get(
+            "/scim/v2/Users/1?filter=userName%20pr",
+            headers=AUTH,
+        )
+        group_projection = await client.get(
+            "/scim/v2/Groups/admin?excludedAttributes=members",
+            headers=AUTH,
+        )
+    for response in (user_projection, user_filter, group_projection):
+        assert response.status == 400
+        assert response.json()["scimType"] == "invalidValue"
+
+
+@pytest.mark.asyncio
 async def test_a_filter_selects_by_user_name() -> None:
     async with directory().client() as client:
         await provision(client, "alice@example.com")
@@ -806,6 +1028,21 @@ async def test_a_filter_selects_by_user_name() -> None:
     body = found.json()
     assert body["totalResults"] == 1
     assert body["Resources"][0]["userName"] == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_empty_filter_is_invalid_for_get_and_search() -> None:
+    async with directory().client() as client:
+        get_response = await client.get("/scim/v2/Users?filter=", headers=AUTH)
+        search_response = await client.post(
+            "/scim/v2/Users/.search",
+            json={"schemas": [SEARCH_BODY], "filter": ""},
+            headers=AUTH,
+        )
+    assert get_response.status == 400
+    assert get_response.json()["scimType"] == "invalidFilter"
+    assert search_response.status == 400
+    assert search_response.json()["scimType"] == "invalidFilter"
 
 
 @pytest.mark.asyncio
@@ -861,15 +1098,170 @@ async def test_a_filtered_list_refuses_an_organisation_over_the_scan_ceiling() -
         await provision(client, "alice@example.com")
         await provision(client, "bob@example.com")
         response = await client.get("/scim/v2/Users?filter=userName pr", headers=AUTH)
+        groups = await client.get("/scim/v2/Groups?filter=members pr", headers=AUTH)
+        unfiltered_groups = await client.get("/scim/v2/Groups", headers=AUTH)
+        one_group = await client.get("/scim/v2/Groups/admin", headers=AUTH)
+        group_write = await client.patch(
+            "/scim/v2/Groups/admin",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [
+                    {"op": "add", "path": "members", "value": [{"value": "1"}]}
+                ],
+            },
+            headers=AUTH,
+        )
         unfiltered = await client.get("/scim/v2/Users", headers=AUTH)
     assert response.status == 400
     assert response.json()["scimType"] == "tooMany"
-    # The ceiling bounds a *filter*, which is evaluated per member. An ordinary
-    # page reads only the members on the page, so it is not bounded by it -- and
-    # a list that started refusing at 1000 members would be a worse bug than the
-    # fan-out this ceiling exists to prevent.
+    assert groups.status == 400
+    assert groups.json()["scimType"] == "tooMany"
+    assert unfiltered_groups.status == 400
+    assert unfiltered_groups.json()["scimType"] == "tooMany"
+    assert one_group.status == 400
+    assert one_group.json()["scimType"] == "tooMany"
+    assert group_write.status == 400
+    assert group_write.json()["scimType"] == "tooMany"
+    # An ordinary user page reads only the users on that page and does not
+    # materialize nested role membership, so it remains available over the
+    # ceiling. Group resources and filtered users expand the whole candidate
+    # set and refuse instead.
     assert unfiltered.status == 200
     assert unfiltered.json()["totalResults"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_filtered_user_list_counts_nested_role_assignments() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=3)
+    async with fixture.client() as client:
+        await provision(client, "alice@example.com")
+        await provision(client, "bob@example.com")
+        await fixture.organizations.add_member("acme", "1", roles={"admin", "member"})
+        await fixture.organizations.add_member("acme", "2", roles={"billing", "member"})
+        response = await client.get("/scim/v2/Users?filter=userName%20pr", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
+    assert "4 role assignments" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_one_user_resource_refuses_an_oversized_role_set_before_writing() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=1)
+    async with fixture.client() as client:
+        await provision(client, "alice@example.com")
+        await fixture.organizations.add_member("acme", "1", roles={"admin", "member"})
+        listed = await client.get("/scim/v2/Users", headers=AUTH)
+        read = await client.get("/scim/v2/Users/1", headers=AUTH)
+        write = await client.patch(
+            "/scim/v2/Users/1",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [
+                    {"op": "replace", "path": "userName", "value": "changed@example.com"}
+                ],
+            },
+            headers=AUTH,
+        )
+    for response in (listed, read, write):
+        assert response.status == 400
+        assert response.json()["scimType"] == "tooMany"
+    record = await fixture.users.get_by_id("1")
+    assert record is not None
+    assert record.email == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_group_write_cannot_cross_the_role_assignment_ceiling() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=3)
+    async with fixture.client() as client:
+        await provision(client, "alice@example.com")
+        await provision(client, "bob@example.com")
+        await fixture.organizations.add_member("acme", "1", roles={"billing", "member"})
+        await fixture.organizations.add_member("acme", "2", roles={"billing"})
+        response = await client.patch(
+            "/scim/v2/Groups/admin",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [
+                    {"op": "add", "path": "members", "value": [{"value": "1"}]}
+                ],
+            },
+            headers=AUTH,
+        )
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
+    memberships = await fixture.organizations.members("acme")
+    assert memberships[0].roles == frozenset({"billing", "member"})
+
+
+@pytest.mark.asyncio
+async def test_a_group_write_bounds_duplicate_input_members_before_mutation() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=3)
+    async with fixture.client() as client:
+        await provision(client, "alice@example.com")
+        response = await client.patch(
+            "/scim/v2/Groups/admin",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [
+                    {
+                        "op": "replace",
+                        "path": "members",
+                        "value": [{"value": "1"}] * 4,
+                    }
+                ],
+            },
+            headers=AUTH,
+        )
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
+    memberships = await fixture.organizations.members("acme")
+    assert memberships[0].roles == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_group_budget_counts_members_independently() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=3)
+    for index in range(4):
+        record = await fixture.users.create(f"user{index}@example.com", "unused")
+        await fixture.organizations.add_member("acme", record.id)
+    async with fixture.client() as client:
+        response = await client.get("/scim/v2/Groups", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
+
+
+@pytest.mark.asyncio
+async def test_group_budget_counts_roles_independently() -> None:
+    fixture = directory()
+    organizations = InMemoryOrganizationStore(roles={"a", "b", "c", "d"})
+    fixture.app.include_router(
+        scim_router(
+            fixture.app,
+            users=fixture.users,
+            organizations=organizations,
+            organization="acme",
+            prefix="/scim/v3",
+            max_filter_scan=3,
+        )
+    )
+    async with fixture.client() as client:
+        response = await client.get("/scim/v3/Groups", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
+
+
+@pytest.mark.asyncio
+async def test_group_budget_counts_role_assignments_independently() -> None:
+    fixture = Provisioned(Identity("directory"), max_filter_scan=3)
+    first = await fixture.users.create("alice@example.com", "unused")
+    second = await fixture.users.create("bob@example.com", "unused")
+    await fixture.organizations.add_member("acme", first.id, roles=ROLES)
+    await fixture.organizations.add_member("acme", second.id, roles={"member"})
+    async with fixture.client() as client:
+        response = await client.get("/scim/v2/Groups", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "tooMany"
 
 
 @pytest.mark.asyncio
@@ -1006,6 +1398,33 @@ async def test_deactivating_a_user_disables_the_account() -> None:
     record = await fixture.users.get_by_id("1")
     assert record is not None
     assert record.is_active is False
+    assert fixture.revoked_session_users == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_reactivating_a_user_revokes_sessions_that_survived_deactivation() -> None:
+    fixture = directory()
+    async with fixture.client() as client:
+        await provision(client, "alice@example.com")
+        await client.patch(
+            "/scim/v2/Users/1",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [{"op": "replace", "path": "active", "value": False}],
+            },
+            headers=AUTH,
+        )
+        fixture.revoked_session_users.clear()
+        response = await client.patch(
+            "/scim/v2/Users/1",
+            json={
+                "schemas": [PATCH_BODY],
+                "Operations": [{"op": "replace", "path": "active", "value": True}],
+            },
+            headers=AUTH,
+        )
+    assert response.status == 200
+    assert response.json()["active"] is True
     assert fixture.revoked_session_users == ["1"]
 
 
@@ -1439,6 +1858,21 @@ async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
         ({"max_page_size": 0}, "1 <= page_size <= max_page_size"),
         ({"page_size": 50, "max_page_size": 10}, "1 <= page_size <= max_page_size"),
         ({"max_filter_scan": 0}, "positive max_filter_scan"),
+        ({"page_size": True}, "page_size must be an integer"),
+        ({"page_size": 1.5}, "page_size must be an integer"),
+        (
+            {"page_size": 1, "max_page_size": 2.5},
+            "max_page_size must be an integer",
+        ),
+        ({"max_filter_scan": True}, "max_filter_scan must be an integer"),
+        ({"cursor_timeout": True}, "cursor_timeout must be an integer"),
+        ({"cursor_timeout": 1.5}, "cursor_timeout must be an integer"),
+        (
+            {"cursor_secret": bytearray(b"x" * 32)},
+            "cursor_secret must be bytes, str, or None",
+        ),
+        ({"cursor_secret": 7}, "cursor_secret must be bytes, str, or None"),
+        ({"revoke_sessions": 7}, "revoke_sessions must be callable or None"),
     ],
     ids=(
         "empty-read-action",
@@ -1447,6 +1881,15 @@ async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
         "zero-maximum-page-size",
         "page-size-over-maximum",
         "zero-filter-scan",
+        "boolean-page-size",
+        "float-page-size",
+        "float-maximum-page-size",
+        "boolean-filter-scan",
+        "boolean-cursor-timeout",
+        "float-cursor-timeout",
+        "mutable-cursor-secret",
+        "invalid-cursor-secret-type",
+        "invalid-session-revoker",
     ),
 )
 async def test_an_incoherent_configuration_is_refused_where_it_is_written(
@@ -1460,6 +1903,17 @@ async def test_an_incoherent_configuration_is_refused_where_it_is_written(
             organizations=fixture.organizations,
             organization="acme",
             **options,
+        )
+
+
+def test_scim_router_refuses_a_non_callable_organization_resolver() -> None:
+    fixture = directory()
+    with pytest.raises(ValueError, match="organization must be a string or callable"):
+        scim_router(
+            fixture.app,
+            users=fixture.users,
+            organizations=fixture.organizations,
+            organization=cast("Any", 7),
         )
 
 
@@ -1517,6 +1971,39 @@ async def test_one_mount_can_serve_a_tenant_per_path_segment() -> None:
     assert permitted.status == 201
     assert permitted.json()["meta"]["location"].endswith("/scim/v2/acme/Users/1")
     assert refused.status == 403
+    assert await organizations.members("globex") == ()
+
+
+@pytest.mark.asyncio
+async def test_the_authorized_organization_and_written_organization_are_one_resolution() -> None:
+    users = InMemoryUserStore()
+    organizations = InMemoryOrganizationStore(roles=ROLES)
+    app = Wreath()
+    app.configure_auth(
+        BearerTokenBackend(lambda token: Identity("directory")),
+        CedarAuthorizer(
+            engine=CedarPolicies(POLICY),
+            organizations=Memberships(organizations),
+        ),
+    )
+    resolved = iter(("acme", "globex"))
+    app.include_router(
+        scim_router(
+            app,
+            users=users,
+            organizations=organizations,
+            organization=lambda request: next(resolved),
+            prefix="/scim/v3",
+        )
+    )
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/scim/v3/Users",
+            json={"userName": "alice@example.com"},
+            headers=AUTH,
+        )
+    assert response.status == 201
+    assert [member.user_id for member in await organizations.members("acme")] == ["1"]
     assert await organizations.members("globex") == ()
 
 

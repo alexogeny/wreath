@@ -164,6 +164,24 @@ def test_configuration_is_validated() -> None:
         RequestIdPolicy(max_length=0)
 
 
+@pytest.mark.parametrize("header", [7, "x request id", "x-request-id\r\nx-injected", "tést"])
+def test_header_name_must_be_an_ascii_http_token(header: Any) -> None:
+    with pytest.raises(ValueError, match="header must be an ASCII HTTP token"):
+        RequestIdPolicy(header=header)
+
+
+@pytest.mark.parametrize("max_length", [True, 1.5, float("nan"), float("inf")])
+def test_max_length_must_be_a_positive_integer(max_length: Any) -> None:
+    with pytest.raises(ValueError, match="max_length must be a positive integer"):
+        RequestIdPolicy(max_length=max_length)
+
+
+@pytest.mark.parametrize("option", ["trust_inbound", "echo"])
+def test_boolean_configuration_requires_an_exact_bool(option: str) -> None:
+    with pytest.raises(TypeError, match=rf"{option} must be bool"):
+        RequestIdPolicy(**{option: 1})
+
+
 @pytest.mark.skipif(
     _core is None or not hasattr(_core, "random_hex"),
     reason="native _core is not built",

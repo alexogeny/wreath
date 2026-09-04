@@ -56,6 +56,7 @@ __all__ = [
 
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
+_MAX_POLICY_SOURCE_CHARACTERS = 1_048_576
 
 # Expression opcodes; `wreath/_native/cedar.c` switches on these.
 _OP_CONST = 0
@@ -277,7 +278,17 @@ class EntityUid:
             except CedarParseError:
                 pass
         head, _, tail = text.rpartition("::")
-        if not head or not tail:
+        valid_type = all(part.isidentifier() for part in head.split("::"))
+        unmatched_leading_quote = tail.startswith('"') and '"' not in tail[1:]
+        invalid_id = (
+            not tail
+            or any(
+                character.isspace() or character == "\\" or ord(character) < 32
+                for character in tail
+            )
+            or ('"' in tail and not unmatched_leading_quote)
+        )
+        if not valid_type or invalid_id:
             raise CedarParseError(f'{text!r} is not an entity reference; expected Type::"id"')
         return cls(head, tail)
 
@@ -425,7 +436,15 @@ def _lex_string(source: str, index: int, line: int, column: int) -> tuple[str, i
                 closing = source.find("}", index + 2)
                 if closing < 0:
                     raise CedarParseError("unterminated \\u{...} escape", line, column)
-                parts.append(chr(int(source[index + 2 : closing], 16)))
+                digits = source[index + 2 : closing]
+                if not 1 <= len(digits) <= 6 or any(
+                    digit not in "0123456789abcdefABCDEF" for digit in digits
+                ):
+                    raise CedarParseError("invalid Unicode escape", line, column)
+                scalar = int(digits, 16)
+                if scalar > 0x10FFFF or 0xD800 <= scalar <= 0xDFFF:
+                    raise CedarParseError("invalid Unicode escape", line, column)
+                parts.append(chr(scalar))
                 index = closing + 1
                 continue
             decoded = _ESCAPES.get(escape)
@@ -850,6 +869,8 @@ def _layer_store(
     dangling: frozenset[_Uid],
     static: tuple[CedarEntity, ...],
     entities: tuple[CedarEntity, ...],
+    *,
+    protected: frozenset[_Uid] = frozenset(),
 ) -> _Store:
     """`base` with `entities` layered over it, replacing matching graph nodes.
 
@@ -865,6 +886,10 @@ def _layer_store(
     newly completed dangling parent needs no whole-hierarchy rebuild.
     """
     attrs, parents = _entity_maps(entities)
+    collisions = attrs.keys() & protected if protected else ()
+    if collisions:
+        names = ", ".join(f'{kind}::"{name}"' for kind, name in sorted(collisions))
+        raise ValueError(f"schema-declared action entities cannot be overridden: {names}")
     store = dict(base)
     for uid, values in attrs.items():
         store[uid] = (values, parents.get(uid, ()))
@@ -889,6 +914,7 @@ class CedarPolicies:
         "_policies",
         "_principal_by_action",
         "_principal_default",
+        "_protected",
         "_source",
         "_store",
         "_schema",
@@ -901,10 +927,22 @@ class CedarPolicies:
         entities: Iterable[CedarEntity] = (),
         schema: CedarSchema | str | None = None,
     ) -> None:
-        if not isinstance(source, str) or not source.strip():
+        if not isinstance(source, str):
+            raise CedarParseError("policy source must be non-empty Cedar text")
+        if len(source) > _MAX_POLICY_SOURCE_CHARACTERS:
+            raise CedarParseError(
+                "policy source exceeds the 1048576 character limit; split it into "
+                "smaller policy sets"
+            )
+        if not source.strip():
             raise CedarParseError("policy source must be non-empty Cedar text")
         self._source = source
-        self._policies = _Parser(_tokenize(source)).policies()
+        try:
+            self._policies = _Parser(_tokenize(source)).policies()
+        except RecursionError:
+            raise CedarParseError(
+                "policy expression nesting exceeds the parser limit; simplify the expression"
+            ) from None
         try:
             self._schema = CedarSchema(schema) if isinstance(schema, str) else schema
             schema_entities = self._validate_schema() if self._schema is not None else ()
@@ -941,6 +979,9 @@ class CedarPolicies:
                     "schema-declared action entities cannot be overridden: " + ", ".join(collisions)
                 )
         self._entities = (*declared_entities, *schema_entities)
+        self._protected = frozenset(
+            (entity.uid.type, entity.uid.id) for entity in schema_entities
+        )
         self._store = _build_store(self._entities)
         # Parent uids the static hierarchy names but does not define. Kept as a
         # compact inventory for the layering surface; direct-parent traversal
@@ -1136,7 +1177,13 @@ class CedarPolicies:
         """
         request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+            store = _layer_store(
+                self._store,
+                self._dangling,
+                self._entities,
+                request_entities,
+                protected=self._protected,
+            )
         else:
             store = self._store
         allowed, reason, diagnostics = _core.cedar_is_authorized(
@@ -1161,7 +1208,13 @@ class CedarPolicies:
         """Evaluate one route without materializing its successful decision."""
         request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+            store = _layer_store(
+                self._store,
+                self._dangling,
+                self._entities,
+                request_entities,
+                protected=self._protected,
+            )
         else:
             store = self._store
         return _core.cedar_route_denial(
@@ -1184,7 +1237,13 @@ class CedarPolicies:
     ) -> object:
         request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+            store = _layer_store(
+                self._store,
+                self._dangling,
+                self._entities,
+                request_entities,
+                protected=self._protected,
+            )
         else:
             store = self._store
         denial = _core.cedar_route_denial_prepared(
@@ -1219,7 +1278,13 @@ class CedarPolicies:
         """Evaluate several resources against one compiled request context."""
         request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+            store = _layer_store(
+                self._store,
+                self._dangling,
+                self._entities,
+                request_entities,
+                protected=self._protected,
+            )
         else:
             store = self._store
         principal_uid = _as_uid_tuple(principal, "principal")
@@ -1249,7 +1314,13 @@ class CedarPolicies:
         """Evaluate a batch without materializing internal decisions in Python."""
         request_entities = None if entities is None else _as_entities(entities)
         if request_entities:
-            store = _layer_store(self._store, self._dangling, self._entities, request_entities)
+            store = _layer_store(
+                self._store,
+                self._dangling,
+                self._entities,
+                request_entities,
+                protected=self._protected,
+            )
         else:
             store = self._store
         return _core.cedar_is_authorized_many_native(

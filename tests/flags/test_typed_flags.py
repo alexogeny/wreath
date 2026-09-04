@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -30,6 +32,12 @@ def test_typed_mapping_flags_preserve_scalar_types_and_defaults() -> None:
     assert flags.value(Flag("mode", "safe")) == "safe"
     with pytest.raises(KeyError, match="not declared"):
         flags.value(Flag("typo", False))
+
+
+@pytest.mark.parametrize("name", ["", 1, True])
+def test_flag_declaration_refuses_each_invalid_name(name: object) -> None:
+    with pytest.raises(ValueError, match="flag name must be a non-empty string"):
+        Flag(cast(Any, name), False)
 
 
 def test_flag_set_resolves_the_canonical_declaration_not_the_callers_copy() -> None:
@@ -69,6 +77,15 @@ def test_openfeature_bridge_selects_the_typed_sdk_method() -> None:
     assert provider.resolve(Flag("mode", "local")) == "remote"
     assert provider.resolve(Flag("limit", 2)) == 9
     assert provider.resolve(Flag("ratio", 1.0)) == 0.25
+
+
+def test_openfeature_bridge_refuses_a_wrong_result_type() -> None:
+    class WrongBooleanClient(OpenFeatureClient):
+        def get_boolean_value(self, name, default, context):
+            return 1
+
+    with pytest.raises(TypeError, match=r"switch.*bool.*int"):
+        OpenFeatureProvider(WrongBooleanClient()).resolve(Flag("switch", False))
 
 
 async def test_one_provider_contract_serves_lifespan_dependencies_and_typed_flags() -> None:
@@ -123,6 +140,18 @@ def test_mapping_provider_satisfies_both_public_provider_protocols() -> None:
     assert isinstance(provider, TypedFlagProvider)
 
 
+def test_flag_set_and_view_refuse_wrong_provider_result_types() -> None:
+    class WrongProvider:
+        def resolve(self, flag: Flag, context=None):
+            return 1
+
+    provider = WrongProvider()
+    with pytest.raises(TypeError, match=r"switch.*bool.*int"):
+        FlagSet(provider, (Flag("switch", False),)).value(Flag("switch", False))
+    with pytest.raises(TypeError, match=r"switch.*bool.*int"):
+        FlagView(provider).enabled("switch")
+
+
 def test_flag_view_keeps_the_exact_mapping_provider_boolean_fast_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,6 +185,24 @@ def test_flags_dependency_binds_only_a_present_identity_subject() -> None:
         assert dependency(request).enabled("live") is False
 
     assert provider.contexts == [{}, {}, {"id": "ada"}]
+
+
+def test_flags_dependency_separates_identity_types_without_changing_provider_subject() -> None:
+    provider = FeatureFlags({"rollout": "1%"})
+    dependency = flags_dependency(provider)
+    contexts: list[Mapping[str, Any]] = []
+
+    for identity_type in ("User", "Service"):
+        request = SimpleNamespace(
+            identity=SimpleNamespace(id="same", namespace="issuer", type=identity_type)
+        )
+        contexts.append(cast(Mapping[str, Any], dependency(request)._context))
+
+    assert contexts[0]["id"] == contexts[1]["id"] == "6:issuersame"
+    assert (
+        contexts[0]["_wreath_identity_key"]
+        != contexts[1]["_wreath_identity_key"]
+    )
 
 
 def test_mapping_fast_paths_preserve_subclass_resolution_overrides() -> None:

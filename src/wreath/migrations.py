@@ -251,6 +251,28 @@ HISTORY_VERIFIED = 1
 HISTORY_AMBIGUOUS = 2
 HISTORY_BLOCKED = 3
 
+
+def _require_bool(name: str, value: object) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a bool; got {value!r}")
+
+
+def _validate_resolution_targets(
+    target_migration: object,
+    target_checksum: object,
+    directory_generation: object,
+) -> None:
+    for name, value, maximum in (
+        ("target_migration", target_migration, 0xFFFFFFFFFFFFFFFF),
+        ("target_checksum", target_checksum, 0xFFFFFFFFFFFFFFFF),
+        ("directory_generation", directory_generation, 0xFFFFFFFF),
+    ):
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError(
+                f"{name} must be a non-negative integer that fits in "
+                f"{'32' if maximum == 0xFFFFFFFF else '64'} bits"
+            )
+
 # One packed tenant-directory row, matching WREATH_MIGRATION_ROW_SIZE (32B) and
 # the field offsets the native resolver reads: migration@8, checksum@16,
 # generation@24, status@28. The leading id is carried for the caller's benefit
@@ -288,8 +310,10 @@ class TenantState:
     def __post_init__(self) -> None:
         for name in ("tenant_id", "migration", "checksum", "generation"):
             value = getattr(self, name)
-            if not isinstance(value, int) or value < 0:
+            if type(value) is not int or value < 0:
                 raise ValueError(f"TenantState.{name} must be a non-negative integer")
+        if type(self.status) is not int:
+            raise ValueError("TenantState.status must be a HISTORY_* integer code")
         if self.status not in (
             HISTORY_UNKNOWN,
             HISTORY_VERIFIED,
@@ -313,7 +337,19 @@ def pack_tenant_directory(tenants: Any) -> bytes:
     author.
     """
     buffer = bytearray()
+    tenant_ids: set[int] = set()
     for state in tenants:
+        if type(state) is not TenantState:
+            raise ValueError(
+                "tenant directory entries must be TenantState instances; "
+                f"got {type(state).__name__}"
+            )
+        if state.tenant_id in tenant_ids:
+            raise ValueError(
+                f"tenant directory tenant_id {state.tenant_id} appears more than once; "
+                "each tenant identity must have exactly one migration state"
+            )
+        tenant_ids.add(state.tenant_id)
         buffer += _FLEET_ROW.pack(
             state.tenant_id,
             state.migration,
@@ -345,12 +381,7 @@ def resolve_fleet(
     `verify` count into per-tenant catalog audits is a separate, explicitly
     privileged step; classification is deliberately side-effect free.
     """
-    if not isinstance(target_migration, int) or target_migration < 0:
-        raise ValueError("target_migration must be a non-negative integer")
-    if not isinstance(target_checksum, int) or target_checksum < 0:
-        raise ValueError("target_checksum must be a non-negative integer")
-    if not isinstance(directory_generation, int) or directory_generation < 0:
-        raise ValueError("directory_generation must be a non-negative integer")
+    _validate_resolution_targets(target_migration, target_checksum, directory_generation)
     snapshot = pack_tenant_directory(tenants)
     return _resolve_managed_snapshot(
         snapshot,
@@ -367,10 +398,16 @@ class ResolutionPolicy:
     kind: Literal["managed", "strict"]
     sample_size: int = 0
 
+    def __post_init__(self) -> None:
+        if self.kind not in ("managed", "strict"):
+            raise ValueError("ResolutionPolicy.kind must be 'managed' or 'strict'")
+        if type(self.sample_size) is not int or self.sample_size < 0:
+            raise ValueError("sample_size must be a non-negative integer")
+        if self.kind == "strict" and self.sample_size:
+            raise ValueError("a strict ResolutionPolicy must have sample_size=0")
+
     @classmethod
     def managed(cls, *, sample_size: int = 0) -> ResolutionPolicy:
-        if not isinstance(sample_size, int) or sample_size < 0:
-            raise ValueError("sample_size must be a non-negative integer")
         return cls("managed", sample_size)
 
     @classmethod
@@ -389,7 +426,7 @@ class MigrationConfig:
     def __post_init__(self) -> None:
         for name in ("catalog_chunk_size", "concurrency", "max_failures"):
             value = getattr(self, name)
-            if not isinstance(value, int) or value < 1:
+            if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
 
 
@@ -752,6 +789,7 @@ def _resolve_managed_snapshot(
     benchmark fixtures. Applications use the migration runner rather than build
     snapshots themselves.
     """
+    _validate_resolution_targets(target_migration, target_checksum, directory_generation)
     counts = _postgres._migration_resolve_managed(
         snapshot,
         target_migration,
@@ -1071,6 +1109,7 @@ async def generate_single_plan(
     fingerprints differ, so applying the wrong kind fails the source-fingerprint
     refusal rather than migrating anything.
     """
+    _require_bool("fleet", fleet)
     await _resolve_default_opclasses(registry, connection)
     desired_descriptor = _registry_descriptor(registry, fleet=fleet)
     desired = _postgres._migration_compile_desired(desired_descriptor)
@@ -1253,6 +1292,7 @@ async def apply_single_artifact(
     allow_destructive: bool = False,
 ) -> MigrationApplyResult:
     """Apply one authoritative artifact under a transaction-scoped native plan."""
+    _require_bool("allow_destructive", allow_destructive)
     artifact = _load_native_artifact(artifact_data)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
@@ -1602,25 +1642,26 @@ async def apply_fleet(
     second runner is refused immediately rather than queueing behind a run that
     may take an hour.
     """
-    targets = [str(schema) for schema in schemas]
+    _require_bool("allow_destructive", allow_destructive)
+    _require_bool("stop_on_error", stop_on_error)
+    targets: list[str] = []
+    seen: set[str] = set()
+    for schema in schemas:
+        if type(schema) is not str:
+            raise ValueError(
+                f"tenant schema must be a string containing a plain SQL identifier; "
+                f"got {type(schema).__name__}"
+            )
+        validate_unquoted_identifier(schema, "tenant schema")
+        if schema in seen:
+            raise ValueError(
+                f"apply_fleet was given the same schema twice: {schema}; "
+                "a fleet is a set of tenants and a repeat is a directory bug"
+            )
+        seen.add(schema)
+        targets.append(schema)
     if not targets:
         raise ValueError("apply_fleet needs at least one tenant schema")
-    if len(set(targets)) != len(targets):
-        seen: set[str] = set()
-        repeated: set[str] = set()
-        for schema in targets:
-            if schema in seen:
-                repeated.add(schema)
-            else:
-                seen.add(schema)
-        raise ValueError(
-            f"apply_fleet was given the same schema twice: {', '.join(sorted(repeated))}; "
-            "a fleet is a set of tenants and a repeat is a directory bug"
-        )
-    for schema in targets:
-        # Interpolated into the catalog query and the lock key, so the same
-        # rule the rest of the tree applies to an identifier applies here.
-        validate_unquoted_identifier(schema, "tenant schema")
 
     artifact = _load_native_artifact(artifact_data)
     connection = await database.acquire(workload)
@@ -1915,6 +1956,8 @@ async def revert_single_artifact(
     the deployed code. `force` exists for the legitimate case of rewinding a
     local stack to re-migrate.
     """
+    _require_bool("allow_destructive", allow_destructive)
+    _require_bool("force", force)
     artifact = _load_native_artifact(artifact_data)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:

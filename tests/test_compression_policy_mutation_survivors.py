@@ -51,6 +51,22 @@ def test_fragment_body_refuses_an_unprepared_format() -> None:
         CompressionPolicy()._gzip_fragment_body("html", b"")
 
 
+@pytest.mark.parametrize(
+    ("prefix_bytes", "suffix_bytes", "offender"),
+    [(True, 0, "prefix_bytes"), (0, False, "suffix_bytes")],
+)
+def test_fragment_configuration_refuses_coercible_edge_sizes(
+    prefix_bytes: Any, suffix_bytes: Any, offender: str
+) -> None:
+    with pytest.raises(TypeError, match=offender):
+        CompressionPolicy()._configure_gzip_fragment(
+            "html",
+            b"prefixstable",
+            prefix_bytes=prefix_bytes,
+            suffix_bytes=suffix_bytes,
+        )
+
+
 def test_fragment_body_refuses_a_stale_level() -> None:
     policy, prefix, _stable = _fragment_policy()
     policy.gzip_level += 1
@@ -175,6 +191,40 @@ async def test_existing_content_range_prevents_compression() -> None:
 
     assert response.body == b"compressible" * 20
     assert b"content-encoding" not in dict(response.headers)
+
+
+@pytest.mark.asyncio
+async def test_any_no_transform_field_prevents_compression() -> None:
+    body = b"compressible" * 20
+    response = Response(
+        body,
+        headers=[
+            (b"cache-control", b"public"),
+            (b"cache-control", b"no-transform"),
+        ],
+        media_type=b"text/plain",
+    )
+
+    await CompressionPolicy(minimum_size=0).after(_request(), response)
+
+    assert response.body == body
+    assert b"content-encoding" not in dict(response.headers)
+
+
+@pytest.mark.asyncio
+async def test_no_transform_text_in_an_unrelated_field_does_not_prevent_compression() -> None:
+    response = Response(
+        b"compressible" * 20,
+        headers=[
+            (b"x-policy", b"no-transform"),
+            (b"cache-control", b"public"),
+        ],
+        media_type=b"text/plain",
+    )
+
+    await CompressionPolicy(minimum_size=0).after(_request(), response)
+
+    assert dict(response.headers)[b"content-encoding"] == b"gzip"
 
 
 @pytest.mark.asyncio

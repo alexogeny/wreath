@@ -82,6 +82,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Final, NamedTuple
 
 from ._b64 import b64_encode
@@ -211,6 +212,8 @@ def declaration(
             "with no window and no erasure path. Keep conversation history in the "
             "ORM, where it has an owner, and give this buffer a number of seconds."
         )
+    if not _is_positive_seconds(retain):
+        raise ValueError("retain must be a finite positive number of seconds")
     return Log(
         table=table,
         retain=retain,
@@ -613,10 +616,10 @@ class Streams:
         on_retry: str = "supersede",
         started_capacity: int = 4096,
     ) -> None:
-        if poll <= 0:
-            raise ValueError("poll must be a positive number of seconds")
-        if idle <= 0:
-            raise ValueError("idle must be a positive number of seconds")
+        if not _is_positive_seconds(poll):
+            raise ValueError("poll must be a positive number of seconds and finite")
+        if not _is_positive_seconds(idle):
+            raise ValueError("idle must be a positive number of seconds and finite")
         if on_retry not in RETRY_POLICIES:
             raise ValueError(
                 f"on_retry must be one of {', '.join(RETRY_POLICIES)}, not {on_retry!r}: "
@@ -630,6 +633,8 @@ class Streams:
                 "of prompts and completions with no erasure path. Build it with "
                 "wreath.streams.declaration()."
             )
+        if not _is_positive_seconds(log.declaration.retain):
+            raise ValueError("retain must be a finite positive number of seconds")
         self._jobs = jobs
         self._log = log
         self._poll = poll
@@ -927,15 +932,11 @@ class Streams:
         """
         _check_key(key)
         storage_key = _storage or _storage_key(key, check_enqueue_tenant(None))
-        start = (
-            since
-            if isinstance(since, StreamCursor)
-            else StreamCursor.decode(since, key=storage_key)
-        )
+        start = _stream_cursor(since, key=storage_key)
         idle_for = self._idle if idle is None else idle
         poll_for = self._poll if poll is None else poll
-        if idle_for <= 0 or poll_for <= 0:
-            raise ValueError("idle and poll must be positive numbers of seconds")
+        if not _is_positive_seconds(idle_for) or not _is_positive_seconds(poll_for):
+            raise ValueError("idle and poll must be positive finite numbers of seconds")
         if start.cursor != Cursor.start():
             self.resumed += 1
         if (
@@ -1027,7 +1028,7 @@ class Streams:
         Pass `public=True` only when every stream key is intentionally public.
         """
         _require_reader_access(authorize, public)
-        if authorize is not None and not authorize(key):
+        if authorize is not None and authorize(key) is not True:
             return _unknown_stream(key)
         try:
             _check_key(key)
@@ -1040,11 +1041,7 @@ class Streams:
             return JSONResponse({"error": str(error), "key": key[:64]}, status=400)
         try:
             storage_key = _storage_key(key, check_enqueue_tenant(None))
-            resume = (
-                since
-                if isinstance(since, StreamCursor)
-                else StreamCursor.decode(since, key=storage_key)
-            )
+            resume = _stream_cursor(since, key=storage_key)
         except ValueError as error:
             self.cursor_refusals += 1
             return JSONResponse({"error": str(error), "key": key}, status=400)
@@ -1208,6 +1205,24 @@ def _check_key(key: str) -> None:
             )
 
 
+def _is_positive_seconds(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isfinite(value) and value > 0
+
+
+def _stream_cursor(value: StreamCursor | str | None, *, key: str) -> StreamCursor:
+    if not isinstance(value, StreamCursor):
+        return StreamCursor.decode(value, key=key)
+    if value.token != _token(key):
+        raise ValueError(
+            f"this cursor belongs to a different stream than {key!r}; a Last-Event-ID "
+            "is an index into one stream's rows and replaying it against another "
+            "would skip rows rather than return them"
+        )
+    return value
+
+
 def _unknown_stream(key: str) -> Response:
     return JSONResponse({"error": "unknown or expired stream", "key": key}, status=404)
 
@@ -1233,7 +1248,7 @@ async def push_stream(
     Pass `public=True` only when every stream key is intentionally public.
     """
     _require_reader_access(authorize, public)
-    if authorize is not None and not authorize(key):
+    if authorize is not None and authorize(key) is not True:
         return False
 
     from ._json import dumps as _dumps
@@ -1247,6 +1262,8 @@ async def push_stream(
 
 
 def _require_reader_access(authorize: Callable[[str], bool] | None, public: bool) -> None:
+    if type(public) is not bool:
+        raise ValueError("public must be a boolean")
     if authorize is None and not public:
         raise ValueError(
             "a stream reader needs authorize= or public=True for an intentionally public stream"

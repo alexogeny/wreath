@@ -34,6 +34,7 @@ task to leak, and a session nobody looks at costs nothing by existing.
 from __future__ import annotations
 
 import asyncio
+import math
 import secrets
 import time
 from collections.abc import Callable, Mapping
@@ -65,6 +66,8 @@ class Session:
     client_info: dict[str, Any] = field(default_factory=dict)
     #: Request id to its currently running task.
     in_flight: dict[Any, asyncio.Task[Any]] = field(default_factory=dict)
+    #: Non-tool handler requests that support `notifications/cancelled`.
+    requests_in_flight: dict[Any, asyncio.Task[Any]] = field(default_factory=dict)
     #: Framed JSON-RPC notifications bounded by `MCPLimits.max_pending_notifications`.
     notifications: Queue = field(default_factory=Queue)
     subscriptions: set[str] = field(default_factory=set)
@@ -82,6 +85,8 @@ class Session:
     channel: ClientChannel | None = None
     #: Cached client roots, invalidated by `notifications/roots/list_changed`.
     roots: tuple[str, ...] | None = None
+    #: Incremented whenever the client says its roots changed.
+    roots_revision: int = 0
 
     def touch(self, now: float) -> None:
         self.last_seen = now
@@ -108,8 +113,8 @@ class Session:
         while not self.notifications.offer(CLOSE_STREAM):
             try:
                 self.notifications.get_nowait()
-            except QueueEmpty:  # pragma: no cover - full, then emptied by the reader
-                return
+            except QueueEmpty:
+                continue
             self.dropped += 1
 
 
@@ -146,12 +151,28 @@ class SessionStore:
         client_request_seconds: float = 30.0,
         publish: Callable[[Session, bytes], bool] | None = None,
     ) -> None:
+        if type(max_sessions) is not int:
+            raise TypeError("max_sessions must be an integer")
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1")
+        if idle_seconds is not None and type(idle_seconds) not in (int, float):
+            raise TypeError("idle_seconds must be an int or float, or None")
+        if idle_seconds is not None and not math.isfinite(idle_seconds):
+            raise ValueError("idle_seconds must be positive and finite, or None for no expiry")
         if idle_seconds is not None and idle_seconds <= 0:
             raise ValueError("idle_seconds must be positive, or None for no expiry")
+        if type(max_pending_notifications) is not int:
+            raise TypeError("max_pending_notifications must be an integer")
         if max_pending_notifications < 1:
             raise ValueError("max_pending_notifications must be at least 1")
+        if type(max_pending_requests) is not int:
+            raise TypeError("max_pending_requests must be an integer")
+        if max_pending_requests < 1:
+            raise ValueError("max_pending_requests must be at least 1")
+        if type(client_request_seconds) not in (int, float):
+            raise TypeError("client_request_seconds must be an int or float")
+        if client_request_seconds <= 0 or not math.isfinite(client_request_seconds):
+            raise ValueError("client_request_seconds must be positive and finite")
         self._max_sessions = max_sessions
         self._idle_seconds = idle_seconds
         self._max_pending = max_pending_notifications
@@ -221,9 +242,11 @@ class SessionStore:
             max_pending=self._max_pending_requests,
             timeout=self._request_seconds,
         )
-        if not self._sessions.put(session.id, session, now=moment):
+        if not self._sessions.claim(session.id, session, now=moment):
             raise RuntimeError(
-                f"the MCP session store is at its ceiling of {self._max_sessions} sessions"
+                "the secure random generator produced a duplicate session id; "
+                "session creation was refused rather than replacing the existing "
+                "bearer identifier"
             )
         self._next_sweep = self._sessions.next_deadline
         return session
@@ -246,6 +269,17 @@ class SessionStore:
         if self._idle_seconds is not None:
             self._sessions.put(identifier, session, now=moment)
             self._next_sweep = self._sessions.next_deadline
+        return session
+
+    def peek(self, identifier: str, *, now: float | None = None) -> Session | None:
+        """Return a live session without extending its idle lifetime."""
+        session = self._sessions.held(identifier)
+        if session is None:
+            return None
+        moment = time.monotonic() if now is None else now
+        if self._expired(session, moment):
+            self._collect(session)
+            return None
         return session
 
     def subscribers(self, uri: str) -> list[Session]:
@@ -278,10 +312,16 @@ class SessionStore:
         if not force and moment < self._next_sweep:
             return 0
         stale = self._sessions.sweep(now=moment)
+        collected = 0
         for session in stale:
-            self._expire_collected(session)
+            if session.in_flight or session.requests_in_flight or session.stream_open:
+                session.touch(moment)
+                self._sessions.put(session.id, session, now=moment)
+            else:
+                self._expire_collected(session)
+                collected += 1
         self._next_sweep = self._sessions.next_deadline
-        return len(stale)
+        return collected
 
     def discard(self, identifier: str) -> bool:
         """End a session, cancelling anything it still has in flight."""
@@ -296,7 +336,13 @@ class SessionStore:
 
     def _expired(self, session: Session, now: float) -> bool:
         idle = self._idle_seconds
-        return idle is not None and now - session.last_seen >= idle
+        return (
+            idle is not None
+            and now - session.last_seen >= idle
+            and not session.in_flight
+            and not session.requests_in_flight
+            and not session.stream_open
+        )
 
     def _collect(self, session: Session) -> None:
         if self._sessions.held(session.id) is None:
@@ -327,9 +373,17 @@ def _cancel_all(session: Session) -> None:
     for task in list(session.in_flight.values()):
         task.cancel()
     session.in_flight.clear()
+    for task in list(session.requests_in_flight.values()):
+        task.get_loop().call_soon(_cancel_if_running, task)
+    session.requests_in_flight.clear()
     session.subscriptions.clear()
     session.roots = None
     session.close_stream()
+
+
+def _cancel_if_running(task: asyncio.Task[Any]) -> None:
+    if not task.done():
+        task.cancel()
 
 
 @dataclass(frozen=True, slots=True)

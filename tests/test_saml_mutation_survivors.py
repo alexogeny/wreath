@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from _saml_fixtures import (
@@ -37,6 +37,22 @@ def _reason(expected: str, call, /, *args, **kwargs) -> None:
     assert raised.value.reason == expected
 
 
+def test_transform_refusal_does_not_amplify_an_attacker_controlled_algorithm() -> None:
+    algorithm = "https://attacker.invalid/" + "x" * 4_096 + "secret-tail"
+    reference = _element(
+        f'<ds:Reference xmlns:ds="{DS_NS}"><ds:Transforms>'
+        f'<ds:Transform Algorithm="{algorithm}"/>'
+        "</ds:Transforms></ds:Reference>"
+    )
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        saml._transform_chain(reference)
+
+    assert raised.value.reason == "transform-refused"
+    assert len(str(raised.value)) < 500
+    assert "secret-tail" not in str(raised.value)
+
+
 @pytest.fixture(scope="module")
 def signer() -> SigningIdentity:
     return SigningIdentity()
@@ -58,6 +74,15 @@ def test_identity_provider_accepts_ascii_certificate_bytes(signer: SigningIdenti
     assert provider.keys[0].family == "RSA"
 
 
+def test_identity_provider_bounds_configured_signing_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_key_from_text", lambda _value: saml._PublicKey("RSA"))
+
+    with pytest.raises(ValueError, match="at most 16 signing certificates"):
+        saml.IdentityProvider(ISSUER, tuple(f"certificate-{index}" for index in range(17)))
+
+
 @pytest.mark.parametrize(
     ("settings", "message"),
     [
@@ -65,6 +90,9 @@ def test_identity_provider_accepts_ascii_certificate_bytes(signer: SigningIdenti
         ({"acs_url": ""}, "acs_url for SubjectConfirmationData"),
         ({"clock_skew": -0.01}, "clock_skew must be between"),
         ({"clock_skew": 300.01}, "clock_skew must be between"),
+        ({"clock_skew": True}, "clock_skew must be a finite number"),
+        ({"clock_skew": "60"}, "clock_skew must be a finite number"),
+        ({"clock_skew": float("nan")}, "clock_skew must be a finite number"),
     ],
 )
 def test_service_provider_refuses_each_invalid_setting(
@@ -73,6 +101,27 @@ def test_service_provider_refuses_each_invalid_setting(
     values = {"entity_id": AUDIENCE, "acs_url": ACS, "clock_skew": 60.0, **settings}
     with pytest.raises(ValueError, match=message):
         saml.ServiceProvider(**values)
+
+
+@pytest.mark.parametrize("ttl", [True, "60", -1, float("inf")])
+def test_memory_replay_ledger_requires_a_finite_numeric_retention(ttl: Any) -> None:
+    with pytest.raises(ValueError, match="ttl must be a positive finite number"):
+        saml.MemoryReplayLedger(ttl=ttl)
+
+
+@pytest.mark.parametrize("max_entries", [True, 0, 1.5])
+def test_memory_replay_ledger_requires_a_positive_integer_capacity(
+    max_entries: Any,
+) -> None:
+    with pytest.raises(ValueError, match="SAML replay ledger max_entries"):
+        saml.MemoryReplayLedger(ttl=60, max_entries=max_entries)
+
+
+@pytest.mark.parametrize("ttl", [True, 0, float("inf")])
+def test_shared_ledger_invalid_retention_is_not_treated_as_a_safe_window(ttl: Any) -> None:
+    ledger = SimpleNamespace(declaration=SimpleNamespace(ttl=ttl))
+
+    assert saml._ledger_retention(ledger) is None
 
 
 def test_key_text_distinguishes_empty_unlabelled_certificates_and_public_keys(
@@ -116,6 +165,20 @@ def test_versionless_certificate_walk_does_not_skip_the_serial_number() -> None:
     assert saml._spki_from_certificate(certificate) == spki
 
 
+@pytest.mark.parametrize("exponent", [1, 2])
+def test_rsa_key_refuses_a_forgeable_public_exponent(exponent: int) -> None:
+    modulus = b"\x00\x80" + bytes(255)
+    rsa_key = _tlv(
+        0x30,
+        _tlv(0x02, modulus) + _tlv(0x02, exponent.to_bytes(1, "big")),
+    )
+    algorithm = _tlv(0x30, _tlv(0x06, saml._OID_RSA))
+    spki = _tlv(0x30, algorithm + _tlv(0x03, b"\x00" + rsa_key))
+
+    with pytest.raises(ValueError, match="RSA public exponent.*odd.*3"):
+        saml._key_from_spki(spki)
+
+
 def test_tree_helpers_refuse_missing_duplicate_and_blank_values() -> None:
     parent = _element(f'<a xmlns:s="{ASSERTION_NS}"><s:x/><s:x/></a>')
     _reason("missing", saml._only, parent, ASSERTION_NS, "missing", reason="missing", what="a")
@@ -151,6 +214,11 @@ def _reference(transforms: str) -> Element:
         (
             f'<ds:Transforms><ds:Transform Algorithm="{saml._ENVELOPED}"/></ds:Transforms>',
             "transform-not-exclusive",
+        ),
+        (
+            f'<ds:Transforms><ds:Transform Algorithm="{EXC_C14N}"/>'
+            f'<ds:Transform Algorithm="{saml._ENVELOPED}"/></ds:Transforms>',
+            "transform-order",
         ),
     ],
 )
@@ -457,6 +525,10 @@ def test_instant_refuses_a_timestamp_without_timezone() -> None:
     _reason("instant", saml._instant, "2026-08-30T12:00:00", reason="instant", what="value")
 
 
+def test_instant_refuses_malformed_timestamp_text() -> None:
+    _reason("instant", saml._instant, "not-a-time", reason="instant", what="value")
+
+
 @pytest.mark.parametrize(
     ("assertion", "reason"),
     [
@@ -488,6 +560,21 @@ def test_conditions_refuse_each_invalid_contract(assertion: Element, reason: str
     _reason(reason, saml._check_conditions, assertion, saml.ServiceProvider(AUDIENCE, ACS), NOW)
 
 
+def test_audience_refuses_structured_text_with_a_second_reading() -> None:
+    assertion = _conditions(
+        f"<saml:AudienceRestriction><saml:Audience>{AUDIENCE}<saml:x/>"
+        "</saml:Audience></saml:AudienceRestriction>"
+    )
+
+    _reason(
+        "audience-structured",
+        saml._check_conditions,
+        assertion,
+        saml.ServiceProvider(AUDIENCE, ACS),
+        NOW,
+    )
+
+
 def _subject(inner: str) -> Element:
     return _element(f'<saml:Assertion xmlns:saml="{ASSERTION_NS}">{inner}</saml:Assertion>')
 
@@ -513,6 +600,11 @@ def _confirmation(
             f"<saml:Subject><saml:NameID> </saml:NameID>{_confirmation()}</saml:Subject>",
             None,
             "nameid-empty",
+        ),
+        (
+            f"<saml:Subject><saml:NameID>x<saml:y/></saml:NameID>{_confirmation()}</saml:Subject>",
+            None,
+            "nameid-structured",
         ),
         ("<saml:Subject><saml:NameID>x</saml:NameID></saml:Subject>", None, "confirmation-method"),
         (
@@ -602,6 +694,20 @@ def _authn(inner: str) -> Element:
 )
 def test_authn_refuses_each_missing_or_ambiguous_contract(inner: str, reason: str) -> None:
     _reason(reason, saml._read_authn, _authn(inner))
+
+
+@pytest.mark.parametrize(
+    "class_ref",
+    [" ", "password<saml:second-reading/>"],
+)
+def test_authn_context_refuses_blank_or_structured_values(class_ref: str) -> None:
+    assertion = _authn(
+        f'<saml:AuthnStatement AuthnInstant="{NOW.isoformat()}"><saml:AuthnContext>'
+        f"<saml:AuthnContextClassRef>{class_ref}</saml:AuthnContextClassRef>"
+        "</saml:AuthnContext></saml:AuthnStatement>"
+    )
+
+    _reason("authn-context", saml._read_authn, assertion)
 
 
 @pytest.mark.parametrize(
@@ -706,6 +812,248 @@ async def test_verify_response_honours_explicit_limits_now_and_sync_ledger(
     )
     assert verified.name_id == "alex@example.com"
     assert ledger.keys == [f"{ISSUER}\x1f_a1"]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "reason"),
+    [
+        (f'Destination="{ACS}/other"', "response-destination"),
+        ('InResponseTo="_other"', "response-in-response-to"),
+    ],
+)
+async def test_verify_response_refuses_conflicting_response_routing_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    assertion = assertion_xml(
+        now=NOW,
+        in_response_to="_expected",
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    )
+    raw = response_xml(assertion).replace(" IssueInstant=", f" {attribute} IssueInstant=").encode()
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=_Ledger(),
+            in_response_to="_expected",
+            now=NOW,
+        )
+
+    assert raised.value.reason == reason
+
+
+async def test_verify_response_accepts_matching_response_routing_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    assertion = assertion_xml(
+        now=NOW,
+        in_response_to="_expected",
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    )
+    raw = response_xml(assertion).replace(
+        " IssueInstant=",
+        f' Destination="{ACS}" InResponseTo="_expected" IssueInstant=',
+    )
+
+    verified = await saml.verify_response(
+        raw.encode(),
+        idp=SimpleNamespace(entity_id=ISSUER),
+        sp=saml.ServiceProvider(AUDIENCE, ACS),
+        ledger=_Ledger(),
+        in_response_to="_expected",
+        now=NOW,
+    )
+
+    assert verified.assertion_id == "_a1"
+
+
+async def test_bare_assertion_ignores_response_only_routing_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    raw = assertion_xml(
+        now=NOW,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    ).replace(' Version="2.0"', f' Version="2.0" Destination="{ACS}/other"', 1)
+
+    verified = await saml.verify_response(
+        raw.encode(),
+        idp=SimpleNamespace(entity_id=ISSUER),
+        sp=saml.ServiceProvider(AUDIENCE, ACS),
+        ledger=_Ledger(),
+        now=NOW,
+    )
+
+    assert verified.assertion_id == "_a1"
+
+
+async def test_verify_response_refuses_a_wrong_response_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    assertion = assertion_xml(
+        now=NOW,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    )
+    raw = response_xml(assertion).replace('Version="2.0"', 'Version="1.1"', 1)
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw.encode(),
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=_Ledger(),
+            now=NOW,
+        )
+
+    assert raised.value.reason == "version"
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        (
+            assertion_xml(
+                now=NOW,
+                signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+            )
+            .replace('Version="2.0"', 'Version="1.1"', 1)
+            .encode(),
+            "version",
+        ),
+        (
+            assertion_xml(
+                now=NOW,
+                assertion_id="a" * 1025,
+                signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+            ).encode(),
+            "assertion-id-length",
+        ),
+        (
+            assertion_xml(
+                now=NOW,
+                signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+            )
+            .replace(
+                f"<saml:Issuer>{ISSUER}</saml:Issuer>",
+                f"<saml:Issuer>{ISSUER}<saml:x/></saml:Issuer>",
+            )
+            .encode(),
+            "issuer-structured",
+        ),
+    ],
+    ids=("wrong-version", "oversized-id", "structured-issuer"),
+)
+async def test_verify_response_refuses_invalid_profile_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: bytes,
+    reason: str,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=_Ledger(),
+            now=NOW,
+        )
+
+    assert raised.value.reason == reason
+
+
+async def test_verify_response_refuses_a_naive_verification_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    raw = assertion_xml(
+        now=NOW,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    ).encode()
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=_Ledger(),
+            now=NOW.replace(tzinfo=None),
+        )
+
+    assert raised.value.reason == "invalid-time"
+
+
+async def test_verify_response_refuses_a_non_datetime_verification_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    raw = assertion_xml(
+        now=NOW,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    ).encode()
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=_Ledger(),
+            now=cast(Any, "now"),
+        )
+
+    assert raised.value.reason == "invalid-time"
+
+
+async def test_verify_response_refuses_a_replay_ledger_that_expires_while_assertion_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    raw = assertion_xml(
+        now=NOW,
+        lifetime=300,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    ).encode()
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=saml.MemoryReplayLedger(ttl=60),
+            now=NOW,
+        )
+
+    assert raised.value.reason == "ledger-retention"
+
+
+async def test_verify_response_checks_declared_shared_ledger_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(saml, "_verify_signature", lambda *args: None)
+    raw = assertion_xml(
+        now=NOW,
+        lifetime=300,
+        signature_slot=f'<ds:Signature xmlns:ds="{DS_NS}"/>',
+    ).encode()
+    ledger = SimpleNamespace(declaration=SimpleNamespace(ttl=60), claim=lambda _key: True)
+
+    with pytest.raises(saml.SamlRefusal) as raised:
+        await saml.verify_response(
+            raw,
+            idp=SimpleNamespace(entity_id=ISSUER),
+            sp=saml.ServiceProvider(AUDIENCE, ACS),
+            ledger=ledger,
+            now=NOW,
+        )
+
+    assert raised.value.reason == "ledger-retention"
 
 
 @pytest.mark.parametrize("use_explicit", [False, True])

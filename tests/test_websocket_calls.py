@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -233,6 +233,22 @@ async def test_too_many_outstanding_calls_are_refused() -> None:
             await first
 
 
+@pytest.mark.parametrize("max_pending", [True, 1.5, "2"])
+async def test_calls_capacity_requires_an_exact_positive_integer(max_pending: object) -> None:
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        _calls(FakeSocket(), max_pending=max_pending)
+
+
+async def test_calls_refuses_a_second_active_reader() -> None:
+    calls = _calls(FakeSocket())
+    await calls.__aenter__()
+    try:
+        with pytest.raises(RuntimeError, match="already active"):
+            await calls.__aenter__()
+    finally:
+        await calls.close()
+
+
 async def test_a_slot_is_released_even_when_the_body_raises() -> None:
     # A map that leaks on the failure path fills up exactly when it matters.
     pending = Pending(limit=4)
@@ -268,6 +284,12 @@ async def test_a_duplicate_identifier_is_refused() -> None:
 async def test_a_pending_map_must_admit_at_least_one() -> None:
     with pytest.raises(ValueError, match="at least one"):
         Pending(limit=0)
+
+
+@pytest.mark.parametrize("limit", [True, 1.5, "2", float("nan"), float("inf")])
+async def test_a_pending_map_requires_an_exact_integer_limit(limit: object) -> None:
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        Pending(limit=cast(int, limit))
 
 
 async def test_fail_all_reports_how_many_were_waiting() -> None:

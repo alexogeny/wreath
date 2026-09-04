@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -16,7 +16,7 @@ from wreath.billing.ledger import (
     BillingCommandIdentity,
     BillingCommandState,
 )
-from wreath.billing.queries import InvoicePage
+from wreath.billing.queries import InvoiceCursor, InvoicePage
 from wreath.billing.support import (
     BillingAuditEvent,
     BillingSupport,
@@ -152,6 +152,7 @@ def test_support_read_properties_refuse_disabled_access() -> None:
     ("decision", "message"),
     [
         (object(), "invalid decision"),
+        (AuthorizationDecision(cast(Any, 1), "integer permit"), "integer permit"),
         (AuthorizationDecision(False, "policy refused"), "policy refused"),
     ],
 )
@@ -189,7 +190,7 @@ async def test_support_read_refuses_each_invalid_subject_mapping(subject: object
     support = BillingSupport(
         billing=Backend(),
         reader=Reader(),
-        subject_for=lambda identity, tenant: subject,
+        subject_for=lambda identity, tenant: cast(str, subject),
         access=SupportAccess(authorize),
     )
 
@@ -221,7 +222,7 @@ def test_money_movement_configuration_refuses_each_invalid_boundary() -> None:
 
     approvals = ChatApprovalFlow(ChatOps(name="support-config"), InMemoryApprovalStore())
     with pytest.raises(TypeError, match="approvals must be ChatApprovalFlow"):
-        SupportMoneyMovement(object(), authorize, audit)
+        SupportMoneyMovement(cast(Any, object()), authorize, audit)
     for option in ("authorize", "audit"):
         for invalid in (object(), lambda value: None):
             options: dict[str, Any] = {option: invalid}
@@ -233,7 +234,7 @@ def test_money_movement_configuration_refuses_each_invalid_boundary() -> None:
                 )
     for ttl in (True, "30", float("inf"), 0, -1):
         with pytest.raises(ValueError, match="ttl must be positive"):
-            SupportMoneyMovement(approvals, authorize, audit, ttl=ttl)
+            SupportMoneyMovement(approvals, authorize, audit, ttl=cast(Any, ttl))
     for option in ("permission", "action"):
         for invalid in ("", 1):
             options = {option: invalid}
@@ -430,6 +431,56 @@ async def test_support_invoices_refuse_each_out_of_scope_projection(projected: o
 
 
 @pytest.mark.parametrize(
+    "options",
+    [
+        {"subscription": ""},
+        {"subscription": 1},
+        {"cursor": object()},
+        {"limit": True},
+        {"limit": 0},
+        {"limit": 101},
+    ],
+)
+async def test_support_invoices_refuse_invalid_query_boundaries_before_authorizing(
+    options: dict[str, object],
+) -> None:
+    calls: list[str] = []
+
+    async def authorize(current: Any, requirement: Any) -> AuthorizationDecision:
+        calls.append("authorize")
+        return AuthorizationDecision(True, "permit")
+
+    reader = ResultReader()
+    support = BillingSupport(
+        billing=Backend(),
+        reader=reader,
+        subject_for=lambda identity, tenant: f"organization:{tenant}",
+        access=SupportAccess(authorize),
+    )
+
+    with pytest.raises((TypeError, ValueError), match="billing support invoice"):
+        await support.invoices(
+            context(permissions=frozenset({"billing.read"})),
+            **options,
+        )
+
+    assert calls == []
+
+
+async def test_support_invoices_preserve_valid_query_boundaries() -> None:
+    reader = ResultReader()
+    support = readable_support(reader)
+    cursor = InvoiceCursor(datetime(2026, 1, 1, tzinfo=UTC), "in_1")
+
+    assert await support.invoices(
+        context(permissions=frozenset({"billing.read"})),
+        subscription="sub_1",
+        cursor=cursor,
+        limit=100,
+    ) == InvoicePage((), None)
+
+
+@pytest.mark.parametrize(
     ("operation", "key"),
     [
         ("", "command-1"),
@@ -586,6 +637,7 @@ async def test_refund_executes_only_from_the_human_approval_callback() -> None:
     reply = await chat._dispatch(kind="action", name=action, context=current)
 
     assert reply is not None
+    assert reply.content is not None
     assert "re_1" in reply.content
     assert backend.refunds == [
         {
@@ -605,6 +657,37 @@ async def test_refund_executes_only_from_the_human_approval_callback() -> None:
             approval_id=action.rsplit(":", 1)[-1],
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [object(), AuthorizationDecision(cast(Any, 1), "integer permit")],
+)
+async def test_refund_proposal_refuses_each_invalid_cedar_decision(
+    decision: object,
+) -> None:
+    chat = ChatOps(name="support-invalid-proposal")
+    approvals = ChatApprovalFlow(chat, InMemoryApprovalStore())
+
+    async def authorize(current: Any, requirement: Any) -> Any:
+        return decision
+
+    async def audit(event: BillingAuditEvent) -> None:
+        raise AssertionError("invalid proposal reached audit")
+
+    support = BillingSupport(
+        billing=Backend(),
+        reader=Reader(),
+        subject_for=lambda identity, tenant: f"organization:{tenant}",
+        money=SupportMoneyMovement(approvals, authorize, audit),
+    )
+
+    with pytest.raises(PermissionError, match="denied by Cedar"):
+        await support.propose_refund(
+            context(),
+            payment="pi_1",
+            reference="support-invalid-proposal",
+        )
 
 
 async def test_refund_requires_permission_and_cedar_after_human_approval() -> None:
@@ -649,24 +732,36 @@ async def test_refund_requires_permission_and_cedar_after_human_approval() -> No
     assert backend.refunds == []
 
 
-async def test_refund_requires_cedar_permit_after_human_approval() -> None:
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        AuthorizationDecision(False, "no permit policy matched"),
+        AuthorizationDecision(cast(Any, 1), "integer permit"),
+        object(),
+    ],
+)
+async def test_refund_requires_cedar_permit_after_human_approval(
+    refusal: object,
+) -> None:
     chat = ChatOps(name="support")
     approvals = ChatApprovalFlow(
         chat,
         InMemoryApprovalStore(max_entries=8, clock=lambda: 100.0),
     )
     audited: list[BillingAuditEvent] = []
+    requirements: list[Any] = []
 
     decisions = iter(
         (
             AuthorizationDecision(True, "cedar permit"),
-            AuthorizationDecision(False, "no permit policy matched"),
+            refusal,
         )
     )
 
     async def deny_after_proposal(
         current: Any, requirement: Any
-    ) -> AuthorizationDecision:
+    ) -> Any:
+        requirements.append(requirement)
         return next(decisions)
 
     async def audit(event: BillingAuditEvent) -> None:
@@ -687,11 +782,17 @@ async def test_refund_requires_cedar_permit_after_human_approval() -> None:
         amount=Money("USD", 100),
     )
     action = proposal.blocks[1]["elements"][0]["action_id"]
-    current.action = action
+    grant = ApprovalGrant(
+        action.rsplit(":", 1)[-1],
+        "acme",
+        "user-7",
+        "billing.refund",
+        requirements[0].resource.id,
+        100.0,
+    )
 
-    reply = await chat._dispatch(kind="action", name=action, context=current)
-
-    assert reply is None
+    with pytest.raises(PermissionError, match="denied by Cedar"):
+        await support._approved_refund(current, grant)
     assert audited == []
     assert backend.refunds == []
 

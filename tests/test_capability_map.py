@@ -1,3 +1,7 @@
+from typing import Any
+
+import pytest
+
 from wreath._capability_map import CapabilityMap
 
 
@@ -10,6 +14,12 @@ class _CountMustNotBeRead:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._table, name)
+
+
+@pytest.mark.parametrize("overflow", ["refuses", "", None, 1])
+def test_unknown_overflow_policy_is_refused_at_construction(overflow: Any) -> None:
+    with pytest.raises(ValueError, match="overflow must be 'evict', 'earliest', or 'refuse'"):
+        CapabilityMap(max_entries=1, overflow=overflow)
 
 
 def test_earliest_overflow_accepts_non_expiring_entries_without_a_deadline() -> None:

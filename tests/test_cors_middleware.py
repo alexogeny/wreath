@@ -52,6 +52,21 @@ async def test_a_wildcard_origin_cannot_be_combined_with_credentials() -> None:
         CorsPolicy(allow_origins=["*"], allow_credentials=True)
 
 
+async def test_an_opaque_origin_cannot_receive_credentials() -> None:
+    with pytest.raises(ValueError, match=r"invalid CORS origin.*null"):
+        CorsPolicy(allow_origins=["null"], allow_credentials=True)
+
+
+async def test_an_opaque_origin_remains_available_without_credentials() -> None:
+    app = _app(CorsPolicy(allow_origins=["null"]))
+
+    async with TestClient(app) as client:
+        response = await client.get("/", headers={"origin": "null"})
+
+    assert response.header("access-control-allow-origin") == "null"
+    assert response.header("access-control-allow-credentials") is None
+
+
 async def test_a_get_carrying_the_preflight_header_is_not_a_preflight() -> None:
     app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
@@ -247,3 +262,208 @@ async def test_allow_headers_reach_a_preflight_and_are_absent_when_unset() -> No
             headers={"origin": ALLOWED, "access-control-request-method": "GET"},
         )
     assert _header(without, "access-control-allow-headers") is None
+
+
+async def test_method_generators_are_compiled_once() -> None:
+    methods = (method for method in ("GET", "POST"))
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_methods=methods))
+
+    async with TestClient(app) as client:
+        response = await client.options(
+            "/thing",
+            headers={"origin": ALLOWED, "access-control-request-method": "POST"},
+        )
+
+    assert response.status == 204
+    assert _header(response, "access-control-allow-methods") == "GET, POST"
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "label"),
+    [
+        ("allow_methods", ["GET\r\nx-injected: yes"], "allow_methods"),
+        ("allow_methods", ["GET, POST"], "allow_methods"),
+        ("allow_headers", ["x-token\r\nx-injected: yes"], "allow_headers"),
+        ("allow_headers", ["x-token, x-other"], "allow_headers"),
+        ("expose_headers", ["x-result\r\nx-injected: yes"], "expose_headers"),
+        ("expose_headers", [None], "expose_headers"),
+    ],
+)
+async def test_serialized_cors_names_must_be_single_http_tokens(
+    argument: str, value: list[str], label: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"{label}.*HTTP token"):
+        CorsPolicy(allow_origins=[ALLOWED], **{argument: value})
+
+
+@pytest.mark.parametrize("allow_credentials", [0, 1, "yes", None])
+async def test_allow_credentials_must_be_an_exact_bool(allow_credentials: Any) -> None:
+    with pytest.raises(TypeError, match="allow_credentials must be bool"):
+        CorsPolicy(allow_origins=[ALLOWED], allow_credentials=allow_credentials)
+
+
+@pytest.mark.parametrize("max_age", [True, False, -1, 1.5, "600", None])
+async def test_max_age_must_be_a_non_negative_integer(max_age: Any) -> None:
+    with pytest.raises(TypeError, match="max_age must be a non-negative int"):
+        CorsPolicy(allow_origins=[ALLOWED], max_age=max_age)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://good.example\\evil.example",
+        "https://b\N{LATIN SMALL LETTER U WITH DIAERESIS}cher.example",
+    ],
+)
+async def test_allowed_origins_refuse_non_browser_serializations(origin: str) -> None:
+    with pytest.raises(ValueError, match=r"invalid CORS origin.*ASCII browser origin"):
+        CorsPolicy(allow_origins=[origin])
+
+
+async def test_allowed_origin_entries_must_be_strings() -> None:
+    with pytest.raises(TypeError, match="allow_origins entries must be str"):
+        CorsPolicy(allow_origins=[None])
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["x-other", "x-token, x-other", "x-token,,x-other"],
+)
+async def test_preflight_refuses_disallowed_or_malformed_requested_headers(
+    requested: str,
+) -> None:
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_headers=["x-token"]))
+
+    async with TestClient(app) as client:
+        response = await client.options(
+            "/thing",
+            headers={
+                "origin": ALLOWED,
+                "access-control-request-method": "GET",
+                "access-control-request-headers": requested,
+            },
+        )
+
+    assert response.status == 403
+    assert response.body == b"disallowed header"
+    assert b"origin" in b",".join(_headers(response, "vary")).lower()
+
+
+async def test_preflight_requested_headers_match_case_insensitively() -> None:
+    app = _app(
+        CorsPolicy(allow_origins=[ALLOWED], allow_headers=["X-Token", "x-other"])
+    )
+
+    async with TestClient(app) as client:
+        response = await client.options(
+            "/thing",
+            headers={
+                "origin": ALLOWED,
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "x-token, X-Other",
+            },
+        )
+
+    assert response.status == 204
+
+
+async def test_wildcard_allow_headers_still_requires_header_name_grammar() -> None:
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_headers=["*"]))
+
+    async with TestClient(app) as client:
+        malformed = await client.options(
+            "/thing",
+            headers={
+                "origin": ALLOWED,
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "x-token\tx-other",
+            },
+        )
+        allowed = await client.options(
+            "/thing",
+            headers={
+                "origin": ALLOWED,
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "x-arbitrary",
+            },
+        )
+
+    assert malformed.status == 403
+    assert allowed.status == 204
+
+
+@pytest.mark.parametrize(
+    "duplicated",
+    ["origin", "access-control-request-method", "access-control-request-headers"],
+)
+async def test_preflight_refuses_duplicate_singleton_cors_headers(duplicated: str) -> None:
+    headers = [
+        ("origin", ALLOWED),
+        ("access-control-request-method", "GET"),
+        ("access-control-request-headers", "x-token"),
+        (
+            duplicated,
+            ALLOWED
+            if duplicated == "origin"
+            else "x-token"
+            if duplicated == "access-control-request-headers"
+            else "GET",
+        ),
+    ]
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_headers=["x-token"]))
+
+    async with TestClient(app) as client:
+        response = await client.options("/thing", headers=headers)
+
+    assert response.status == 400
+    assert response.body == b"duplicate CORS header"
+    assert _header(response, "access-control-allow-origin") is None
+
+
+async def test_simple_request_with_duplicate_origin_is_never_authorized() -> None:
+    app = _app(CorsPolicy(allow_origins=[ALLOWED], allow_credentials=True))
+
+    async with TestClient(app) as client:
+        response = await client.get(
+            "/thing",
+            headers=[("origin", ALLOWED), ("origin", "https://evil.example")],
+        )
+
+    assert response.status == 200
+    assert _header(response, "access-control-allow-origin") is None
+    assert _header(response, "access-control-allow-credentials") is None
+    assert b"origin" in b",".join(_headers(response, "vary")).lower()
+
+
+async def test_duplicate_origin_on_headerless_response_is_safe() -> None:
+    policy = CorsPolicy(allow_origins=[ALLOWED], allow_credentials=True)
+
+    class HeaderlessRequest:
+        method = "GET"
+
+        def header(self, name: str) -> str | None:
+            return ALLOWED if name == "origin" else None
+
+        def _single_header(self, name: bytes) -> bytes | None:
+            raise ValueError("duplicate")
+
+    policy._egress_inplace(HeaderlessRequest(), object())
+
+
+async def test_direct_preflight_stub_needs_no_request_state() -> None:
+    policy = CorsPolicy(allow_origins=[ALLOWED], allow_methods=["GET"])
+
+    class BareRequest:
+        method = "OPTIONS"
+
+        def header(self, name: str) -> str | None:
+            return {
+                "origin": ALLOWED,
+                "access-control-request-method": "DELETE",
+            }.get(name)
+
+    request: Any = BareRequest()
+    response = policy._ingress_sync(request)
+
+    assert response is not None
+    assert response.status == 403

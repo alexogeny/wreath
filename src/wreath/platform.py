@@ -55,6 +55,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
@@ -97,6 +98,27 @@ _MISSING = object()
 
 class PlatformError(Exception):
     """A refusal the operator console makes."""
+
+
+def _require_text(value: object, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise PlatformError(f"{name} must be a non-empty string without control characters")
+    return value
+
+
+def _require_entries(value: object, name: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise PlatformError(f"{name} must be an iterable of non-empty strings, not a string")
+    if not isinstance(value, Iterable):
+        raise PlatformError(f"{name} must be an iterable of non-empty strings")
+    entries: list[str] = []
+    for index, entry in enumerate(value):
+        entries.append(_require_text(entry, f"{name}[{index}]"))
+    return tuple(entries)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +239,8 @@ def impersonate(
     would make "view as this user" a quiet privilege escalation with a friendly
     name.
     """
+    if type(nested) is not bool:
+        raise PlatformError("impersonate() nested must be a bool")
     if nested:
         raise PlatformError(
             "already impersonating: an operator impersonating a user who impersonates "
@@ -227,6 +251,8 @@ def impersonate(
             "impersonate() needs ttl=: a session that does not end is an account "
             "rather than an impersonation"
         )
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+        raise PlatformError("impersonate() ttl must be a positive finite number")
     resolved_ttl = float(ttl)
     if resolved_ttl <= 0 or not math.isfinite(resolved_ttl):
         raise PlatformError("impersonate() ttl must be positive and finite")
@@ -236,15 +262,24 @@ def impersonate(
             "for the same reason, and an unscoped delegation is the user's whole "
             "authority handed over"
         )
-    held = frozenset(user_permissions)
-    wanted = frozenset(scope)
+    resolved_operator = _require_text(operator, "impersonate() operator")
+    resolved_user = _require_text(user, "impersonate() user")
+    resolved_scope = _require_entries(scope, "impersonate() scope")
+    resolved_permissions = _require_entries(user_permissions, "impersonate() user_permissions")
+    held = frozenset(resolved_permissions)
+    wanted = frozenset(resolved_scope)
     permitted = held & wanted
     return Impersonation(
-        operator=operator,
-        user=user,
-        scope=tuple(scope),
+        operator=resolved_operator,
+        user=resolved_user,
+        scope=resolved_scope,
         ttl=resolved_ttl,
-        audit_entry=AuditEntry(actor=operator, subject=user, scope=tuple(scope), ttl=resolved_ttl),
+        audit_entry=AuditEntry(
+            actor=resolved_operator,
+            subject=resolved_user,
+            scope=resolved_scope,
+            ttl=resolved_ttl,
+        ),
         permitted=permitted,
         of_user=held,
     )
@@ -275,7 +310,10 @@ class BulkOutcome:
     """
 
     action: str
-    per_key: dict[str, str]
+    per_key: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "per_key", MappingProxyType(dict(self.per_key)))
 
     @property
     def applied(self) -> tuple[str, ...]:
@@ -293,13 +331,8 @@ class BulkOutcome:
 
 
 def _require_reason(operator: str, reason: str) -> None:
-    if not operator:
-        raise PlatformError("an operator action needs operator=: no anonymous actions")
-    if not reason:
-        raise PlatformError(
-            "an operator action needs reason=: an unexplained suspension is one nobody "
-            "can undo confidently"
-        )
+    _require_text(operator, "an operator action operator=")
+    _require_text(reason, "an operator action reason=")
 
 
 def suspend_tenant(
@@ -362,14 +395,20 @@ def bulk(
 ) -> BulkOutcome:
     """Run one action over many tenants, bounded, reporting per key."""
     _require_reason(operator, reason)
-    if len(keys) > BULK_CEILING:
+    resolved_keys = _require_entries(keys, "bulk() keys")
+    if len(resolved_keys) > BULK_CEILING:
         raise PlatformError(
-            f"{len(keys)} keys is over the {BULK_CEILING} ceiling for one bulk action; "
+            f"{len(resolved_keys)} keys is over the {BULK_CEILING} ceiling for one bulk action; "
             "an unbounded bulk action is a console that can take the fleet down with "
             "one checkbox"
         )
+    seen: set[str] = set()
+    for key in resolved_keys:
+        if key in seen:
+            raise PlatformError(f"duplicate key {key!r} in one bulk action")
+        seen.add(key)
     per_key: dict[str, str] = {}
-    for key in keys:
+    for key in resolved_keys:
         try:
             per_key[key] = "applied" if apply is None else apply(key)
         except Exception as error:  # noqa: BLE001 - recorded per key, never dropped
@@ -403,9 +442,15 @@ class PlatformAdmin:
                 "PlatformAdmin refuses Access.public(): there is no reading of a "
                 "public cross-tenant operator console that is correct"
             )
+        if not callable(getattr(directory, "resolve", None)):
+            raise PlatformError(
+                "PlatformAdmin directory.resolve must be callable so tenant keys are resolved "
+                "through the configured authority"
+            )
+        resolved_operations = _require_entries(operations, "PlatformAdmin operations")
         self._directory = directory
         self._authorize = authorize
-        self._operations = tuple(operations)
+        self._operations = resolved_operations
         self._csrf = csrf
 
     def require_operator(self, principal: Mapping[str, Any]) -> None:

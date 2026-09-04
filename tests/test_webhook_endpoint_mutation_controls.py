@@ -98,6 +98,8 @@ class _Session:
 
 
 class _Inbox:
+    retention_seconds = 30.0
+
     def __init__(self, claim: InboxClaim) -> None:
         self.result = claim
         self.completed = False
@@ -171,19 +173,27 @@ def _envelope(
     )
 
 
-def _dispatch_delivery(*, attempts: int = 1) -> OutboxDelivery:
+def _dispatch_delivery(
+    *,
+    attempts: int = 1,
+    signature_profile: str = "wreath-v2-hmac-sha256",
+    version: str = "1",
+    correlation_id: str | None = None,
+) -> OutboxDelivery:
     return OutboxDelivery(
         "delivery",
         "evt",
         "receiver",
         "created",
         NOW,
-        "1",
+        version,
         b"{}",
         "application/json",
         "key",
         attempts,
         2,
+        correlation_id=correlation_id,
+        signature_profile=signature_profile,
     )
 
 
@@ -219,6 +229,19 @@ def test_source_requires_inbox_and_session_factory_together() -> None:
         _source(session_factory=lambda: _Session())
 
 
+@pytest.mark.parametrize("max_age", [True, "30", 0, float("nan"), float("inf")])
+def test_source_refuses_a_malformed_verifier_replay_window(max_age: object) -> None:
+    verifier = _Verifier(_envelope())
+    verifier.max_age = max_age
+
+    with pytest.raises(ValueError, match="verifier max_age must be positive and finite"):
+        _source(
+            verifier=verifier,
+            inbox=PostgresWebhookInbox(),
+            session_factory=lambda: _Session(),
+        )
+
+
 def test_durable_source_requires_a_nonempty_lease_owner() -> None:
     with pytest.raises(ValueError, match="lease configuration is invalid"):
         _source(
@@ -237,12 +260,28 @@ def test_durable_source_requires_a_positive_lease() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("lease_owner", "lease_seconds"),
+    [(1, 30), ("worker", True), ("worker", "30")],
+)
+def test_durable_source_refuses_malformed_lease_configuration(
+    lease_owner: object, lease_seconds: object
+) -> None:
+    with pytest.raises(ValueError, match="lease configuration is invalid"):
+        _source(
+            inbox=PostgresWebhookInbox(),
+            session_factory=lambda: _Session(),
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+        )
+
+
 def test_nondurable_source_does_not_apply_durable_lease_rules() -> None:
     assert _source(lease_owner="", lease_seconds=0)._inbox is None
 
 
 def test_source_preserves_explicit_replay_store() -> None:
-    replay = LocalReplayStore(max_entries=3, ttl=7)
+    replay = LocalReplayStore(max_entries=3, ttl=30)
 
     source = _source(replay=replay)
 
@@ -481,6 +520,27 @@ async def test_dispatcher_refuses_nonpositive_idle_delay_before_opening_session(
     assert not opened
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idle_delay", [True, "1"])
+async def test_dispatcher_refuses_malformed_idle_delay_before_opening_session(
+    idle_delay: object,
+) -> None:
+    opened = False
+
+    @asynccontextmanager
+    async def session_factory():
+        nonlocal opened
+        opened = True
+        yield _Session()
+
+    with pytest.raises(ValueError, match="idle_delay must be positive and finite"):
+        await WebhookDispatcher(PostgresWebhookOutbox(), {}, worker_id="worker").run(
+            session_factory, asyncio.Event(), idle_delay=idle_delay
+        )
+
+    assert not opened
+
+
 def test_hub_schema_owners_include_only_configured_durable_stores() -> None:
     app = _RouteApp()
     hub = WebhookHub(app, "hub")
@@ -532,6 +592,21 @@ def test_hub_refuses_duplicate_source_and_destination_names() -> None:
         hub.destination("same", client=client, path="/target", signer=signer)
 
 
+def test_hub_refuses_empty_source_and_destination_names() -> None:
+    hub = WebhookHub(_RouteApp(), "hub")
+    with pytest.raises(ValueError, match="webhook source name must be non-empty"):
+        hub.source("", path="/source", verifier=_Verifier(_envelope()))
+
+    with pytest.raises(ValueError, match="webhook destination name must be non-empty"):
+        hub.destination(
+            "",
+            client=_Client(),
+            path="/target",
+            signer=HMACWebhookSigner(KEYS, key_id="key"),
+            relay_id="service",
+        )
+
+
 def test_hub_preserves_custom_relay_id_and_defaults_to_name() -> None:
     hub = WebhookHub(_RouteApp(), "hub")
     client = _Client()
@@ -573,6 +648,37 @@ async def test_dispatcher_refuses_delivered_result_without_status() -> None:
 
     with pytest.raises(RuntimeError, match="requires an HTTP status"):
         await dispatcher.run_once(object())
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_refuses_an_unrecognized_stored_signature_profile() -> None:
+    outbox = _DispatchOutbox(_dispatch_delivery(signature_profile="attacker-profile"))
+    dispatcher = _dispatcher(outbox, WebhookDeliveryResult("delivered", "evt", status=202))
+
+    result = await dispatcher.run_once(object())
+
+    assert result == WebhookDeliveryResult(
+        "failed", "evt", failure="UnsupportedSignatureProfile"
+    )
+    assert outbox.actions == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_refuses_legacy_profile_with_unsigned_metadata() -> None:
+    outbox = _DispatchOutbox(
+        _dispatch_delivery(
+            signature_profile="wreath-v1-hmac-sha256",
+            correlation_id="unsigned-correlation",
+        )
+    )
+    dispatcher = _dispatcher(outbox, WebhookDeliveryResult("delivered", "evt", status=202))
+
+    result = await dispatcher.run_once(object())
+
+    assert result == WebhookDeliveryResult(
+        "failed", "evt", failure="UnsupportedSignatureProfile"
+    )
+    assert outbox.actions == ["failed"]
 
 
 @pytest.mark.asyncio

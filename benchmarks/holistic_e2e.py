@@ -1034,7 +1034,7 @@ _WEBHOOK_HUB = app.webhooks("holistic-operations")
 _WEBHOOK_SOURCE = _WEBHOOK_HUB.source(
     "field-units",
     path="/v1/webhooks/field-observations",
-    verifier=HMACWebhookVerifier(_WEBHOOK_KEYS, max_age=10 * 365 * 24 * 60 * 60),
+    verifier=HMACWebhookVerifier(_WEBHOOK_KEYS, max_age=10 * 60),
     replay=LocalReplayStore(max_entries=100_000, ttl=10 * 60),
 )
 
@@ -1340,7 +1340,7 @@ _WEBHOOK_ENVELOPE = WebhookEnvelope(
     id="field-observation-baseline",
     type="field.observation",
     version="1",
-    timestamp=datetime.datetime(2026, 8, 13, 0, 0, tzinfo=datetime.UTC),
+    timestamp=datetime.datetime.now(datetime.UTC),
     content_type="application/json",
     body=_WEBHOOK_BODY,
 )

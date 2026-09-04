@@ -208,6 +208,224 @@ async def test_stripe_rejects_an_undeclared_https_return_origin_before_io() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["checkout", "portal"])
+async def test_platform_stripe_refuses_ignored_merchant_account_context(
+    operation: str,
+) -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+    backend = stripe(client)
+
+    with pytest.raises(ValueError, match="merchant_account requires Stripe Connect"):
+        if operation == "checkout":
+            await backend.create_checkout(
+                CheckoutRequest(
+                    subject="organization:acme",
+                    items=(CheckoutItem("price_pro"),),
+                    mode="subscription",
+                    success_url="https://app.example/success",
+                    cancel_url="https://app.example/cancel",
+                    reference="01JACCOUNTCONFUSION",
+                    merchant_account="acct_unexpected",
+                ),
+                idempotency_key="01JACCOUNTCONFUSION",
+            )
+        else:
+            await backend.create_portal(
+                PortalRequest(
+                    subject="organization:acme",
+                    customer="cus_acme",
+                    return_url="https://app.example/billing",
+                    reference="01JACCOUNTCONFUSION",
+                    merchant_account="acct_unexpected",
+                ),
+                idempotency_key="01JACCOUNTCONFUSION",
+            )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_platform_destination_portal_refuses_ignored_merchant_account_context() -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+    backend = stripe(
+        client,
+        connect=StripeConnect(
+            DestinationCharges(refunds=DestinationRefunds(False, False))
+        ),
+    )
+
+    with pytest.raises(ValueError, match="merchant_account"):
+        await backend.create_portal(
+            PortalRequest(
+                subject="organization:acme",
+                customer="cus_acme",
+                return_url="https://app.example/billing",
+                reference="01JACCOUNTCONFUSION",
+                merchant_account="acct_unexpected",
+            ),
+            idempotency_key="01JACCOUNTCONFUSION",
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "idempotency_key",
+    ["", "line\r\nbreak", "snowman-\u2603", "x" * 256],
+)
+async def test_stripe_refuses_invalid_idempotency_keys_before_io(
+    idempotency_key: str,
+) -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+
+    with pytest.raises(ValueError, match="idempotency_key"):
+        await stripe(client).create_refund(
+            RefundRequest("pi_1", "01JREFUND"),
+            idempotency_key=idempotency_key,
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stripe_accepts_the_maximum_idempotency_key_length() -> None:
+    key = "x" * 255
+    client = Client(
+        ClientResponse(
+            200,
+            (),
+            b'{"id":"re_1","status":"succeeded","amount":1,"currency":"usd"}',
+            "1.1",
+        )
+    )
+
+    await stripe(client).create_refund(
+        RefundRequest("pi_1", "01JREFUND"),
+        idempotency_key=key,
+    )
+
+    assert client.calls[0]["idempotency_key"] == key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["checkout", "portal", "refund"])
+async def test_stripe_refuses_provider_response_ids_from_another_resource(
+    operation: str,
+) -> None:
+    payloads = {
+        "checkout": {
+            "id": "bps_wrong",
+            "url": "https://checkout.stripe.com/c/pay/1",
+        },
+        "portal": {
+            "id": "cs_wrong",
+            "url": "https://billing.stripe.com/p/session/1",
+        },
+        "refund": {
+            "id": "pi_wrong",
+            "status": "succeeded",
+            "amount": 1,
+            "currency": "usd",
+        },
+    }
+    client = Client(
+        ClientResponse(200, (), json.dumps(payloads[operation]).encode(), "1.1")
+    )
+    backend = stripe(client)
+
+    with pytest.raises(StripeError, match="missing id"):
+        if operation == "checkout":
+            await backend.create_checkout(
+                CheckoutRequest(
+                    subject="organization:acme",
+                    items=(CheckoutItem("price_pro"),),
+                    mode="subscription",
+                    success_url="https://app.example/success",
+                    cancel_url="https://app.example/cancel",
+                    reference="01JRESOURCECONFUSION",
+                ),
+                idempotency_key="01JRESOURCECONFUSION",
+            )
+        elif operation == "portal":
+            await backend.create_portal(
+                PortalRequest(
+                    subject="organization:acme",
+                    customer="cus_acme",
+                    return_url="https://app.example/billing",
+                    reference="01JRESOURCECONFUSION",
+                ),
+                idempotency_key="01JRESOURCECONFUSION",
+            )
+        else:
+            await backend.create_refund(
+                RefundRequest("pi_1", "01JRESOURCECONFUSION"),
+                idempotency_key="01JRESOURCECONFUSION",
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("merchant_account", [cast(Any, 1), "cus_wrong"])
+async def test_stripe_connect_refuses_an_invalid_merchant_account_before_io(
+    merchant_account: Any,
+) -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+    request = CheckoutRequest(
+        subject="organization:acme",
+        items=(CheckoutItem("price_pro"),),
+        mode="subscription",
+        success_url="https://app.example/success",
+        cancel_url="https://app.example/cancel",
+        reference="01JBADACCOUNT",
+        merchant_account=merchant_account,
+    )
+
+    with pytest.raises(ValueError, match="acct_ identifier"):
+        await stripe(client, connect=StripeConnect(DirectCharges())).create_checkout(
+            request,
+            idempotency_key=request.reference,
+        )
+
+    assert client.calls == []
+
+
+def test_stripe_refuses_an_application_fee_beyond_its_amount_range() -> None:
+    with pytest.raises(ValueError, match="application_fee_amount"):
+        DirectCharges(application_fee_amount=100_000_000)
+
+
+@pytest.mark.asyncio
+async def test_stripe_refuses_a_refund_beyond_its_amount_range_before_io() -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+
+    with pytest.raises(ValueError, match="refund amount"):
+        await stripe(client).create_refund(
+            RefundRequest("pi_1", "01JREFUND", Money("USD", 100_000_000)),
+            idempotency_key="01JREFUND",
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stripe_refuses_a_provider_refund_beyond_its_amount_range() -> None:
+    client = Client(
+        ClientResponse(
+            200,
+            (),
+            b'{"id":"re_1","status":"succeeded","amount":100000000,"currency":"usd"}',
+            "1.1",
+        )
+    )
+
+    with pytest.raises(StripeError, match="invalid amount"):
+        await stripe(client).create_refund(
+            RefundRequest("pi_1", "01JREFUND"),
+            idempotency_key="01JREFUND",
+        )
+
+
+@pytest.mark.asyncio
 async def test_connect_fee_mode_mismatch_refuses_before_io() -> None:
     client = Client(ClientResponse(200, (), b"{}", "1.1"))
     request = CheckoutRequest(
@@ -552,6 +770,26 @@ async def test_direct_subscription_does_not_emit_the_payment_fee_field() -> None
             "over HTTPS",
         ),
         (
+            {"id": "cs_1", "url": "https://checkout.stripe.com:bad/c/pay/1"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "cs_1", "url": "https://checkout.stripe.com/c/pay/1#attacker"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "cs_1", "url": "https://checkout.stripe.com\r\n/c/pay/1"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "cs_1", "url": "https://checkout.stripe.com/c/pay/\u0085attacker"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
             {
                 "id": "cs_1",
                 "url": "https://checkout.stripe.com/c/pay/1",
@@ -756,6 +994,21 @@ async def test_destination_portal_without_on_behalf_of_uses_the_platform_account
         ),
         (
             {"id": "bps_1", "url": "https://billing.stripe.com:444/p/session/1"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "bps_1", "url": "https://billing.stripe.com/p/session/1#attacker"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "bps_1", "url": "https://billing.stripe.com\t/p/session/1"},
+            ValueError,
+            "over HTTPS",
+        ),
+        (
+            {"id": "bps_1", "url": "https://billing.stripe.com/p/session/\u009fattacker"},
             ValueError,
             "over HTTPS",
         ),

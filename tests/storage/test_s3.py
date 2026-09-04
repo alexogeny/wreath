@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from typing import Any
 
 import pytest
 
+from wreath import objects
 from wreath.objects import ObjectError, ObjectPath, ObjectStat, S3ObjectStore, file_chunks
 
 
@@ -134,6 +136,56 @@ def test_list_paginates():
     asyncio.run(go())
 
 
+def test_list_refuses_a_repeated_continuation_token_instead_of_looping():
+    calls = 0
+
+    def handler(method, target, body):
+        nonlocal calls
+        calls += 1
+        assert calls <= 2
+        return FakeResp(200, body=_list_page(truncated=True, token="SAME"))
+
+    store, _ = _store(handler)
+
+    async def go():
+        with pytest.raises(ObjectError, match="repeated continuation token"):
+            _ = [item async for item in store.list()]
+
+    asyncio.run(go())
+    assert calls == 2
+
+
+def test_list_allows_a_truncated_page_whose_token_makes_progress():
+    pages = iter(
+        [
+            _list_page(keys=["a"], truncated=True, token="ONE"),
+            _list_page(keys=["b"], truncated=True, token="TWO"),
+            _list_page(keys=["c"]),
+        ]
+    )
+    store, _ = _store(lambda *args: FakeResp(200, body=next(pages)))
+
+    async def go():
+        assert [item.key async for item in store.list()] == ["a", "b", "c"]
+
+    asyncio.run(go())
+
+
+def test_list_stops_on_a_final_page_that_echoes_the_request_token():
+    pages = iter(
+        [
+            _list_page(keys=["a"], truncated=True, token="ONE"),
+            _list_page(keys=["b"], truncated=False, token="ONE"),
+        ]
+    )
+    store, _ = _store(lambda *args: FakeResp(200, body=next(pages)))
+
+    async def go():
+        assert [item.key async for item in store.list()] == ["a", "b"]
+
+    asyncio.run(go())
+
+
 def test_list_refuses_xml_declarations_that_can_define_entities():
     body = b'<!DOCTYPE x [<!ENTITY e "expanded">]><ListBucketResult>&e;</ListBucketResult>'
     store, _ = _store(lambda method, target, payload: FakeResp(200, body=body))
@@ -215,6 +267,18 @@ def test_list_omits_a_prefix_and_delimiter_it_was_not_given():
 
     async def go():
         assert [o.key async for o in store.list()] == ["a.txt"]
+
+    asyncio.run(go())
+
+
+def test_list_refuses_oversized_prefix_and_delimiter_before_signing_or_sending():
+    store, client = _store(lambda *args: FakeResp(200))
+
+    async def go():
+        for arguments in ({"prefix": "é" * 513}, {"delimiter": "x" * 1025}):
+            with pytest.raises(ObjectError, match="must contain at most 1024 UTF-8 bytes"):
+                _ = [item async for item in store.list(**arguments)]
+        assert client.calls == []
 
     asyncio.run(go())
 
@@ -377,12 +441,92 @@ def test_read_stream_windows():
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("byte_range", [(-1, 1), (2, 1), (True, 1), (0, 1 << 63), [0, 1]])
+def test_s3_read_stream_refuses_malformed_byte_ranges_before_a_request(byte_range):
+    store, client = _store(lambda *args: FakeResp(206, body=b"x"))
+
+    async def go():
+        with pytest.raises(ObjectError, match="range must be two integers"):
+            _ = [chunk async for chunk in store.read_stream("k", range=byte_range)]
+        assert client.calls == []
+
+    asyncio.run(go())
+
+
+def test_s3_read_stream_refuses_a_server_that_ignores_the_range():
+    store, _ = _store(lambda *args: FakeResp(200, body=b"the whole object"), window=4)
+
+    async def go():
+        with pytest.raises(ObjectError, match="ignored the requested byte range"):
+            _ = [chunk async for chunk in store.read_stream("k", range=(0, 1))]
+
+    asyncio.run(go())
+
+
+def test_s3_read_stream_refuses_more_bytes_than_the_requested_window():
+    store, _ = _store(lambda *args: FakeResp(206, body=b"five"), window=4)
+
+    async def go():
+        with pytest.raises(ObjectError, match="returned 4 bytes for a 2-byte range"):
+            _ = [chunk async for chunk in store.read_stream("k", range=(0, 1))]
+
+    asyncio.run(go())
+
+
 def test_presign_url_has_signature():
     store, _ = _store(lambda *a: FakeResp(200))
     url = store.url("reports/q3.csv", expires=900)
     assert url.startswith("https://b.s3.us-east-1.amazonaws.com/reports/q3.csv?")
     assert "X-Amz-Signature=" in url and "X-Amz-Credential=" in url
     assert "X-Amz-Expires=900" in url
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("scheme", "javascript", "scheme must be 'http' or 'https'"),
+        ("host", "good.example\r\nX-Evil: yes", "host must be an HTTP authority"),
+        ("host", "user@good.example", "host must be an HTTP authority"),
+        ("access_key", "AK\r\nX-Evil: yes", "access_key must not contain control characters"),
+        ("session_token", "TOK\nX-Evil: yes", "session_token must not contain control characters"),
+    ],
+)
+def test_s3_configuration_refuses_values_that_can_change_url_or_header_framing(
+    option, value, message
+):
+    options: Any = {
+        "bucket": "b",
+        "region": "us-east-1",
+        "access_key": "AKIAEXAMPLE",
+        "secret_key": "secretkey",
+        "host": "b.s3.us-east-1.amazonaws.com",
+    }
+    options[option] = value
+    with pytest.raises(ValueError, match=message):
+        S3ObjectStore(FakeClient(lambda *args: FakeResp(200)), **options)
+
+
+@pytest.mark.parametrize("bucket", [None, 1, "", "bad\nbucket", "a/b", "a?b"])
+def test_s3_configuration_refuses_invalid_bucket_names(bucket):
+    with pytest.raises(ValueError, match="bucket"):
+        S3ObjectStore(
+            FakeClient(lambda *args: FakeResp(200)),
+            bucket=bucket,
+            region="us-east-1",
+            access_key="AKIAEXAMPLE",
+            secret_key="secretkey",
+        )
+
+
+def test_s3_write_refuses_header_line_injection_before_sending():
+    store, client = _store(lambda *args: FakeResp(200))
+
+    async def go():
+        with pytest.raises(ValueError, match="content-type must not contain control characters"):
+            await store.write("key", b"body", content_type="text/plain\r\nX-Evil: yes")
+
+    asyncio.run(go())
+    assert client.calls == []
 
 
 def test_path_ergonomics():
@@ -517,6 +661,51 @@ def _multipart_body():
         yield b"y" * 16
 
     return chunks()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<x></x>",
+        b"<x><UploadId></UploadId></x>",
+        b"<x><UploadId>one</UploadId><UploadId>two</UploadId></x>",
+    ],
+)
+def test_multipart_initiation_requires_one_nonempty_upload_id(body):
+    store, _ = _store(lambda *args: FakeResp(200, body=body))
+
+    with pytest.raises(ObjectError, match="exactly one non-empty UploadId"):
+        asyncio.run(store._initiate("/k", None))
+
+
+@pytest.mark.parametrize("payload", [b"1234", b"123"])
+def test_streaming_write_refuses_more_than_s3s_part_limit_and_aborts(monkeypatch, payload):
+    monkeypatch.setattr(objects, "_S3_MAX_PARTS", 1)
+    aborted = False
+    uploaded_parts = 0
+
+    def handler(method, target, body):
+        nonlocal aborted, uploaded_parts
+        if method == "POST" and "uploads=" in target:
+            return FakeResp(200, body=b"<x><UploadId>UP</UploadId></x>")
+        if method == "PUT":
+            uploaded_parts += 1
+            return FakeResp(200, [(b"etag", b'"part"')])
+        if method == "DELETE":
+            aborted = True
+            return FakeResp(204)
+        raise AssertionError((method, target))
+
+    store, _ = _store(handler)
+    store._part_size = 2
+
+    async def chunks():
+        yield payload
+
+    with pytest.raises(ObjectError, match="limited to 1 parts"):
+        asyncio.run(store.write_stream("k", chunks()))
+    assert aborted
+    assert uploaded_parts == 1
 
 
 def test_a_failed_part_aborts_the_upload():
@@ -739,6 +928,28 @@ def test_a_part_etag_is_carried_into_the_completion_body():
         or '<PartNumber>1</PartNumber><ETag>"part-one"</ETag>' in xml
     ), xml
     assert "<ETag></ETag>" in xml, xml  # the part that answered without one
+
+
+def test_a_part_etag_is_xml_escaped_before_completion():
+    malicious = b'"x</ETag><Part><PartNumber>999</PartNumber>"'
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads=" in target:
+            return FakeResp(200, body=b"<x><UploadId>UP</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", malicious)])
+        if method == "POST" and "uploadId=UP" in target:
+            return FakeResp(200)
+        if method == "HEAD":
+            return FakeResp(200)
+        return FakeResp(400)
+
+    store, client = _store(handler, part_size=5 * 1024 * 1024)
+    asyncio.run(store.write_stream("k", _multipart_body()))
+    complete = next(call for call in client.calls if call[0] == "POST" and "uploadId" in call[1])
+    xml = complete[3]
+    assert xml.count(b"<Part>") == 2
+    assert b"&lt;/ETag&gt;&lt;Part&gt;" in xml
 
 
 def test_exists_reports_an_unexpected_status_rather_than_absence():

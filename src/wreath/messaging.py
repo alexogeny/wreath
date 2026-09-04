@@ -37,6 +37,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from . import _json
@@ -50,6 +51,7 @@ from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import (
+    check_durable_payload,
     check_notify_payload,
     compute_backoff,
     dedup_key,
@@ -138,7 +140,7 @@ class MessageEnvelope(_MessageEnvelopeCache):
             raise ValueError("MessageEnvelope kind must be between 1 and 255 UTF-8 bytes")
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise ValueError("MessageEnvelope version must be an integer >= 1")
-        identifier = self.id or str(uuid.uuid4())
+        identifier = str(uuid.uuid4()) if isinstance(self.id, str) and not self.id else self.id
         _check_envelope_text("id", identifier, 255, required=True)
         _check_envelope_text("correlation_id", self.correlation_id, 255)
         _check_envelope_text("causation_id", self.causation_id, 255)
@@ -177,7 +179,10 @@ class MessageEnvelope(_MessageEnvelopeCache):
             data = _json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
         except TypeError, ValueError:
             return None
-        if not isinstance(data, dict) or data.get("__wreath_message__") != 1:
+        if not isinstance(data, dict):
+            return None
+        marker = data.get("__wreath_message__")
+        if type(marker) is not int or marker != 1:
             return None
         expected = {
             "__wreath_message__",
@@ -283,6 +288,7 @@ class MessageBus:
             raise ValueError("poll_interval and lease must be positive")
         if group_refresh <= 0:
             raise ValueError("group_refresh must be positive")
+        schema = validate_identifier(schema, "schema")
         self._db = database
         self._name = name
         self._schema = schema
@@ -485,8 +491,16 @@ class MessageBus:
         shares one copy of each message); ephemeral ones ignore it.
         """
         _validate_channel(channel)
+        if type(durable) is not bool:
+            raise ValueError("durable must be a boolean")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+            raise ValueError("concurrency must be a positive integer")
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries > 2_147_483_646:
+            raise ValueError(
+                "retries must be a non-negative integer no greater than 2147483646"
+            )
         if retries < 0:
             raise ValueError("retries must be non-negative")
         if durable and not group:
@@ -538,6 +552,10 @@ class MessageBus:
         returning `None` for every legacy payload.
         """
         _validate_channel(channel)
+        if type(durable) is not bool:
+            raise ValueError("durable must be a boolean")
+        if type(require_group) is not bool:
+            raise ValueError("require_group must be a boolean")
         tenant = check_enqueue_tenant(tenant)
         if require_group and not durable:
             raise ValueError(
@@ -551,6 +569,7 @@ class MessageBus:
             body = json.dumps(payload)
             encoded = body.encode("utf-8")
         if durable:
+            check_durable_payload(len(encoded))
             await self._publish_durable(
                 channel,
                 body,
@@ -746,8 +765,13 @@ class MessageBus:
         killed rather than drained never deregistered, and `seen_at` is how that
         becomes visible. Run it from a scheduled job.
         """
-        if unseen_for <= 0:
-            raise ValueError("unseen_for must be positive")
+        if (
+            isinstance(unseen_for, bool)
+            or not isinstance(unseen_for, (int, float))
+            or not isfinite(unseen_for)
+            or unseen_for <= 0
+        ):
+            raise ValueError("unseen_for must be a positive finite number")
         await self._exec(
             f"DELETE FROM {self._groups_table} "
             "WHERE seen_at < now() - ($1 || ' seconds')::interval",
@@ -760,8 +784,13 @@ class MessageBus:
         As with `wreath.jobs.JobRunner.purge`: caller-driven, `done` and
         `dead` only, and the thing that keeps this table from being append-only.
         """
-        if older_than <= 0:
-            raise ValueError("older_than must be positive")
+        if (
+            isinstance(older_than, bool)
+            or not isinstance(older_than, (int, float))
+            or not isfinite(older_than)
+            or older_than <= 0
+        ):
+            raise ValueError("older_than must be a positive finite number")
         await self._exec(
             f"DELETE FROM {self._table} WHERE state IN ('done', 'dead') "
             "AND updated_at < now() - ($1 || ' seconds')::interval",

@@ -3,15 +3,51 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from html import escape
 
-from .._auth.models import qualified_identity_value
+from .._auth.models import qualified_identity_key, qualified_identity_value
 from ..chat import ChatContext, ChatOps, ChatReply
 from .approvals import ApprovalGrant, ApprovalRequest, ApprovalStore
 
 _APPROVE_PREFIX = "wreath:approval:approve:"
 _DENY_PREFIX = "wreath:approval:deny:"
 _APPROVAL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}").fullmatch
+_MARKDOWN = re.compile(r"([\\`*_~\[\]()])")
 _PROVIDERS = frozenset({"discord", "slack", "teams"})
+_MAX_ACTION_BYTES = 512
+_MAX_RESOURCE_BYTES = 1400
+_MAX_DISPLAY_BYTES = 1900
+
+
+def _display_field(value: object, *, label: str, maximum: int) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"chat approval {label} must be a non-empty string")
+    if not value.isprintable():
+        raise ValueError(f"chat approval {label} must be single-line printable text")
+    if len(value) > maximum:
+        raise ValueError(f"chat approval {label} must be at most {maximum} UTF-8 bytes")
+    try:
+        size = len(value.encode())
+    except UnicodeEncodeError as error:
+        raise ValueError(f"chat approval {label} must be valid UTF-8 text") from error
+    if size > maximum:
+        raise ValueError(f"chat approval {label} must be at most {maximum} UTF-8 bytes")
+
+
+def _approval_text(provider: str, action: str, resource: str | None) -> str:
+    text = f"Approve {action}"
+    if resource is not None:
+        text = f"{text} for {resource}"
+    text = f"{text}?"
+    if provider in ("discord", "teams"):
+        text = _MARKDOWN.sub(r"\\\1", text)
+    if provider in ("slack", "teams"):
+        text = escape(text, quote=False)
+    if len(text.encode()) > _MAX_DISPLAY_BYTES:
+        raise ValueError(
+            f"chat approval display must be at most {_MAX_DISPLAY_BYTES} UTF-8 bytes"
+        )
+    return text
 
 
 class ChatApprovalFlow:
@@ -35,8 +71,7 @@ class ChatApprovalFlow:
         action: str,
         handler: Callable[[ChatContext, ApprovalGrant], Awaitable[ChatReply]],
     ) -> None:
-        if not isinstance(action, str) or not action:
-            raise ValueError("chat approved action must be a non-empty string")
+        _display_field(action, label="action", maximum=_MAX_ACTION_BYTES)
         if not callable(handler) or not inspect.iscoroutinefunction(handler):
             raise TypeError("chat approved handler must be an async callable")
         if action in self._approved:
@@ -61,6 +96,10 @@ class ChatApprovalFlow:
         if provider not in _PROVIDERS:
             raise ValueError(f"unsupported chat approval provider {provider!r}")
         self._validate_id(approval_id)
+        _display_field(action, label="action", maximum=_MAX_ACTION_BYTES)
+        if resource is not None:
+            _display_field(resource, label="resource", maximum=_MAX_RESOURCE_BYTES)
+        _approval_text(provider, action, resource)
         tenant, principal_id = self._binding(context)
         request = await self._store.issue(
             approval_id=approval_id,
@@ -118,8 +157,12 @@ class ChatApprovalFlow:
         tenant = getattr(context, "tenant", None)
         identity = getattr(context, "identity", None)
         identity_id = getattr(identity, "id", None)
-        identity_key = qualified_identity_value(
-            str(getattr(identity, "namespace", "")), str(identity_id)
+        identity_namespace = str(getattr(identity, "namespace", ""))
+        identity_value = qualified_identity_value(identity_namespace, str(identity_id))
+        identity_key = qualified_identity_key(
+            str(getattr(identity, "type", "")),
+            identity_namespace,
+            str(identity_id),
         )
         principal = getattr(context, "principal", None)
         principal_identity = getattr(principal, "identity", None)
@@ -129,8 +172,10 @@ class ChatApprovalFlow:
             principal_key = None
         else:
             principal_id = linked_identity_id
-            principal_key = qualified_identity_value(
-                str(getattr(principal_identity, "namespace", "")), str(principal_id)
+            principal_key = qualified_identity_key(
+                str(getattr(principal_identity, "type", "")),
+                str(getattr(principal_identity, "namespace", "")),
+                str(principal_id),
             )
         if not tenant or not identity_id or principal is None:
             raise LookupError("chat approval requires a linked identity")
@@ -140,7 +185,7 @@ class ChatApprovalFlow:
             else str(principal_id) != str(identity_id)
         ):
             raise LookupError("chat approval linked principal does not match its identity")
-        return str(tenant), identity_key
+        return str(tenant), identity_value
 
     @staticmethod
     def _authenticated_at(context: ChatContext) -> float | None:
@@ -158,15 +203,12 @@ class ChatApprovalFlow:
     def _render(self, provider: str, request: ApprovalRequest) -> ChatReply:
         approve = f"{self.approve_prefix}{request.approval_id}"
         deny = f"{self.deny_prefix}{request.approval_id}"
-        text = f"Approve {request.action}"
-        if request.resource is not None:
-            text = f"{text} for {request.resource}"
-        text = f"{text}?"
+        text = _approval_text(provider, request.action, request.resource)
         if provider == "slack":
             return ChatReply.ephemeral(
                 text,
                 blocks=(
-                    {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                    {"type": "section", "text": {"type": "plain_text", "text": text}},
                     {
                         "type": "actions",
                         "elements": (
@@ -185,6 +227,7 @@ class ChatApprovalFlow:
                         ),
                     },
                 ),
+                native={"mrkdwn": False},
             )
         if provider == "teams":
             return ChatReply.card(
@@ -202,6 +245,7 @@ class ChatApprovalFlow:
             text,
             native={
                 "flags": 64,
+                "allowed_mentions": {"parse": []},
                 "components": [
                     {
                         "type": 1,

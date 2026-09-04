@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import time
 
@@ -143,6 +144,22 @@ def test_a_proof_is_bound_to_one_method_and_uri(verifier, signer, method, uri, m
 def test_a_proof_target_must_be_an_absolute_credential_free_uri(verifier, signer, uri) -> None:
     with pytest.raises(DPoPRefusal) as raised:
         verifier.verify(_proof(signer, uri=uri), method="POST", uri=uri, now=1_000)
+    assert raised.value.reason == "invalid-target-uri"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    (
+        "https://server.exa\tmple/token",
+        "https://server.example/token\rignored",
+        "https://server.example/token\nignored",
+        "https://server.example/token\x7fignored",
+        "https://server.example/token\x80ignored",
+    ),
+)
+def test_a_dpop_target_uri_refuses_parser_control_ambiguity(uri: str) -> None:
+    with pytest.raises(DPoPRefusal) as raised:
+        _target_uri(uri, proof=False)
     assert raised.value.reason == "invalid-target-uri"
 
 
@@ -380,7 +397,15 @@ def test_an_unrequested_nonce_does_not_invalidate_a_proof(verifier, signer) -> N
     assert validated.jti == "proof-1"
 
 
-def test_a_requested_nonce_can_match(verifier, signer) -> None:
+def test_a_requested_nonce_can_match(verifier, signer, monkeypatch) -> None:
+    compared: list[tuple[str, str]] = []
+    compare_digest = hmac.compare_digest
+
+    def recording_compare(left: str, right: str) -> bool:
+        compared.append((left, right))
+        return compare_digest(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", recording_compare)
     validated = verifier.verify(
         _proof(signer, nonce="server-nonce"),
         method="POST",
@@ -389,6 +414,7 @@ def test_a_requested_nonce_can_match(verifier, signer) -> None:
         now=1_000,
     )
     assert validated.jti == "proof-1"
+    assert ("server-nonce", "server-nonce") in compared
 
 
 def test_access_token_hash_must_be_a_string(verifier, signer) -> None:

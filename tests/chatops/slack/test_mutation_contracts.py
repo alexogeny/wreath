@@ -12,6 +12,7 @@ from wreath.chat.slack import (
     Slack,
     SlackInstallation,
     SlackRateLimited,
+    SlackResponseURL,
     _command_arguments,
     _DurableEmitter,
     _external_identity_payload,
@@ -245,6 +246,9 @@ def test_form_parser_enforces_the_64_field_cost_bound() -> None:
         "https://user:secret@hooks.slack.com/commands/T123/1/secret",
         "https://hooks.slack.com/commands/T123/1/secret?next=internal",
         "https://hooks.slack.com/commands/T123/1/secret#fragment",
+        "https://hooks.\nslack.com/commands/T123/1/secret",
+        "https://hooks.slack.com/commands/T123/1/se\tcret",
+        "https://hooks.slack.com/commands/T123/1/secret\x7f",
         "https://hooks.slack.com/commands/T123",
         "https://hooks.slack.com/future/T123/1/secret",
     ],
@@ -252,6 +256,35 @@ def test_form_parser_enforces_the_64_field_cost_bound() -> None:
 def test_response_url_refuses_every_credential_suffix_and_path_escape(url: str) -> None:
     with pytest.raises(ValueError, match="response_url"):
         Slack(signing_secret=SIGNING_SECRET).response_url(url, installation="T123")
+
+
+def test_response_url_repr_does_not_expose_capability_secret() -> None:
+    secret = "slack-response-capability-secret"
+    target = SlackResponseURL(
+        f"https://hooks.slack.com/commands/T123/1/{secret}", "T123"
+    )
+
+    assert secret not in repr(target)
+
+
+def test_chat_capability_reprs_do_not_expose_link_or_response_secrets() -> None:
+    secret = "chat-capability-secret"
+    challenge = IdentityLinkChallenge(
+        f"https://app.example/link?state={secret}", secret
+    )
+    context = ChatContext(
+        provider="slack",
+        installation="T123",
+        tenant="slack:T123",
+        actor="U123",
+        conversation="C123",
+        delivery_id="delivery-1",
+        native={},
+        response_url=f"https://hooks.slack.com/commands/T123/1/{secret}",
+    )
+
+    assert secret not in repr(challenge)
+    assert secret not in repr(context)
 
 
 async def test_standard_origin_client_refuses_a_slack_gov_response_url() -> None:

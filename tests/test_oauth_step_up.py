@@ -10,6 +10,7 @@ from wreath import Wreath
 from wreath._auth.requirements import (
     AuthRequirement,
     OAuthStepUpRequirement,
+    PolicyRequirement,
     SetRequirement,
     _merge_oauth_step_up,
     add_authenticated,
@@ -22,7 +23,7 @@ from wreath._auth.requirements import (
     second_factor_age,
 )
 from wreath.auth import BearerTokenBackend, Identity, oauth_step_up, second_factor
-from wreath.authorization import AuthorizationVocabulary
+from wreath.authorization import AuthorizationVocabulary, authorize, permissions, roles
 from wreath.testing import TestClient
 
 
@@ -258,6 +259,55 @@ def test_auth_requirement_admin_level_requires_exact_all_admin_check(
     level: int,
 ) -> None:
     assert AuthRequirement(role_checks=(check,)).access_level == level
+
+
+def test_requirement_collections_are_snapshotted_at_declaration() -> None:
+    checks = [SetRequirement(frozenset({"staff"}), "all")]
+    policies = [PolicyRequirement("Record::read", "Record::*")]
+
+    requirement = AuthRequirement(role_checks=checks, policies=policies)
+    checks.clear()
+    policies.clear()
+
+    assert requirement.role_checks == (SetRequirement(frozenset({"staff"}), "all"),)
+    assert requirement.policies == (PolicyRequirement("Record::read", "Record::*"),)
+
+
+@pytest.mark.parametrize("mode", ["", "ALL", None, 1])
+def test_set_requirement_refuses_unknown_modes(mode: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="mode"):
+        SetRequirement(frozenset({"staff"}), mode)
+
+
+@pytest.mark.parametrize("values", [frozenset(), frozenset({""}), frozenset({1})])
+def test_set_requirement_refuses_invalid_values(values: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="non-empty strings"):
+        SetRequirement(values, "all")
+
+
+@pytest.mark.parametrize("action", [None, True, 1, b"read", ""])
+def test_policy_requirement_refuses_invalid_actions(action: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="action"):
+        PolicyRequirement(action, "Record::*")
+
+
+@pytest.mark.parametrize("field", ["role_checks", "permission_checks", "policies"])
+def test_auth_requirement_refuses_malformed_collection_members(field: str) -> None:
+    with pytest.raises(TypeError, match=field):
+        AuthRequirement(**{field: [object()]})
+
+
+@pytest.mark.parametrize("value", ["", None, True, 1])
+def test_role_and_permission_decorators_refuse_non_names(value: Any) -> None:
+    for decorator in (roles, permissions):
+        with pytest.raises((TypeError, ValueError), match="required|non-empty string"):
+            decorator(value)
+
+
+@pytest.mark.parametrize("action", [None, True, 1, b"read", ""])
+def test_authorize_refuses_non_text_or_empty_actions(action: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="action"):
+        authorize(action=action, resource="Record::*")
 
 
 def test_oauth_step_up_merge_handles_absent_right_requirement() -> None:

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from wreath import Wreath
 from wreath._audit.contrast import (
@@ -16,7 +21,7 @@ from wreath._audit.fix import apply_fixes
 from wreath._audit.middleware import AuditMiddleware
 from wreath._audit.model import Report, Severity
 from wreath._audit.rules import A11Y_RULES, HTML_PERF_RULES
-from wreath._audit.runtime import audit_response
+from wreath._audit.runtime import audit_response, run_runtime_audit
 from wreath._audit.sources import discover_static_dirs, run_audit
 
 
@@ -38,6 +43,96 @@ def _app() -> Wreath:
         return "ok"
 
     return app
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "file:///etc/passwd",
+        "data:text/html,secret",
+        "ftp://127.0.0.1/private",
+        "http:///missing-host",
+        "https://user:password@example.test/",
+    ],
+)
+def test_runtime_audit_refuses_non_http_or_ambiguous_destinations(base_url: str) -> None:
+    with pytest.raises(ValueError, match="absolute http or https URL without credentials"):
+        run_runtime_audit(base_url)
+
+
+def test_runtime_audit_refuses_url_controls_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_io(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("invalid audit URL reached network I/O")
+
+    monkeypatch.setattr("urllib.request.urlopen", unexpected_io)
+
+    with pytest.raises(ValueError, match="absolute http or https URL without credentials"):
+        run_runtime_audit("https://example.test/\nadmin")
+
+    with pytest.raises(ValueError, match="runtime audit path must not contain"):
+        run_runtime_audit("https://example.test", paths=("health\r\nX-Evil: yes",))
+
+
+def test_runtime_audit_accepts_an_absolute_https_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Headers(dict[str, str]):
+        def get_all(self, name: str) -> list[str]:
+            return []
+
+    requested: list[str] = []
+
+    def open_request(request: Any, *, timeout: int) -> Any:
+        requested.append(request.full_url)
+        assert timeout == 10
+        return nullcontext(SimpleNamespace(status=200, headers=Headers(), read=lambda *args: b""))
+
+    monkeypatch.setattr("urllib.request.urlopen", open_request)
+
+    run_runtime_audit("https://example.test/base", paths=("health",))
+
+    assert requested == ["https://example.test/base/health"]
+
+
+def test_runtime_audit_bounds_decompressed_response_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Headers(dict[str, str]):
+        def get_all(self, name: str) -> list[str]:
+            return []
+
+    body = gzip.compress(b"x" * 65)
+    response = SimpleNamespace(
+        status=200,
+        headers=Headers({"Content-Encoding": "gzip"}),
+        read=lambda *args: body,
+    )
+    monkeypatch.setattr("wreath._audit.runtime._MAX_RESPONSE_BYTES", 64, raising=False)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: nullcontext(response))
+
+    with pytest.raises(ValueError, match="response body exceeds 64 bytes"):
+        run_runtime_audit("https://example.test")
+
+
+def test_runtime_audit_bounds_uncompressed_response_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Headers(dict[str, str]):
+        def get_all(self, name: str) -> list[str]:
+            return []
+
+    response = SimpleNamespace(
+        status=200,
+        headers=Headers(),
+        read=lambda *args: b"x" * 65,
+    )
+    monkeypatch.setattr("wreath._audit.runtime._MAX_RESPONSE_BYTES", 64)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: nullcontext(response))
+
+    with pytest.raises(ValueError, match="response body exceeds 64 bytes"):
+        run_runtime_audit("https://example.test")
 
 
 def test_contrast_ratio_math() -> None:

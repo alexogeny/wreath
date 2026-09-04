@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from typing import Any, cast
 
 import pytest
 
@@ -446,10 +447,69 @@ def test_start_is_idempotent() -> None:
 
 def test_construction_validates_tuning() -> None:
     rec = FakeRecorder()
-    with pytest.raises(ValueError):
-        Projector(rec, interval=0)
-    with pytest.raises(ValueError):
-        Projector(rec, max_cells=0)
+    invalid = (
+        {"interval": 0},
+        {"interval": float("nan")},
+        {"interval": float("inf")},
+        {"interval": True},
+        {"max_cells": 0},
+        {"max_cells": float("nan")},
+        {"max_cells": True},
+        {"recent": -1},
+        {"recent": float("inf")},
+        {"failures": -1},
+        {"pending": 0},
+        {"pending": float("nan")},
+        {"max_routes": -1},
+        {"max_routes": float("inf")},
+    )
+    for options in invalid:
+        with pytest.raises((TypeError, ValueError)):
+            Projector(rec, **cast(Any, options))
+
+    with pytest.raises(ValueError, match="recent must be a non-negative integer"):
+        Projector(rec, recent=-1)
+    with pytest.raises(ValueError, match="pending must be a positive integer"):
+        Projector(rec, pending=0)
+
+
+@pytest.mark.parametrize("name", ["on_trace", "on_log", "on_cells"])
+def test_construction_refuses_a_non_callable_sink(name: str) -> None:
+    with pytest.raises(TypeError, match=f"{name} must be callable or None"):
+        Projector(FakeRecorder(), **cast(Any, {name: object()}))
+
+
+def test_snapshot_zero_limits_disclose_no_retained_traces() -> None:
+    rec = FakeRecorder()
+    rec.feed(
+        completion(1, status=500, terminal=TerminalStatus.ERROR),
+        completion(2, status=500, terminal=TerminalStatus.ERROR),
+    )
+    proj = Projector(rec)
+    drain_until_settled(proj)
+
+    snap = proj.snapshot(recent=0, failures=0)
+
+    assert snap.recent == ()
+    assert snap.failures == ()
+
+    assert [trace.request_id for trace in proj.snapshot(recent=1).recent] == [2]
+
+
+@pytest.mark.parametrize("limit", [-1, True, 1.5, float("nan"), float("inf")])
+def test_snapshot_refuses_invalid_limits(limit: object) -> None:
+    proj = Projector(FakeRecorder())
+    with pytest.raises((TypeError, ValueError)):
+        proj.snapshot(recent=cast(Any, limit))
+    with pytest.raises((TypeError, ValueError)):
+        proj.snapshot(failures=cast(Any, limit))
+
+
+@pytest.mark.parametrize("timeout", [-1, 0, True, float("nan"), float("inf")])
+def test_stop_refuses_invalid_timeouts(timeout: object) -> None:
+    proj = Projector(FakeRecorder())
+    with pytest.raises((TypeError, ValueError)):
+        proj.stop(cast(Any, timeout))
 
 
 _flight = pytest.importorskip("wreath._native._flight")

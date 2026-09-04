@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from wreath import _jobcore
@@ -82,6 +84,37 @@ def test_backoff_rejects_bad_attempt_and_kind():
         compute_backoff(0)
     with pytest.raises(ValueError):
         compute_backoff(1, kind="nope")
+
+
+@pytest.mark.parametrize("attempt", [True, 1.5])
+def test_backoff_attempt_is_an_integer(attempt: object):
+    with pytest.raises(ValueError, match="attempt must be an integer"):
+        compute_backoff(cast(Any, attempt))
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("base", float("nan")),
+        ("factor", float("inf")),
+        ("cap", -1.0),
+        ("jitter", 1.1),
+        ("jitter", True),
+    ],
+)
+def test_backoff_refuses_an_invalid_numeric_policy(option: str, value: object):
+    with pytest.raises(ValueError, match=option):
+        compute_backoff(1, **cast(Any, {option: value}))
+
+
+def test_backoff_saturates_at_the_cap_instead_of_overflowing():
+    assert compute_backoff(33, factor=1e308, cap=10.0) == 10.0
+
+
+@pytest.mark.parametrize("source", [float("nan"), float("inf"), -0.1, 1.1])
+def test_backoff_refuses_an_invalid_jitter_source(source: float):
+    with pytest.raises(ValueError, match="jitter source"):
+        compute_backoff(1, jitter=0.2, jitter_fn=lambda: source)
 
 
 def test_dedup_key_stable_and_scoped():

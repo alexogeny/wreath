@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from typing import cast
+
 import pytest
 
 from tests.orm.conftest import User
@@ -42,6 +45,23 @@ def test_a_mapping_is_required() -> None:
         Recode(User.name, mapping={})
 
 
+def test_a_recode_snapshots_its_validated_mapping() -> None:
+    mapping = {"1": "planned"}
+    declaration = Recode(User.name, mapping=mapping)
+
+    mapping["2"] = "done"
+
+    walk = declaration.build()
+    assert walk.work.where.values == ("1",)
+
+
+def test_a_recode_mapping_cannot_change_after_validation() -> None:
+    declaration = Recode(User.name, mapping={"1": "planned"})
+
+    with pytest.raises(TypeError):
+        declaration.mapping["2"] = "done"
+
+
 def test_a_non_invertible_mapping_is_refused() -> None:
     with pytest.raises(DeferredDeclarationError, match="invertible"):
         Recode(User.name, mapping={"1": "done", "2": "done"})
@@ -55,6 +75,39 @@ def test_a_value_on_both_sides_is_refused() -> None:
 def test_a_literal_that_is_not_a_string_or_number_is_refused() -> None:
     with pytest.raises(DeferredDeclarationError, match="string or a number"):
         Recode(User.name, mapping={"1": None}).build()
+
+
+@pytest.mark.parametrize("value", [math.inf, -math.inf, math.nan])
+def test_a_non_finite_recode_number_is_refused(value: float) -> None:
+    with pytest.raises(DeferredDeclarationError, match="finite"):
+        Recode(User.name, mapping={"1": value})
+
+
+def test_a_finite_recode_number_remains_valid() -> None:
+    walk = Recode(User.name, mapping={1.5: 2.5}).build()
+    assert "WHEN 1.5 THEN 2.5" in walk.work.set_["name"].text
+
+
+def test_a_recode_string_cannot_contain_a_postgres_nul() -> None:
+    with pytest.raises(DeferredDeclarationError, match="NUL"):
+        Recode(User.name, mapping={"old": "new\x00value"})
+
+
+def test_an_unhashable_recode_target_gets_a_declaration_error() -> None:
+    with pytest.raises(DeferredDeclarationError, match="string or a number"):
+        Recode(User.name, mapping={"1": []})
+
+
+def test_recode_literals_refuse_builtin_subclasses() -> None:
+    class IntegerSubclass(int):
+        pass
+
+    class StringSubclass(str):
+        pass
+
+    for value in (IntegerSubclass(1), StringSubclass("old")):
+        with pytest.raises(DeferredDeclarationError, match="string or a number"):
+            Recode(User.name, mapping={"old": value})
 
 
 def test_a_quote_in_a_mapping_value_is_escaped() -> None:
@@ -105,6 +158,44 @@ def test_draining_a_column_into_itself_is_refused() -> None:
 def test_a_retype_needs_an_expression() -> None:
     with pytest.raises(DeferredDeclarationError, match="produces the new value"):
         Retype(User.name, into="name_next", using=None)
+
+
+@pytest.mark.parametrize("using", ["", "upper(name)\x00", 1])
+def test_a_retype_requires_an_explicit_sql_expression(using: object) -> None:
+    with pytest.raises(DeferredDeclarationError, match="non-empty SQL string or Sql"):
+        Retype(User.name, into="name_next", using=using)
+
+
+def test_a_retype_refuses_sql_with_a_non_string_expression() -> None:
+    with pytest.raises(DeferredDeclarationError, match="non-empty SQL string or Sql"):
+        Retype(User.name, into="name_next", using=Sql(cast(str, 1)))
+
+
+def test_a_retype_preserves_an_explicit_sql_value() -> None:
+    expression = Sql("upper(name)")
+    walk = Retype(User.name, into="name_next", using=expression).build()
+    assert walk.work.set_["name_next"] is expression
+
+
+def test_a_retype_refuses_a_non_string_column_name() -> None:
+    with pytest.raises(DeferredDeclarationError, match="plain column name"):
+        Retype(User.name, into=123, using="upper(name)")
+
+
+def test_a_retype_refuses_string_subclasses_at_sql_boundaries() -> None:
+    class StringSubclass(str):
+        pass
+
+    with pytest.raises(DeferredDeclarationError, match="plain column name"):
+        Retype(User.name, into=StringSubclass("name_next"), using="upper(name)")
+    with pytest.raises(DeferredDeclarationError, match="non-empty SQL string or Sql"):
+        Retype(User.name, into="name_next", using=StringSubclass("upper(name)"))
+
+
+@pytest.mark.parametrize("name", ["123", "Name", "na-me", "é"])
+def test_a_retype_refuses_non_plain_postgres_column_names(name: str) -> None:
+    with pytest.raises(DeferredDeclarationError, match="plain SQL identifier"):
+        Retype(User.name, into=name, using="upper(name)")
 
 
 def test_a_retype_has_nothing_to_scan_and_says_why() -> None:

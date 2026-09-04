@@ -22,11 +22,11 @@ _ROOT = Path(__file__).parents[2]
 
 @pytest.mark.parametrize(
     "script",
-    sorted((_ROOT / "tests" / "security").glob("poc_*.py")),
-    ids=lambda path: path.stem.removeprefix("poc_"),
+    sorted((_ROOT / "tests").glob("*/regression_*.py")),
+    ids=lambda path: f"{path.parent.name}-{path.stem.removeprefix('regression_')}",
 )
 @requires_metal
-def test_standalone_proof_of_concept_is_a_collected_regression(script: Path) -> None:
+def test_standalone_domain_regression_is_collected(script: Path) -> None:
     environment = os.environ.copy()
     completed = subprocess.run(
         [sys.executable, str(script)],

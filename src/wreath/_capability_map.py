@@ -42,6 +42,8 @@ class CapabilityMap:
         overflow: Overflow = "evict",
         expire_at_deadline: bool = True,
     ) -> None:
+        if overflow not in ("evict", "earliest", "refuse"):
+            raise ValueError("CapabilityMap overflow must be 'evict', 'earliest', or 'refuse'")
         self._table = KV(max_entries=max_entries, ttl=ttl, clock=clock)
         self._clock = clock
         self._last_now = clock()

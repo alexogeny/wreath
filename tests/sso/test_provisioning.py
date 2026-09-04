@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from wreath.sso import AttributeMapping, JitProvisioning, SsoRefusal
@@ -10,6 +12,20 @@ def test_the_declared_attributes_are_read_out() -> None:
     values = mapping.apply({"mail": "ana@acme.example", "displayName": "Ana"})
     assert values["email"] == "ana@acme.example"
     assert values["display_name"] == "Ana"
+
+
+def test_saml_single_value_attribute_tuples_are_unwrapped() -> None:
+    values = AttributeMapping(email="mail").apply({"mail": ("ana@acme.example",)})
+
+    assert values["email"] == "ana@acme.example"
+
+
+@pytest.mark.parametrize("email", [(), ("first@example.com", "second@example.com"), ("",)])
+def test_an_ambiguous_or_blank_email_identity_is_refused(email: tuple[str, ...]) -> None:
+    with pytest.raises(SsoRefusal) as raised:
+        AttributeMapping(email="mail").apply({"mail": email})
+
+    assert raised.value.reason == "attribute-cardinality"
 
 
 def test_an_undeclared_attribute_is_refused_rather_than_dropped() -> None:
@@ -32,6 +48,20 @@ def test_provisioning_creates_the_account_and_the_membership_together() -> None:
     assert result.user_id
     assert result.membership == ("member",)
     assert result.created is True
+
+
+@pytest.mark.parametrize(
+    ("organization", "email"),
+    [("", "ana@acme.example"), ("acme", ""), ("acme", "   ")],
+)
+def test_provisioning_refuses_an_empty_account_identity(organization: str, email: str) -> None:
+    with pytest.raises(SsoRefusal) as raised:
+        JitProvisioning(roles=("member",)).provision(
+            organization=organization,
+            email=email,
+        )
+
+    assert raised.value.reason == "invalid-identity"
 
 
 def test_provisioning_adopts_an_existing_account_rather_than_duplicating() -> None:
@@ -60,6 +90,21 @@ def test_a_role_outside_the_declared_vocabulary_is_refused_at_configuration() ->
     with pytest.raises(SsoRefusal, match="not in the declared role vocabulary") as raised:
         JitProvisioning(roles=("owner",), vocabulary=("member", "admin"))
     assert raised.value.reason == "role-outside-vocabulary"
+
+
+def test_role_configuration_refuses_text_used_as_an_iterable() -> None:
+    with pytest.raises(SsoRefusal) as raised:
+        JitProvisioning(roles="admin", vocabulary="admin")
+
+    assert raised.value.reason == "invalid-role-configuration"
+
+
+def test_second_factor_configuration_requires_a_boolean() -> None:
+    invalid: Any = 1
+    with pytest.raises(SsoRefusal) as raised:
+        JitProvisioning(roles=("member",), require_second_factor=invalid)
+
+    assert raised.value.reason == "invalid-second-factor"
 
 
 def test_a_declared_role_is_accepted() -> None:

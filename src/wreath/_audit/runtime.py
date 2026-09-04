@@ -8,6 +8,7 @@ it is testable against a synthetic or in-process response without a socket.
 from __future__ import annotations
 
 import gzip
+import io
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
@@ -16,6 +17,8 @@ from urllib.parse import urlsplit
 from .dom import parse_html
 from .model import Finding, Report, Severity
 from .rules import A11Y_RULES, HTML_PERF_RULES, RESPONSE_SECURITY_RULES, ResponseView
+
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def _header_findings(headers: dict[str, str], surface: str):
@@ -90,17 +93,55 @@ def audit_response(
         report.extend(rule(view))
 
 
+def _has_url_controls(value: str) -> bool:
+    return any(
+        character == "\\" or ord(character) <= 32 or ord(character) == 127
+        for character in value
+    )
+
+
 def run_runtime_audit(base_url: str, paths: Iterable[str] = ("/",)) -> Report:
-    scheme = urlsplit(base_url).scheme or "http"
+    if _has_url_controls(base_url):
+        raise ValueError(
+            "runtime audit base_url must be an absolute http or https URL without credentials"
+        )
+    try:
+        parsed = urlsplit(base_url)
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError(
+            "runtime audit base_url must be an absolute http or https URL without credentials"
+        ) from error
+    if (
+        parsed.scheme not in ("http", "https")
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError(
+            "runtime audit base_url must be an absolute http or https URL without credentials"
+        )
+    scheme = parsed.scheme
     report = Report()
     for path in paths:
+        if not isinstance(path, str) or _has_url_controls(path):
+            raise ValueError("runtime audit path must not contain controls or backslashes")
         url = base_url.rstrip("/") + "/" + path.lstrip("/")
         request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})  # noqa: S310 (operator-supplied URL)
         try:
             with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 (operator-supplied URL)
-                raw = response.read()
-                if "gzip" in response.headers.get("Content-Encoding", ""):
-                    raw = gzip.decompress(raw)
+                raw = response.read(_MAX_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"runtime audit response body exceeds {_MAX_RESPONSE_BYTES} bytes"
+                    )
+                if "gzip" in response.headers.get("Content-Encoding", "").lower():
+                    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+                        raw = compressed.read(_MAX_RESPONSE_BYTES + 1)
+                    if len(raw) > _MAX_RESPONSE_BYTES:
+                        raise ValueError(
+                            f"runtime audit response body exceeds {_MAX_RESPONSE_BYTES} bytes"
+                        )
                 headers = dict(response.headers.items())
                 # get_all preserves every Set-Cookie; the dict above keeps only one.
                 set_cookies = response.headers.get_all("Set-Cookie") or ()

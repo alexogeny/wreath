@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging as stdlib_logging
+from collections.abc import Iterator
 
 import pytest
 
@@ -11,7 +12,7 @@ from wreath._otlp import build_logs_request
 
 
 @pytest.fixture
-def runtime() -> log.LogRuntime:
+def runtime() -> Iterator[log.LogRuntime]:
     with log.testing_runtime(level=log.TRACE):
         yield log.installed()
 
@@ -25,14 +26,19 @@ def _site() -> log.LogEvent:
     )
 
 
-def _record(site: log.LogEvent, **kw: object) -> ProjectedLog:
+def _record(site: log.LogEvent, *, trace_id: int = 0, span_id: int = 0) -> ProjectedLog:
     cell = fs.LogCell(
         request_id=1,
         site_id=site.site_id,
         severity=fs.Severity.WARN,
         args=(fs.LogArg.integer(17), fs.LogArg.text("orders")),
     )
-    return ProjectedLog(cell=cell, observed_unix_nano=1_700_000_000_000_000_000, **kw)  # type: ignore[arg-type]
+    return ProjectedLog(
+        cell=cell,
+        trace_id=trace_id,
+        span_id=span_id,
+        observed_unix_nano=1_700_000_000_000_000_000,
+    )
 
 
 def test_an_empty_batch_builds_an_empty_request(runtime: log.LogRuntime) -> None:
@@ -163,7 +169,7 @@ def test_the_bridge_carries_the_logger_name_as_the_event(
     logger = stdlib_logging.getLogger("asyncpg.pool")
     logger.propagate = False
     logger.setLevel(stdlib_logging.DEBUG)
-    with log.stdlib_bridge(logger) as records:
+    with log.stdlib_bridge(logger, raw_messages=True) as records:
         logger.info("connection established")
     assert log.render(records[0]).endswith("connection established")
 
@@ -174,7 +180,7 @@ def test_the_bridge_hashes_the_formatted_message_by_default(
     logger = stdlib_logging.getLogger("test.bridge.redact")
     logger.propagate = False
     logger.setLevel(stdlib_logging.DEBUG)
-    with log.stdlib_bridge(logger, raw_messages=False) as records:
+    with log.stdlib_bridge(logger) as records:
         logger.info("token=hunter2")
     assert b"hunter2" not in records[0].encode()
 
@@ -187,6 +193,38 @@ def test_the_bridge_detaches_on_exit(runtime: log.LogRuntime) -> None:
         logger.info("inside")
     logger.info("outside")
     assert len(records) == 1
+
+
+def test_bridge_activation_keeps_request_correlation_in_sync() -> None:
+    logger = stdlib_logging.getLogger("test.bridge.inactive")
+    logger.propagate = False
+    logger.setLevel(stdlib_logging.INFO)
+    previous = log.install(log.LogRuntime())
+    try:
+        assert not log.active()
+        with log.stdlib_bridge(logger) as records:
+            assert log.active()
+            context = type("Context", (), {"_flight_request_id": lambda self: 37})()
+            scope = log.begin_request_for(context)
+            assert scope is not None
+            logger.info("inside request")
+            scope.finish(promoted=False)
+        assert not log.active()
+    finally:
+        log.install(previous)
+    assert [cell.request_id for cell in records] == [37]
+
+
+def test_nested_bridges_keep_the_logger_registered_until_the_outer_exit(
+    runtime: log.LogRuntime,
+) -> None:
+    logger = stdlib_logging.getLogger("test.bridge.nested")
+    with log.stdlib_bridge(logger):
+        assert logger.name in log.bridged_loggers()
+        with log.stdlib_bridge(logger):
+            assert logger.name in log.bridged_loggers()
+        assert logger.name in log.bridged_loggers()
+    assert logger.name not in log.bridged_loggers()
 
 
 def test_the_bridge_records_join_the_current_request(runtime: log.LogRuntime) -> None:
@@ -330,21 +368,21 @@ def test_dropped_siblings_is_exported_only_when_something_was_dropped(
 ) -> None:
     site = _site()
 
-    def attributes(cell_kw: dict[str, object]) -> dict[str, object]:
+    def attributes(dropped_siblings: int = 0) -> dict[str, object]:
         cell = fs.LogCell(
             request_id=1,
             site_id=site.site_id,
             severity=fs.Severity.WARN,
             args=(fs.LogArg.integer(17), fs.LogArg.text("orders")),
-            **cell_kw,  # type: ignore[arg-type]
+            dropped_siblings=dropped_siblings,
         )
         record = ProjectedLog(cell=cell, observed_unix_nano=1_700_000_000_000_000_000)
         built = build_logs_request([record], registry=runtime.registry)
         entry = built["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
         return {a["key"]: a["value"] for a in entry["attributes"]}
 
-    quiet = attributes({})
+    quiet = attributes()
     assert "wreath.dropped_siblings" not in quiet
 
-    throttled = attributes({"dropped_siblings": 12})
+    throttled = attributes(12)
     assert throttled["wreath.dropped_siblings"] == {"intValue": "12"}

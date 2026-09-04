@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Literal
 
 Mode = Literal["all", "any"]
@@ -59,11 +60,23 @@ class SetRequirement:
     values: frozenset[str]
     mode: Mode
 
+    def __post_init__(self) -> None:
+        if self.mode not in ("all", "any"):
+            raise ValueError("set requirement mode must be 'all' or 'any'")
+        values = frozenset(self.values)
+        if not values or any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("set requirement values must be non-empty strings")
+        object.__setattr__(self, "values", values)
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyRequirement:
     action: str
     resource: object | Callable[[Any], object]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.action, str) or not self.action:
+            raise ValueError("policy requirement action must be a non-empty string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +216,27 @@ class AuthRequirement:
     oauth_step_up: OAuthStepUpRequirement | None = None
     #: Whether the endpoint explicitly admits anonymous callers.
     public: bool = False
+
+    def __post_init__(self) -> None:
+        role_checks = tuple(self.role_checks)
+        permission_checks = tuple(self.permission_checks)
+        policies = tuple(self.policies)
+        if any(not isinstance(check, SetRequirement) for check in role_checks):
+            raise TypeError("role_checks must contain SetRequirement values")
+        if any(not isinstance(check, SetRequirement) for check in permission_checks):
+            raise TypeError("permission_checks must contain SetRequirement values")
+        if any(not isinstance(policy, PolicyRequirement) for policy in policies):
+            raise TypeError("policies must contain PolicyRequirement values")
+        object.__setattr__(self, "role_checks", role_checks)
+        object.__setattr__(self, "permission_checks", permission_checks)
+        object.__setattr__(self, "policies", policies)
+        window = self.second_factor
+        if window is None:
+            return
+        if isinstance(window, bool) or not isinstance(window, int | float):
+            raise TypeError("second_factor must be a positive finite number")
+        if not isfinite(window) or window <= 0:
+            raise ValueError("second_factor must be a positive finite number")
 
     @property
     def needs_backend(self) -> bool:

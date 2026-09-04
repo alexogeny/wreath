@@ -55,6 +55,14 @@ from wreath.subscriptions import (
 )
 
 
+def test_hosted_session_reprs_do_not_expose_capability_urls() -> None:
+    secret = "hosted-session-capability-secret"
+    url = f"https://billing.example/session/{secret}"
+
+    assert secret not in repr(CheckoutSession("provider", "checkout-1", url))
+    assert secret not in repr(PortalSession("provider", "portal-1", url))
+
+
 class Backend:
     provider = "test"
 

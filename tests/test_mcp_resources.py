@@ -204,6 +204,32 @@ async def test_a_reader_that_says_no_is_not_a_reader_that_broke() -> None:
         assert mcp.resource_errors == 2
 
 
+async def test_a_reader_refusal_obeys_the_serialized_result_limit() -> None:
+    app = Wreath()
+    mcp = MCP(app, name="x", version="1.0.0", limits=MCPLimits(max_result_bytes=64))
+
+    @mcp.resource("camera://gone", description="A camera that was retired.")
+    async def gone(request) -> str:
+        raise ToolError("private-detail-" * 32)
+
+    async with TestClient(app) as client:
+        session, _ = await initialize(client)
+        body = await call(
+            client,
+            session,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "camera://gone"},
+            },
+        )
+
+    assert body["error"]["code"] == -32002
+    assert "private-detail" not in body["error"]["message"]
+    assert "serialized result limit" in body["error"]["message"]
+
+
 async def test_a_resource_is_gated_on_its_own_uri() -> None:
     seen: list[object] = []
 

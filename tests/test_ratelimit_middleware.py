@@ -222,6 +222,38 @@ def test_rate_limit_refuses_non_finite_policy_bounds(kwargs: dict[str, float]) -
         RateLimitPolicy(**kwargs)
 
 
+@pytest.mark.parametrize("field", ["limit", "window", "cost", "burst"])
+@pytest.mark.parametrize("value", [True, False, "1", 1.5])
+def test_rate_limit_policy_bounds_must_be_numbers(field: str, value: Any) -> None:
+    kwargs: dict[str, Any] = {"limit": 10, "window": 60.0, "cost": 1.0, "burst": 10}
+    kwargs[field] = value
+
+    expected = "integer" if field in {"limit", "burst"} else "number"
+    if value == 1.5 and field in {"window", "cost"}:
+        RateLimitPolicy(**kwargs)
+        return
+    with pytest.raises(ValueError, match=expected):
+        RateLimitPolicy(**kwargs)
+
+
+def test_rate_limit_integer_bounds_must_fit_the_float_bucket_domain() -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        RateLimitPolicy(limit=10**1000, burst=1)
+    with pytest.raises(ValueError, match="positive and finite"):
+        RateLimitPolicy(limit=1, burst=10**1000)
+
+
+def test_rate_limit_burst_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="burst must be positive"):
+        RateLimitPolicy(limit=1, burst=-1)
+
+
+@pytest.mark.parametrize("max_entries", [0, True, 1.5, "10"])
+def test_memory_store_ceiling_must_be_a_positive_integer(max_entries: Any) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        MemoryRateLimitStore(max_entries=max_entries)
+
+
 def test_a_store_cannot_be_shared_between_conflicting_policies() -> None:
     store = MemoryRateLimitStore()
     RateLimitPolicy(limit=10, window=60.0, store=store)
@@ -427,6 +459,48 @@ class _AsyncOnlyStore:
         return 0.0
 
 
+@pytest.mark.parametrize("decision", [-1.0, float("nan"), float("inf"), "1"])
+async def test_an_invalid_store_decision_cannot_admit_work(decision: Any) -> None:
+    class InvalidStore(_DualPathStore):
+        def try_acquire(self, _key: str, _cost: float, _now: float) -> float:
+            return decision
+
+    policy = RateLimitPolicy(limit=1, window=60.0, store=InvalidStore())
+
+    with pytest.raises(RuntimeError, match="non-negative finite"):
+        await policy.admit_key("work")
+
+
+@pytest.mark.parametrize("decision", [-1.0, float("nan"), float("inf"), "1"])
+def test_an_invalid_local_store_decision_cannot_admit_requests(decision: Any) -> None:
+    from wreath.request import Request
+
+    class InvalidStore(_DualPathStore):
+        def try_acquire(self, _key: str, _cost: float, _now: float) -> Any:
+            return decision
+
+    policy = RateLimitPolicy(limit=1, window=60.0, store=InvalidStore())
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+
+    with pytest.raises(RuntimeError, match="non-negative finite"):
+        policy._before_local_sync(request)
+
+
+@pytest.mark.parametrize("decision", [-1.0, float("nan"), float("inf"), "1"])
+async def test_an_invalid_remote_store_decision_cannot_admit_requests(decision: Any) -> None:
+    from wreath.request import Request
+
+    class InvalidStore(_AsyncOnlyStore):
+        async def acquire(self, _key: str, _cost: float, _now: float) -> Any:
+            return decision
+
+    policy = RateLimitPolicy(limit=1, window=60.0, store=InvalidStore())
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+
+    with pytest.raises(RuntimeError, match="non-negative finite"):
+        await policy._before_remote(request)
+
+
 async def test_non_http_work_uses_the_store_path_bound_at_construction() -> None:
     local = _DualPathStore()
     local_policy = RateLimitPolicy(limit=1, window=60.0, store=local)
@@ -557,6 +631,16 @@ def test_an_exemption_that_says_no_still_limits() -> None:
     assert policy._identify(request) == "203.0.113.7"
 
 
+@pytest.mark.parametrize("verdict", [1, "yes", object()])
+def test_only_an_exact_true_exemption_bypasses_the_limit(verdict: Any) -> None:
+    from wreath.request import Request
+
+    policy = RateLimitPolicy(limit=1, window=60.0, exempt=lambda request: verdict)
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+
+    assert policy._identify(request) == "203.0.113.7"
+
+
 def test_principal_key_names_the_caller_rather_than_the_address() -> None:
     from wreath.policy import principal_key
     from wreath.request import Request
@@ -570,7 +654,7 @@ def test_principal_key_names_the_caller_rather_than_the_address() -> None:
     # read-only on purpose, and going around it here is the point -- the test
     # needs an identified request without standing up authentication.
     request._identity = _Identity()  # type: ignore[assignment]
-    assert principal_key(request) == "user:alice"
+    assert principal_key(request) == "4:user0:alice"
     # And the fallback still answers for an anonymous one, so this pins the
     # branch rather than replacing it.
     assert principal_key(Request(_scope(("203.0.113.7", 5000)), _receive_body)) == (

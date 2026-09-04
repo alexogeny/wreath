@@ -57,6 +57,28 @@ async def test_wrong_preface_is_rejected(make_driver):
     assert d.transport.closed or d.transport.aborted
 
 
+@pytest.mark.parametrize(
+    "first_frame",
+    [
+        pytest.param(support.encode_ping(b"12345678"), id="ping"),
+        pytest.param(
+            support.encode_frame(support.SETTINGS, support.FLAG_ACK, 0),
+            id="settings-ack",
+        ),
+    ],
+)
+async def test_client_preface_requires_initial_settings(make_driver, first_frame):
+    app, captured = scope_capture_app()
+    d = make_driver(app)
+    d.connection_made()
+    await d.settle()
+    await d.feed_and_settle(support.PREFACE + first_frame)
+    goaways = [f for f in d.frames() if f.type == support.GOAWAY]
+    assert goaways
+    assert support.parse_goaway(goaways[-1].payload)[1] == support.PROTOCOL_ERROR
+    assert not captured
+
+
 @pytest.mark.parametrize("split", list(range(1, 9)))
 async def test_frame_header_split_at_every_byte(make_driver, split):
     app, captured = scope_capture_app()
@@ -179,3 +201,50 @@ async def test_ping_on_nonzero_stream_is_protocol_error(make_driver):
     assert goaways
     _, code, _ = support.parse_goaway(goaways[-1].payload)
     assert code == support.PROTOCOL_ERROR
+
+
+@pytest.mark.parametrize(
+    ("stream_id", "payload", "expected"),
+    [
+        pytest.param(1, b"\x00" * 8, support.PROTOCOL_ERROR, id="nonzero-stream"),
+        pytest.param(0, b"\x00" * 7, support.FRAME_SIZE_ERROR, id="short-payload"),
+    ],
+)
+async def test_malformed_goaway_is_connection_error(
+    make_driver, stream_id, payload, expected
+):
+    d = make_driver(ok_app)
+    await d.preface()
+    await d.feed_and_settle(support.encode_frame(support.GOAWAY, 0, stream_id, payload))
+    goaways = [f for f in d.frames() if f.type == support.GOAWAY]
+    assert goaways
+    _, code, _ = support.parse_goaway(goaways[-1].payload)
+    assert code == expected
+
+
+async def test_priority_on_connection_stream_is_protocol_error(make_driver):
+    d = make_driver(ok_app)
+    await d.preface()
+    await d.feed_and_settle(support.encode_frame(support.PRIORITY, 0, 0, b"\x00" * 5))
+    goaways = [f for f in d.frames() if f.type == support.GOAWAY]
+    assert goaways
+    _, code, _ = support.parse_goaway(goaways[-1].payload)
+    assert code == support.PROTOCOL_ERROR
+
+
+@pytest.mark.parametrize("frame_type", [support.PRIORITY, support.HEADERS])
+async def test_stream_cannot_depend_on_itself(make_driver, frame_type):
+    d = make_driver(ok_app)
+    await d.preface()
+    dependency = (1).to_bytes(4, "big") + b"\x0f"
+    flags = 0
+    payload = dependency
+    if frame_type == support.HEADERS:
+        flags = support.FLAG_PRIORITY | support.FLAG_END_HEADERS | support.FLAG_END_STREAM
+        payload += support.HpackEncoder().encode(support.request_headers())
+    await d.feed_and_settle(support.encode_frame(frame_type, flags, 1, payload))
+    frames = d.frames()
+    resets = [f for f in frames if f.type == support.RST_STREAM and f.stream_id == 1]
+    assert resets
+    assert int.from_bytes(resets[-1].payload, "big") == support.PROTOCOL_ERROR
+    assert not [f for f in frames if f.type == support.GOAWAY]

@@ -646,6 +646,12 @@ def test_tls_alpn_excludes_the_quic_protocol(monkeypatch: pytest.MonkeyPatch) ->
     assert context.advertised == ["h2", "http/1.1"]
 
 
+def test_tls_config_repr_does_not_expose_private_key_password() -> None:
+    password = "private-key-password-value"
+
+    assert password not in repr(TLSConfig("cert.pem", "key.pem", password))
+
+
 @pytest.mark.asyncio
 async def test_requesting_unbuilt_http3_fails_without_downgrade(
     monkeypatch: pytest.MonkeyPatch,

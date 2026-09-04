@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from wreath.flags import FeatureFlags, FlagView, evaluate_rule
+from wreath.flags import FeatureFlags, FlagView, _subject, evaluate_rule
 
 
 def test_boolean_rules():
@@ -20,6 +20,13 @@ def test_percentage_is_deterministic():
     assert evaluate_rule("0%", "beta", ctx) is False
     assert evaluate_rule("100%", "beta", ctx) is True
     assert evaluate_rule("1000", "beta", ctx) is False
+
+
+def test_percentage_refuses_nonfinite_and_out_of_range_thresholds():
+    context = {"id": "user-123"}
+
+    for value in ("inf%", "-inf%", "nan%", "-1%", "100.1%"):
+        assert evaluate_rule(value, "beta", context) is False
 
 
 def test_percentage_spreads_subjects():
@@ -44,3 +51,18 @@ def test_flag_view():
     assert view.enabled("new_ui") is True
     assert "new_ui" in view
     assert "missing" not in view
+
+
+def test_flag_view_snapshots_its_bucketing_context():
+    flags = FeatureFlags({"rollout": "50%"})
+    context = {"id": "original"}
+    view = FlagView(flags, context)
+    expected = view.enabled("rollout")
+
+    context["id"] = "replacement"
+
+    assert view.enabled("rollout") is expected
+
+
+def test_internal_identity_key_takes_precedence_over_legacy_provider_subject():
+    assert _subject({"id": "legacy", "_wreath_identity_key": "typed"}) == "typed"

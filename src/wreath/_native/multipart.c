@@ -3,6 +3,26 @@
 
 #define multipart_span_tape 64  /* parts between cancellation checks */
 
+static int
+multipart_boundary_valid(const uint8_t *value, Py_ssize_t length)
+{
+    if (length < 1 || length > 70 || value[length - 1] == ' ') return 0;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        uint8_t byte = value[index];
+        if ((byte >= '0' && byte <= '9') ||
+            (byte >= 'A' && byte <= 'Z') ||
+            (byte >= 'a' && byte <= 'z')) continue;
+        switch (byte) {
+            case '\'': case '(': case ')': case '+': case '_': case ',':
+            case '-': case '.': case '/': case ':': case '=': case '?': case ' ':
+                continue;
+            default:
+                return 0;
+        }
+    }
+    return 1;
+}
+
 /* Limits are Py_ssize_t counts of bytes/parts; a negative value means the caller
  * imposes no limit. Every check is written as a subtraction against a known
  * non-negative bound rather than an addition, so no length arithmetic here can
@@ -61,6 +81,13 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end,
         uint8_t *name_buf = (uint8_t *)PyBytes_AS_STRING(name);
         for (Py_ssize_t i = 0; i < name_len; i++) {
             uint8_t c = p[i];
+            if (!wreath_ascii_token[c]) {
+                PyErr_SetString(PyExc_ValueError,
+                                "multipart header name must be an ASCII token");
+                Py_DECREF(name);
+                Py_DECREF(headers);
+                return NULL;
+            }
             name_buf[i] = (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
         }
         const uint8_t *value_start = colon + 1;
@@ -71,6 +98,14 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end,
         while (value_end > value_start &&
                (value_end[-1] == ' ' || value_end[-1] == '\t')) {
             value_end--;
+        }
+        if (wreath_value_run((const char *)value_start, value_end - value_start) !=
+            value_end - value_start) {
+            PyErr_SetString(PyExc_ValueError,
+                            "multipart header value contains a control octet");
+            Py_DECREF(name);
+            Py_DECREF(headers);
+            return NULL;
         }
         if (*disposition == NULL && multipart_ascii_equal(
                 p, name_len, "content-disposition", 19)) {
@@ -112,8 +147,17 @@ multipart_disposition_param(const uint8_t *value, Py_ssize_t length,
     if (value == NULL) return Py_NewRef(Py_None);
     const uint8_t *end = value + length;
     for (const uint8_t *fragment = value; fragment <= end;) {
-        const uint8_t *fragment_end = memchr(fragment, ';', (size_t)(end - fragment));
-        if (fragment_end == NULL) fragment_end = end;
+        const uint8_t *fragment_end = fragment;
+        int quoted = 0;
+        int escaped = 0;
+        while (fragment_end < end) {
+            uint8_t byte = *fragment_end;
+            if (escaped) escaped = 0;
+            else if (quoted && byte == '\\') escaped = 1;
+            else if (byte == '"') quoted = !quoted;
+            else if (byte == ';' && !quoted) break;
+            fragment_end++;
+        }
         const uint8_t *start = multipart_trim_start(fragment, fragment_end);
         const uint8_t *trimmed_end = multipart_trim_end(start, fragment_end);
         const uint8_t *equals = memchr(start, '=', (size_t)(trimmed_end - start));
@@ -123,39 +167,26 @@ multipart_disposition_param(const uint8_t *value, Py_ssize_t length,
             const uint8_t *raw_end = multipart_trim_end(raw_start, trimmed_end);
             if (multipart_ascii_equal(
                     start, key_end - start, parameter, parameter_length)) {
-                if (raw_end - raw_start >= 2 && raw_start[0] == '"' &&
-                    raw_end[-1] == '"') {
+                if (raw_start < raw_end && raw_start[0] == '"') {
+                    if (raw_end - raw_start < 2 || raw_end[-1] != '"' || quoted) {
+                        PyErr_Format(PyExc_ValueError,
+                                     "malformed multipart %s parameter", parameter);
+                        return NULL;
+                    }
                     raw_start++;
                     raw_end--;
                     Py_ssize_t raw_length = raw_end - raw_start;
                     uint8_t *unescaped = raw_length != 0
                         ? PyMem_Malloc((size_t)raw_length) : NULL;
                     if (raw_length != 0 && unescaped == NULL) return PyErr_NoMemory();
-                    Py_ssize_t first_length = 0;
+                    Py_ssize_t decoded_length = 0;
                     for (Py_ssize_t index = 0; index < raw_length; index++) {
-                        if (raw_start[index] == '\\' && index + 1 < raw_length &&
-                            raw_start[index + 1] == '"') {
-                            unescaped[first_length++] = '"';
-                            index++;
-                        }
-                        else {
-                            unescaped[first_length++] = raw_start[index];
-                        }
-                    }
-                    Py_ssize_t second_length = 0;
-                    for (Py_ssize_t index = 0; index < first_length; index++) {
-                        if (unescaped[index] == '\\' && index + 1 < first_length &&
-                            unescaped[index + 1] == '\\') {
-                            unescaped[second_length++] = '\\';
-                            index++;
-                        }
-                        else {
-                            unescaped[second_length++] = unescaped[index];
-                        }
+                        if (raw_start[index] == '\\' && index + 1 < raw_length) index++;
+                        unescaped[decoded_length++] = raw_start[index];
                     }
                     PyObject *decoded = PyUnicode_DecodeUTF8(
                         raw_length != 0 ? (const char *)unescaped : "",
-                        second_length, "replace");
+                        decoded_length, "replace");
                     PyMem_Free(unescaped);
                     return decoded;
                 }
@@ -169,11 +200,28 @@ multipart_disposition_param(const uint8_t *value, Py_ssize_t length,
     return Py_NewRef(Py_None);
 }
 
+static int
+multipart_disposition_is_form_data(const uint8_t *value, Py_ssize_t length)
+{
+    if (value == NULL) return 1;
+    const uint8_t *end = value + length;
+    const uint8_t *separator = memchr(value, ';', (size_t)length);
+    if (separator == NULL) separator = end;
+    const uint8_t *start = multipart_trim_start(value, separator);
+    const uint8_t *trimmed_end = multipart_trim_end(start, separator);
+    return multipart_ascii_equal(start, trimmed_end - start, "form-data", 9);
+}
+
 static PyObject *
 multipart_materialize_part(PyObject *part_type, PyObject *headers,
                            const uint8_t *content_start, Py_ssize_t content_length,
                            const uint8_t *disposition, Py_ssize_t disposition_length)
 {
+    if (!multipart_disposition_is_form_data(disposition, disposition_length)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "multipart Content-Disposition must be form-data");
+        return NULL;
+    }
     PyObject *values[4] = {NULL};
     values[0] = multipart_disposition_param(disposition, disposition_length, "name", 4);
     values[1] = values[0] != NULL
@@ -201,6 +249,12 @@ wreath_multipart_part_info(PyObject *Py_UNUSED(self), PyObject *arg)
     const uint8_t *start = block.buf;
     PyObject *headers = parse_part_headers(
         start, start + block.len, &disposition, &disposition_length);
+    if (headers != NULL &&
+        !multipart_disposition_is_form_data(disposition, disposition_length)) {
+        Py_CLEAR(headers);
+        PyErr_SetString(PyExc_ValueError,
+                        "multipart Content-Disposition must be form-data");
+    }
     PyObject *name = headers != NULL
         ? multipart_disposition_param(disposition, disposition_length, "name", 4)
         : NULL;
@@ -241,10 +295,10 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
             PyExc_ValueError, "part_factory and part_type are mutually exclusive");
         return NULL;
     }
-    if (boundary.len < 1 || boundary.len > 70) {
+    if (!multipart_boundary_valid(boundary.buf, boundary.len)) {
         PyBuffer_Release(&body);
         PyBuffer_Release(&boundary);
-        PyErr_SetString(PyExc_ValueError, "boundary must be 1-70 bytes");
+        PyErr_SetString(PyExc_ValueError, "boundary must be 1-70 permitted bytes");
         return NULL;
     }
 
@@ -294,6 +348,16 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
         /* After a boundary: "--" closes the stream; otherwise expect CRLF
          * (optionally preceded by linear whitespace padding). */
         if (end - pos >= 2 && pos[0] == '-' && pos[1] == '-') {
+            const uint8_t *close_end = pos + 2;
+            while (close_end < end && (*close_end == ' ' || *close_end == '\t')) {
+                close_end++;
+            }
+            if (close_end != end &&
+                (end - close_end < 2 || close_end[0] != '\r' || close_end[1] != '\n')) {
+                PyErr_SetString(PyExc_ValueError,
+                                "malformed multipart closing boundary");
+                goto fail;
+            }
             break;
         }
         while (pos < end && (*pos == ' ' || *pos == '\t')) {
@@ -323,7 +387,16 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
             body_start = headers_end + 4;
         }
 
-        const uint8_t *next = wreath_memmem(body_start, end - body_start, delim, delim_len);
+        const uint8_t *next = body_start;
+        for (;;) {
+            next = wreath_memmem(next, end - next, delim, delim_len);
+            if (next == NULL) break;
+            const uint8_t *suffix = next + delim_len;
+            if ((end - suffix >= 2 && suffix[0] == '\r' && suffix[1] == '\n') ||
+                (end - suffix >= 2 && suffix[0] == '-' && suffix[1] == '-') ||
+                (suffix < end && (*suffix == ' ' || *suffix == '\t'))) break;
+            next++;
+        }
         if (next == NULL) {
             PyErr_SetString(PyExc_ValueError, "unterminated multipart part");
             goto fail;
@@ -404,6 +477,7 @@ enum {
     MP_BOUNDARY,
     MP_HEADERS,
     MP_BODY,
+    MP_CLOSE,
     MP_EPILOGUE,
 };
 
@@ -420,6 +494,7 @@ typedef struct {
     Py_ssize_t part_size;
     int state;
     int closed;
+    int preamble_start;
 } WreathMultipartStream;
 
 static int
@@ -436,9 +511,9 @@ multipart_stream_init(PyObject *object, PyObject *args, PyObject *kwargs)
             args, kwargs, "y*nnnO:MultipartStreamParser", keywords,
             &boundary, &self->max_parts, &self->max_header_bytes,
             &self->max_part_bytes, &error_type)) return -1;
-    if (boundary.len < 1 || boundary.len > 70) {
+    if (!multipart_boundary_valid(boundary.buf, boundary.len)) {
         PyBuffer_Release(&boundary);
-        PyErr_SetString(PyExc_ValueError, "boundary must be 1-70 bytes");
+        PyErr_SetString(PyExc_ValueError, "boundary must be 1-70 permitted bytes");
         return -1;
     }
     self->opening = PyBytes_FromStringAndSize(NULL, boundary.len + 2);
@@ -455,6 +530,7 @@ multipart_stream_init(PyObject *object, PyObject *args, PyObject *kwargs)
     wreath_buffer_init(&self->buffer);
     self->limit_error = Py_NewRef(error_type);
     self->state = MP_PREAMBLE;
+    self->preamble_start = 1;
     return 0;
 }
 
@@ -555,22 +631,41 @@ multipart_stream_feed(PyObject *object, PyObject *chunk)
         if (self->state == MP_PREAMBLE) {
             const uint8_t *opening = (const uint8_t *)PyBytes_AS_STRING(self->opening);
             Py_ssize_t opening_len = PyBytes_GET_SIZE(self->opening);
-            const uint8_t *found = wreath_memmem(data, available, opening, opening_len);
-            if (found == NULL) {
-                Py_ssize_t safe = available - opening_len + 1;
-                if (safe > 0) cursor += safe;
+            const uint8_t *delimiter =
+                (const uint8_t *)PyBytes_AS_STRING(self->delimiter);
+            Py_ssize_t delimiter_len = PyBytes_GET_SIZE(self->delimiter);
+            const uint8_t *found = NULL;
+            Py_ssize_t matched_length = delimiter_len;
+            if (self->preamble_start && available >= opening_len &&
+                memcmp(data, opening, (size_t)opening_len) == 0) {
+                found = data;
+                matched_length = opening_len;
+            }
+            else if (self->preamble_start && available < opening_len &&
+                     memcmp(data, opening, (size_t)available) == 0) {
                 break;
             }
-            cursor += (found - data) + opening_len;
+            else {
+                found = wreath_memmem(data, available, delimiter, delimiter_len);
+            }
+            if (found == NULL) {
+                Py_ssize_t safe = available - delimiter_len + 1;
+                if (safe > 0) {
+                    cursor += safe;
+                    self->preamble_start = 0;
+                }
+                break;
+            }
+            cursor += (found - data) + matched_length;
+            self->preamble_start = 0;
             self->state = MP_BOUNDARY;
         }
         else if (self->state == MP_BOUNDARY) {
             Py_ssize_t whitespace = 0;
             if (available >= 2 && data[0] == '-' && data[1] == '-') {
-                self->closed = 1;
-                self->state = MP_EPILOGUE;
-                cursor = total;
-                break;
+                cursor += 2;
+                self->state = MP_CLOSE;
+                continue;
             }
             while (whitespace < available &&
                    (data[whitespace] == ' ' || data[whitespace] == '\t')) whitespace++;
@@ -627,10 +722,37 @@ multipart_stream_feed(PyObject *object, PyObject *chunk)
             const uint8_t *delimiter =
                 (const uint8_t *)PyBytes_AS_STRING(self->delimiter);
             Py_ssize_t delimiter_len = PyBytes_GET_SIZE(self->delimiter);
-            const uint8_t *found = wreath_memmem(
-                data, available, delimiter, delimiter_len);
+            const uint8_t *end = data + available;
+            const uint8_t *found = data;
+            for (;;) {
+                found = wreath_memmem(found, end - found, delimiter, delimiter_len);
+                if (found == NULL) break;
+                const uint8_t *suffix = found + delimiter_len;
+                Py_ssize_t suffix_length = end - suffix;
+                if (suffix_length == 0 ||
+                    (suffix_length == 1 && (suffix[0] == '-' || suffix[0] == '\r')) ||
+                    (suffix_length >= 2 && suffix[0] == '\r' && suffix[1] == '\n') ||
+                    (suffix_length >= 2 && suffix[0] == '-' && suffix[1] == '-') ||
+                    (suffix_length >= 1 && (suffix[0] == ' ' || suffix[0] == '\t'))) {
+                    break;
+                }
+                Py_ssize_t rejected = (found - data) + 1;
+                if (multipart_part_data(self, events, data, rejected) < 0) goto error;
+                cursor += rejected;
+                data += rejected;
+                available -= rejected;
+                found = data;
+            }
             if (found != NULL) {
                 Py_ssize_t body_length = found - data;
+                Py_ssize_t suffix_length = end - (found + delimiter_len);
+                if (suffix_length == 0 ||
+                    (suffix_length == 1 &&
+                     (found[delimiter_len] == '-' || found[delimiter_len] == '\r'))) {
+                    if (multipart_part_data(self, events, data, body_length) < 0) goto error;
+                    cursor += body_length;
+                    break;
+                }
                 if (multipart_part_data(self, events, data, body_length) < 0 ||
                     multipart_event(events, 2, NULL, 0) < 0) goto error;
                 cursor += body_length + delimiter_len;
@@ -642,6 +764,23 @@ multipart_stream_feed(PyObject *object, PyObject *chunk)
                 if (multipart_part_data(self, events, data, safe) < 0) goto error;
                 cursor += safe;
             }
+            break;
+        }
+        else if (self->state == MP_CLOSE) {
+            Py_ssize_t whitespace = 0;
+            while (whitespace < available &&
+                   (data[whitespace] == ' ' || data[whitespace] == '\t')) whitespace++;
+            if (whitespace == available) break;
+            if (available - whitespace < 2 && data[whitespace] == '\r') break;
+            if (available - whitespace < 2 || data[whitespace] != '\r' ||
+                data[whitespace + 1] != '\n') {
+                PyErr_SetString(PyExc_ValueError,
+                                "malformed multipart closing boundary");
+                goto error;
+            }
+            self->closed = 1;
+            self->state = MP_EPILOGUE;
+            cursor = total;
             break;
         }
         else break;
@@ -658,6 +797,16 @@ static PyObject *
 multipart_stream_finish(PyObject *object, PyObject *Py_UNUSED(ignored))
 {
     WreathMultipartStream *self = (WreathMultipartStream *)object;
+    if (self->state == MP_CLOSE) {
+        const uint8_t *data = (const uint8_t *)wreath_buffer_data(&self->buffer);
+        Py_ssize_t length = wreath_buffer_size(&self->buffer);
+        Py_ssize_t index = 0;
+        while (index < length && (data[index] == ' ' || data[index] == '\t')) index++;
+        if (index == length) {
+            self->closed = 1;
+            self->state = MP_EPILOGUE;
+        }
+    }
     if (!self->closed) {
         PyErr_SetString(PyExc_ValueError, "unterminated multipart part");
         return NULL;

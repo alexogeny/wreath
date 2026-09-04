@@ -93,6 +93,11 @@ class TestFraming:
     def test_an_empty_message_still_carries_a_prefix(self):
         assert frame_message(b"") == b"\x00\x00\x00\x00\x00"
 
+    @pytest.mark.parametrize("compressed", [0, 1, "yes", None])
+    def test_the_compressed_flag_requires_an_exact_boolean(self, compressed):
+        with pytest.raises(TypeError, match="compressed must be a boolean"):
+            frame_message(b"payload", compressed=compressed)
+
     def test_a_frame_round_trips_through_the_unframer(self):
         unframer = Unframer()
         assert unframer.feed(frame_message(b"hello")) == [b"hello"]
@@ -146,6 +151,12 @@ class TestFraming:
         Unframer(encoding="identity")
 
 
+@pytest.mark.parametrize("limit", [-1, True, 1.5, "10", None])
+def test_a_service_refuses_an_invalid_message_limit_at_declaration(limit) -> None:
+    with pytest.raises(ValueError, match="max_message_bytes must be a non-negative integer"):
+        GrpcService("test.Service", max_message_bytes=limit)
+
+
 class TestTimeouts:
     @pytest.mark.parametrize(
         ("value", "seconds"),
@@ -179,7 +190,9 @@ class TestTimeouts:
                 yield Pong(text="unused")
 
         monkeypatch.setattr(asyncio, "timeout", unexpected_timeout)
-        assert [item async for item in grpc_module._frames(no_results(), None, "identity")] == []
+        assert [
+            item async for item in grpc_module._frames(no_results(), None, "identity", Pong)
+        ] == []
 
     @pytest.mark.asyncio
     async def test_streaming_deadline_covers_waiting_for_the_next_result(self):
@@ -192,7 +205,9 @@ class TestTimeouts:
         with pytest.raises(GrpcError) as caught:
             [
                 item
-                async for item in grpc_module._frames(delayed_result(), 0.001, "identity")
+                async for item in grpc_module._frames(
+                    delayed_result(), 0.001, "identity", Pong
+                )
             ]
         assert caught.value.status is Status.DEADLINE_EXCEEDED
 
@@ -222,6 +237,16 @@ class TestStatusMapping:
     def test_ok_is_zero_because_success_still_carries_a_status(self):
         assert int(Status.OK) == 0
 
+    @pytest.mark.parametrize("status", [0, 7, True, "PERMISSION_DENIED"])
+    def test_an_explicit_error_requires_a_status_member(self, status):
+        with pytest.raises(TypeError, match="status must be a Status member"):
+            GrpcError(status, "denied")
+
+    @pytest.mark.parametrize("message", [b"denied", 7, None])
+    def test_an_explicit_error_requires_a_text_message(self, message):
+        with pytest.raises(TypeError, match="message must be a string"):
+            GrpcError(Status.PERMISSION_DENIED, message)
+
 
 class TestGrpcMessageEncoding:
     def test_ordinary_text_is_left_alone(self):
@@ -250,6 +275,53 @@ class TestServiceDeclaration:
     def test_a_service_name_that_looks_like_a_path_is_refused(self):
         with pytest.raises(ValueError, match="bare protobuf name"):
             GrpcService("/t.S")
+
+    @pytest.mark.parametrize("name", ["t/S", "t..S", "t.9Service", "t\nS", 7, True])
+    def test_a_service_name_must_be_a_qualified_protobuf_identifier(self, name):
+        with pytest.raises(ValueError, match="protobuf name"):
+            GrpcService(name)
+
+    def test_a_method_name_must_be_a_single_protobuf_identifier(self):
+        service = GrpcService("t.S")
+
+        async def invalid(request, msg):
+            return Pong(text="unreachable")
+
+        invalid.__name__ = "Bad/Method"
+        with pytest.raises(ValueError, match="method name.*protobuf identifier"):
+            service.unary(request=Ping, response=Pong)(invalid)
+
+    def test_a_unary_handler_must_return_the_declared_message_type(self):
+        from wreath import Wreath
+        from wreath.protobuf import encode
+
+        service = GrpcService("t.S")
+
+        @service.unary(request=Ping, response=Pong)
+        async def M(request, msg):
+            return Ping(text="wrong descriptor")
+
+        app = Wreath()
+        app.include_router(service.router())
+        sent = _drive(app, "/t.S/M", frame_message(encode(Ping(text="request"))))
+        trailers = _grpc_status_headers(sent)
+        assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
+        assert b"Pong" in trailers[b"grpc-message"]
+
+    @pytest.mark.asyncio
+    async def test_a_streaming_handler_must_yield_the_declared_message_type(self):
+        async def wrong_messages():
+            yield Ping(text="wrong descriptor")
+
+        with pytest.raises(GrpcError) as caught:
+            [
+                frame
+                async for frame in grpc_module._frames(
+                    wrong_messages(), None, "identity", Pong
+                )
+            ]
+        assert caught.value.status is Status.INTERNAL
+        assert "Pong" in caught.value.message
 
     def test_every_method_becomes_one_post_route_at_the_grpc_path(self):
         service = GrpcService("camera.Tracker")

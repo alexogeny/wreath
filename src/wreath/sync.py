@@ -93,9 +93,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Final
 
-from ._auth.models import qualified_identity_value
+from ._auth.models import qualified_identity_key, qualified_identity_value
 from ._json import dumps as _json_dumps
 from ._livedoc import DEFAULT_KEEPALIVE, LiveDocument, Subscription
 from ._native import _core
@@ -125,6 +126,12 @@ __all__ = [
 DEFAULT_MAX_ROWS: Final = 5000
 
 
+def _keepalive_seconds(value: Any) -> float:
+    if type(value) not in (int, float) or not isfinite(value) or value <= 0:
+        raise ValueError("keepalive must be finite and positive")
+    return float(value)
+
+
 class SyncError(RuntimeError):
     """A shape or a subscription that cannot be honoured."""
 
@@ -148,7 +155,9 @@ def _row_key(value: Any) -> str:
     protocol carries keys to a client that has no tuples.
     """
     if isinstance(value, tuple):
-        return ":".join(str(part) for part in value)
+        if len(value) == 1:
+            return str(value[0])
+        return "".join(f"{len(text)}:{text}" for text in map(str, value))
     return str(value)
 
 
@@ -303,8 +312,9 @@ class Sync:
         max_per_principal: int = 4,
         keepalive: float = DEFAULT_KEEPALIVE,
     ) -> None:
-        if max_rows <= 0:
-            raise ValueError("Sync(max_rows=...) must be positive")
+        if type(max_rows) is not int or max_rows <= 0:
+            raise ValueError("Sync(max_rows=...) must be a positive integer")
+        keepalive = _keepalive_seconds(keepalive)
         self._model = model
         self._native_snapshot = (
             key is None
@@ -383,15 +393,17 @@ class Sync:
         `limit` is normally read off the `Select` the function returns, which is
         checked once here so the error lands at declaration. Pass it explicitly
         for a shape that cannot be built without a live principal -- the bound
-        is then a promise the caller makes, and the evaluation still truncates
-        to it.
+        is then a promise the caller makes. Every evaluation verifies that its
+        query carries an equal or tighter limit before issuing database I/O.
         """
         if name in self._shapes:
             raise SyncError(f"shape {name!r} is already declared on {self._model.__name__}")
         if limit is None:
             limit = _declared_limit(name, build, self._model)
-        if limit <= 0:
-            raise UnboundedShape(f"shape {name!r} must declare a positive limit")
+        if type(limit) is not int or limit <= 0:
+            raise UnboundedShape(
+                f"shape {name!r} must declare a positive limit as an integer"
+            )
         if limit > self._max_rows:
             raise UnboundedShape(
                 f"shape {name!r} declares limit={limit}, above this Sync's "
@@ -413,27 +425,43 @@ class Sync:
     async def evaluate(self, session: Any, name: str, principal: Any) -> Snapshot:
         """Run a shape now and return the whole current answer.
 
-        Truncated to the shape's declared bound even if the query somehow
-        returns more -- a `Select` can be rebuilt by the shape function with a
-        different limit on a later call, and the memory bound must not depend on
-        the shape function staying honest between evaluations.
+        The rebuilt query is refused before database I/O if it drops or widens
+        the declared limit. The returned sequence is still truncated in case a
+        custom session violates the query contract.
         """
         shape = self.get(name)
-        rows = await session.fetch(shape.evaluate(principal))
+        select = shape.evaluate(principal)
+        runtime_limit = getattr(select, "limit_", None)
+        if (
+            type(runtime_limit) is not int
+            or runtime_limit <= 0
+            or runtime_limit > shape.limit
+        ):
+            raise SyncError(
+                f"shape {name!r} returned runtime limit={runtime_limit!r}; "
+                f"it must be a positive integer no greater than its declared "
+                f"limit={shape.limit}"
+            )
+        rows = await session.fetch(select)
         return self._snapshot(rows[: shape.limit])
 
     def _snapshot(self, rows: Sequence[Any]) -> Snapshot:
         if self._native_snapshot and rows:
             payload, keys = _storage.sync_snapshot_rows(rows, SyncError)
-            return Snapshot(payload, keys)
-        payload: list[Mapping[str, Any]] = []
-        keys: list[str] = []
-        for row in rows:
-            values = _loaded_values(row)
-            key = _row_key(self._key(row))
-            keys.append(key)
-            payload.append({"key": key, "values": values})
-        return Snapshot(tuple(payload), tuple(keys))
+        else:
+            payload = []
+            key_list: list[str] = []
+            for row in rows:
+                values = _loaded_values(row)
+                key = _row_key(self._key(row))
+                key_list.append(key)
+                payload.append({"key": key, "values": values})
+            keys = tuple(key_list)
+            payload = tuple(payload)
+        duplicate = _core.first_duplicate(keys)
+        if duplicate is not None:
+            raise SyncError(f"duplicate row key {duplicate!r} in sync snapshot")
+        return Snapshot(payload, keys)
 
     def subscribe(self, principal: Any, name: str) -> SyncSubscription | None:
         """A subscription over one shape, or `None` when the registry is full.
@@ -508,6 +536,13 @@ def _principal_id(principal: Any) -> str:
     for attribute in ("sub", "id"):
         value = getattr(principal, attribute, None)
         if value is not None:
+            identity_type = getattr(principal, "type", None)
+            if identity_type is not None:
+                return qualified_identity_key(
+                    str(identity_type),
+                    str(getattr(principal, "namespace", "")),
+                    str(value),
+                )
             return qualified_identity_value(
                 str(getattr(principal, "namespace", "")), str(value)
             )
@@ -616,10 +651,11 @@ async def sync_events(
     (`stale_evaluations()`) so a shape that has been broken since deploy is
     visible as a number rather than as silence.
     """
-    if keepalive is None:
-        keepalive = subscription.keepalive
     sync = subscription.sync
     try:
+        if keepalive is None:
+            keepalive = subscription.keepalive
+        keepalive = _keepalive_seconds(keepalive)
         async with session_for() as session:
             first = await subscription.snapshot(session)
         yield ServerSentEvent(data=_as_text(first.as_dict()), event="snapshot")

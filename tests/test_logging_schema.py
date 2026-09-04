@@ -46,8 +46,14 @@ def test_log_cell_without_a_request_is_valid() -> None:
 
 def test_log_cell_decode_rejects_a_short_buffer() -> None:
     cell = fs.LogCell(request_id=1, site_id=1, severity=fs.Severity.INFO)
-    with pytest.raises(fs.SchemaError, match="needs 64 bytes"):
+    with pytest.raises(fs.SchemaError, match="needs exactly 64 bytes"):
         fs.LogCell.decode(cell.encode()[:32])
+
+
+def test_log_cell_decode_rejects_a_tailed_buffer() -> None:
+    cell = fs.LogCell(request_id=1, site_id=1, severity=fs.Severity.INFO)
+    with pytest.raises(fs.SchemaError, match="exactly 64 bytes"):
+        fs.LogCell.decode(cell.encode() + b"another-cell")
 
 
 def test_log_cell_decode_rejects_another_kind() -> None:
@@ -87,6 +93,13 @@ def test_log_cell_decode_rejects_an_unknown_argument_tag() -> None:
     raw = bytearray(cell.encode())
     raw[32] = 250  # the first argument's type tag
     with pytest.raises(fs.SchemaError, match="argument type"):
+        fs.LogCell.decode(bytes(raw))
+
+
+def test_log_cell_decode_rejects_unknown_flags() -> None:
+    raw = bytearray(fs.LogCell(request_id=1, site_id=1, severity=fs.Severity.INFO).encode())
+    raw[2:4] = (1 << 15).to_bytes(2, "little")
+    with pytest.raises(fs.SchemaError, match="unknown log flags"):
         fs.LogCell.decode(bytes(raw))
 
 

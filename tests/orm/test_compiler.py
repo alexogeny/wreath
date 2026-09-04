@@ -7,6 +7,7 @@ from wreath.orm import compiler as compiler_module
 from wreath.orm.compiler import (
     _collect_binds,
     compile_count,
+    compile_declared_values,
     compile_delete_many,
     compile_insert_many,
     compile_rebind,
@@ -14,7 +15,7 @@ from wreath.orm.compiler import (
     compile_update_many,
     shape_of,
 )
-from wreath.orm.errors import DeclarationError, ORMError
+from wreath.orm.errors import DeclarationError, ORMError, RegistryError
 from wreath.orm.expressions import InExpr, ValueExpr
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
@@ -123,6 +124,11 @@ def test_an_in_expression_rebinds_a_placeholder_among_fixed_values() -> None:
     rebound = rebind({"user_id": 7})
     assert [value.value for value in rebound.values] == [7, 9]
     assert found == [marker]
+
+
+def test_declared_values_preserve_the_offset_presence_shape() -> None:
+    assert compile_declared_values(User.select().offset(6), Placeholder)({}) == (6,)
+    assert compile_declared_values(User.select(), Placeholder)({}) == ()
 
 
 def test_where_fields_builds_plain_runtime_equalities(registry: Registry) -> None:
@@ -399,6 +405,46 @@ def test_the_plan_cache_is_bounded_and_evicts_the_oldest() -> None:
     for size in (1, 2, 3):
         compile_select(registry, User.select(User.id).where(User.id.in_(list(range(size)))))
     assert registry.cached_plan_count == 2
+
+
+@pytest.mark.parametrize("option", ["query_cache_size", "query_cache_bytes"])
+@pytest.mark.parametrize("value", [True, 0, -1])
+def test_registry_cache_limits_refuse_nonpositive_or_boolean_integers(
+    option: str, value: object
+) -> None:
+    with pytest.raises(RegistryError, match=f"{option} must be a positive integer"):
+        Registry(FakeDatabase(), [], validate_schema="off", **{option: value})
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), "1", 0, -1])
+def test_registry_statement_timeout_must_be_a_finite_positive_number(value: object) -> None:
+    with pytest.raises(
+        RegistryError, match="statement_timeout must be a finite positive number"
+    ):
+        Registry(FakeDatabase(), [], validate_schema="off", statement_timeout=value)
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+def test_registry_identity_map_warning_threshold_must_be_a_positive_integer(
+    value: object,
+) -> None:
+    with pytest.raises(
+        RegistryError, match="identity_map_warn_at must be a positive integer"
+    ):
+        Registry(FakeDatabase(), [], validate_schema="off", identity_map_warn_at=value)
+
+
+def test_registry_accepts_finite_timeout_and_warning_threshold() -> None:
+    registry = Registry(
+        FakeDatabase(),
+        [],
+        validate_schema="off",
+        statement_timeout=0.5,
+        identity_map_warn_at=1,
+    )
+
+    assert registry.statement_timeout == 0.5
+    assert registry.identity_map_warn_at == 1
 
 
 def test_the_plan_cache_also_obeys_its_byte_budget() -> None:

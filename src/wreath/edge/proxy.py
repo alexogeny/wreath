@@ -118,10 +118,16 @@ class ReverseProxy:
         attempts: int = DEFAULT_ATTEMPTS,
         buffer_below: int = DEFAULT_BUFFER_BELOW,
     ) -> None:
+        if type(max_body) is not int:
+            raise ValueError("max_body must be an integer")
         if max_body < 0:
             raise ValueError("max_body must be non-negative")
+        if type(attempts) is not int:
+            raise ValueError("attempts must be an integer")
         if attempts < 1:
             raise ValueError("attempts must be at least 1")
+        if type(buffer_below) is not int:
+            raise ValueError("buffer_below must be an integer")
         if buffer_below < 0:
             raise ValueError("buffer_below must be non-negative")
         missing = [u.url for u in pool.upstreams if u.url not in clients]

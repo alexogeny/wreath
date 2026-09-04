@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from typing import cast
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -29,6 +30,25 @@ MESSAGE = (
     b"\r\n"
     b"Hello there.\r\n"
 )
+
+
+def test_private_key_reprs_do_not_expose_signing_material() -> None:
+    rsa_key = RsaKey(n=101, e=3, d=123456789, p=11, q=13, dp=17, dq=19, qinv=23)
+    ed_key = Ed25519Key(b"dkim-private-seed-value-123456")
+
+    rendered_rsa = repr(rsa_key)
+    assert all(str(value) not in rendered_rsa for value in (123456789, 11, 13, 17, 19, 23))
+    assert "dkim-private-seed-value" not in repr(ed_key)
+    assert "dkim-private-seed-value" not in repr(DkimSigner("example.com", "sel", ed_key))
+
+
+def test_ed25519_key_snapshots_mutable_seed_input() -> None:
+    source = bytearray(b"a" * 32)
+    key = Ed25519Key(cast(bytes, source))
+
+    source[:] = b"b" * 32
+
+    assert key.seed == b"a" * 32
 
 
 @pytest.fixture(scope="module")

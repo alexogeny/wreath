@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from .._jobcore import compute_backoff
@@ -103,10 +104,18 @@ class UpstreamPool:
         if policy not in ("ewma", "round-robin", "least-connections"):
             raise ValueError(f"unknown policy: {policy!r}")
         selected_ejection = ejection or Ejection()
+        if isinstance(selected_ejection.failures, bool) or not isinstance(
+            selected_ejection.failures, int
+        ):
+            raise ValueError("ejection.failures must be an integer")
         if selected_ejection.failures < 1:
             raise ValueError("ejection.failures must be at least 1")
+        if not isfinite(selected_ejection.seconds):
+            raise ValueError("ejection.seconds must be finite")
         if selected_ejection.seconds <= 0:
             raise ValueError("ejection.seconds must be positive")
+        if not isfinite(selected_ejection.cap):
+            raise ValueError("ejection.cap must be finite")
         if selected_ejection.cap <= 0:
             raise ValueError("ejection.cap must be positive")
         if selected_ejection.cap < selected_ejection.seconds:

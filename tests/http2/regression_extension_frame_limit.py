@@ -13,7 +13,6 @@ from time import perf_counter
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from http2 import support as h2
-
 from wreath import Wreath
 from wreath.reactor import metal_event_loop
 from wreath.server import Server, ServerConfig, TLSConfig

@@ -66,6 +66,7 @@ from urllib.parse import quote
 from ._userkit import verify_password
 from ._webauthn import (
     WebAuthnError,
+    _valid_origin,
     b64url_encode,
     check_client_data,
     check_rp_id_hash,
@@ -496,6 +497,9 @@ class SecondFactor:
             raise ValueError("a second factor needs a user id")
         if self.kind not in _KINDS:
             raise ValueError(f"unknown second-factor kind: {self.kind!r}")
+        if not isinstance(self.material, (bytes, bytearray)):
+            raise TypeError("second-factor material must be bytes")
+        object.__setattr__(self, "material", bytes(self.material))
         if self.counter < 0:
             raise ValueError("counter must not be negative")
 
@@ -1093,6 +1097,8 @@ def _webauthn_origins(origins: Sequence[str]) -> tuple[str, ...]:
     accepted = tuple(origins)
     if not accepted or any(not origin for origin in accepted):
         raise ValueError("at least one non-empty origin is required")
+    if any(not _valid_origin(origin) for origin in accepted):
+        raise ValueError("each origin must be a valid HTTPS origin or loopback HTTP origin")
     return accepted
 
 

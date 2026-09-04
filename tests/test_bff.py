@@ -10,6 +10,7 @@ from wreath.bff import (
     BFFResource,
     _csrf_header,
     _query_suffix,
+    _target,
     _validate_access_token,
     _validate_target_prefix,
     bff_access_token,
@@ -278,6 +279,13 @@ def test_target_prefix_normalizes_each_valid_shape(value: str) -> None:
         ("https://user:password@api.example", "origin"),
         ("https://api.example?admin=1", "origin"),
         ("https://api.example#admin", "origin"),
+        ("https://api.example:bad", "origin"),
+        ("https://api.example:0", "origin"),
+        (" https://api.example", "origin"),
+        ("https://api.exa\tmple", "origin"),
+        ("https://api.exa\x80mple", "origin"),
+        ("https://api.example\\other", "origin"),
+        (f"https://{'a' * 64}.example", "origin"),
     ],
 )
 def test_resource_configuration_refuses_each_invalid_origin(
@@ -303,6 +311,11 @@ def test_resource_configuration_requires_callable_request(request_method: object
 def test_resource_configuration_refuses_non_text_method(method: object) -> None:
     with pytest.raises(TypeError, match="methods must be str"):
         BFFResource(RecordingClient(), methods=cast(Any, {method}))
+
+
+def test_resource_configuration_refuses_a_string_as_the_method_collection() -> None:
+    with pytest.raises(TypeError, match="methods must be a set of strings"):
+        BFFResource(RecordingClient(), methods=cast(Any, "GET"))
 
 
 @pytest.mark.parametrize("method", ["", "GET SPACE", "GET\n"])
@@ -363,6 +376,14 @@ def test_csrf_header_normalizes_valid_name() -> None:
 
 def test_empty_query_has_no_suffix() -> None:
     assert _query_suffix(b"") == ""
+
+
+@pytest.mark.parametrize("path", ["/other.example/admin", "//other.example/admin"])
+def test_root_resource_target_refuses_a_path_that_would_become_scheme_relative(path: str) -> None:
+    resource = BFFResource(RecordingClient(), target_prefix="/")
+
+    with pytest.raises(BadRequest, match="must not begin with a slash"):
+        _target(resource, path, b"")
 
 
 @pytest.mark.parametrize("resources", [None, [], {}, "catalog"])
@@ -503,6 +524,8 @@ def test_token_expiry_must_be_a_finite_timestamp(expires_at: float) -> None:
         b"filter=%2",
         b"filter=public#private",
         b"filter=public\nprivate",
+        b"filter=public private",
+        b"filter=public\x7fprivate",
     ],
 )
 async def test_query_suffix_refuses_each_unsafe_query_shape(raw: bytes) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from typing import Any
 import pytest
 
 import wreath._mcp.server as server_module
-from wreath import Wreath
+from wreath import Router, Wreath
 from wreath._auth.requirements import AuthRequirement, PolicyRequirement, SetRequirement
 from wreath._mcp.auth import Unauthenticated
 from wreath._mcp.outbound import ClientChannel
@@ -18,7 +19,7 @@ from wreath._mcp.protocol import INVALID_PARAMS, METHOD_NOT_FOUND, JsonRpcError,
 from wreath._mcp.server import MCP, _Gate, _holds, _sampling_messages
 from wreath._mcp.session import Session, ToolContext
 from wreath.auth import Identity
-from wreath.mcp import ClientRequestError, ToolRateLimit
+from wreath.mcp import ClientRequestError, MCPLimits, ToolError, ToolRateLimit
 from wreath.request import Request
 
 
@@ -66,7 +67,7 @@ def _request(identity: Identity | None = None) -> Request:
     return request
 
 
-@pytest.mark.parametrize("progress_interval", [0, -1, -0.25])
+@pytest.mark.parametrize("progress_interval", [0, -1, -0.25, float("nan"), float("inf")])
 def test_mcp_refuses_each_nonpositive_progress_interval(progress_interval: float) -> None:
     with pytest.raises(ValueError, match="progress_interval must be positive"):
         _server(progress_interval=progress_interval)
@@ -76,6 +77,21 @@ def test_mcp_preserves_supplied_progress_registry() -> None:
     progress = object()
 
     assert _server(progress=progress)._progress is progress
+
+
+def test_mcp_registers_file_cleanup_only_with_a_lifespan_owner(tmp_path: Path) -> None:
+    app = Wreath()
+    shutdown_handlers = len(app._shutdown_handlers)
+    MCP(app, name="no-files", version="1.0.0")
+    assert len(app._shutdown_handlers) == shutdown_handlers
+
+    router = Router()
+    MCP(router, name="files", version="1.0.0", file_root=tmp_path)
+
+
+def test_mcp_refuses_an_empty_file_root() -> None:
+    with pytest.raises(ValueError, match="file_root must name a directory"):
+        _server(file_root="")
 
 
 async def _initialize_direct(mcp: MCP, params: dict[str, object]) -> tuple[dict[str, Any], Any]:
@@ -229,6 +245,44 @@ def test_sampling_refuses_non_text_non_mapping_content_with_its_actual_type() ->
 
 
 @pytest.mark.asyncio
+async def test_tool_errors_obey_the_serialized_result_limit() -> None:
+    mcp = _server(limits=MCPLimits(max_result_bytes=64))
+
+    @mcp.tool(description="Fails with a caller-controlled detail.")
+    async def oversized(_request: Request) -> str:
+        raise ToolError("x" * 128)
+
+    tool = mcp._registry.get("oversized")
+    assert tool is not None
+
+    with pytest.raises(JsonRpcError, match="serialized result limit"):
+        await mcp._invoke(tool, _request(), {})
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        {},
+        {"type": "resource", "uri": "file:///secret"},
+        {"type": "resource", "data": "opaque"},
+        {"type": "text", "text": 7},
+        {"type": "image", "data": None},
+    ),
+)
+def test_sampling_refuses_malformed_or_unsupported_content_blocks(
+    content: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="content.*text.*image.*audio"):
+        _sampling_messages([{"role": "user", "content": content}])
+
+
+@pytest.mark.parametrize("role", ["system", "", True])
+def test_sampling_refuses_roles_outside_user_and_assistant(role: object) -> None:
+    with pytest.raises(ValueError, match="role.*user.*assistant"):
+        _sampling_messages([{"role": role, "content": "hello"}])
+
+
+@pytest.mark.asyncio
 async def test_unprotected_metadata_handler_fails_closed_when_called_directly() -> None:
     response = await _server()._metadata(_request())
 
@@ -348,6 +402,218 @@ async def test_cancel_notification_accepts_integer_and_string_request_ids() -> N
     await asyncio.gather(integer, text, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_concurrent_tool_calls_refuse_a_duplicate_request_id() -> None:
+    mcp = _server()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @mcp.tool(description="Waits until the test releases it.")
+    async def waiting(_request: Request) -> dict[str, bool]:
+        entered.set()
+        await release.wait()
+        return {"released": True}
+
+    session = _session()
+    message = Message(
+        "tools/call",
+        {"name": "waiting"},
+        id="same-id",
+        is_request=True,
+    )
+    first = asyncio.create_task(mcp._tools_call(_request(), session, message))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    try:
+        with pytest.raises(JsonRpcError, match="already has a call in flight"):
+            await asyncio.wait_for(
+                mcp._tools_call(_request(), session, message),
+                timeout=0.1,
+            )
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_refuses_an_id_used_by_another_request() -> None:
+    mcp = _server()
+
+    @mcp.tool(description="Does not run.")
+    async def waiting(_request: Request) -> dict[str, bool]:
+        return {"ran": True}
+
+    session = _session()
+    occupied = asyncio.create_task(asyncio.Event().wait())
+    session.requests_in_flight["same-id"] = occupied
+    try:
+        with pytest.raises(JsonRpcError, match="already has a call in flight"):
+            await mcp._tools_call(
+                _request(),
+                session,
+                Message(
+                    "tools/call",
+                    {"name": "waiting"},
+                    id="same-id",
+                    is_request=True,
+                ),
+            )
+    finally:
+        occupied.cancel()
+        await asyncio.gather(occupied, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_integer_and_text_request_ids_do_not_share_progress_state() -> None:
+    mcp = _server()
+    task_ids: list[str] = []
+
+    @mcp.tool(description="Records its progress identity.")
+    async def identify_progress(request: Request) -> dict[str, bool]:
+        task_ids.append(request.state.mcp.progress._task_id)
+        return {"recorded": True}
+
+    session = _session()
+    for identifier in (1, "1"):
+        await mcp._tools_call(
+            _request(),
+            session,
+            Message(
+                "tools/call",
+                {"name": "identify_progress"},
+                id=identifier,
+                is_request=True,
+            ),
+        )
+
+    assert len(set(task_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_wrong_session_owner_does_not_refresh_the_idle_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+    session = mcp._sessions.create(
+        protocol_version="2025-06-18",
+        client_info={},
+    )
+    previous = session.last_seen
+
+    async def refuses_owner(
+        _self: MCP,
+        _request_value: Request,
+        _session_value: Session,
+        _identity: object,
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(MCP, "_owns", refuses_owner)
+    found, refusal = await mcp._session_for(_request(), None, session.id)
+
+    assert found is None
+    assert refusal is not None
+    assert refusal.status == 401
+    assert session.last_seen == previous
+
+
+@pytest.mark.asyncio
+async def test_session_disappearing_after_owner_check_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+    session = mcp._sessions.create(
+        protocol_version="2025-06-18",
+        client_info={},
+    )
+
+    async def accepts_owner(
+        _self: MCP,
+        _request_value: Request,
+        _session_value: Session,
+        _identity: object,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(MCP, "_owns", accepts_owner)
+    monkeypatch.setattr(type(mcp._sessions), "get", lambda _self, _identifier: None)
+    found, refusal = await mcp._session_for(_request(), None, session.id)
+
+    assert found is None
+    assert refusal is not None
+    assert refusal.status == 404
+
+
+@pytest.mark.asyncio
+async def test_session_replaced_after_owner_check_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+    session = mcp._sessions.create(
+        protocol_version="2025-06-18",
+        client_info={},
+    )
+    replacement = Session(session.id, "2025-06-18")
+
+    async def accepts_owner(
+        _self: MCP,
+        _request_value: Request,
+        _session_value: Session,
+        _identity: object,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(MCP, "_owns", accepts_owner)
+    monkeypatch.setattr(
+        type(mcp._sessions),
+        "get",
+        lambda _self, _identifier: replacement,
+    )
+    found, refusal = await mcp._session_for(_request(), None, session.id)
+
+    assert found is None
+    assert refusal is not None
+    assert refusal.status == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_does_not_discard_a_session_replaced_during_owner_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+    session = mcp._sessions.create(
+        protocol_version="2025-06-18",
+        client_info={},
+    )
+    replacement = Session(session.id, "2025-06-18")
+    seen = iter((session, replacement))
+    discarded: list[str] = []
+
+    async def accepts_owner(
+        _self: MCP,
+        _request_value: Request,
+        _session_value: Session,
+        _identity: object,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(MCP, "_owns", accepts_owner)
+    monkeypatch.setattr(type(mcp._sessions), "peek", lambda _self, _identifier: next(seen))
+    monkeypatch.setattr(
+        type(mcp._sessions),
+        "discard",
+        lambda _self, identifier: discarded.append(identifier) or True,
+    )
+    request = Request(
+        {"type": "http", "headers": [(b"mcp-session-id", session.id.encode())]},
+        _no_receive,
+    )
+
+    response = await mcp._delete(request)
+
+    assert response.status == 404
+    assert discarded == []
+
+
 def test_roots_changed_invalidates_only_the_roots_notification() -> None:
     mcp = _server()
     session = _session()
@@ -363,6 +629,40 @@ def test_roots_changed_invalidates_only_the_roots_notification() -> None:
         session,
         Message("notifications/roots/list_changed", {}, is_notification=True),
     )
+    assert session.roots is None
+
+
+@pytest.mark.asyncio
+async def test_roots_changed_during_a_list_request_discards_the_stale_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+    session = _session()
+    session.client_capabilities = {"roots": {"listChanged": True}}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def client_request(
+        _self: MCP,
+        _session_value: Session,
+        _method: str,
+        _params: dict[str, Any],
+    ) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"roots": [{"uri": "file:///stale"}]}
+
+    monkeypatch.setattr(MCP, "_client_request", client_request)
+    pending = asyncio.create_task(mcp._roots(session))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    mcp._handle_notification(
+        session,
+        Message("notifications/roots/list_changed", {}, is_notification=True),
+    )
+    release.set()
+
+    with pytest.raises(ClientRequestError, match="changed while roots/list was in flight"):
+        await pending
     assert session.roots is None
 
 
@@ -459,12 +759,52 @@ async def test_file_root_descriptor_is_opened_once_and_reused(
     monkeypatch.setattr(server_module, "_open_root", open_root)
     monkeypatch.setattr(server_module, "read_beneath", read_beneath)
     mcp = _server(file_root=tmp_path)
+    lock_enters = 0
+
+    class CountingLock:
+        async def __aenter__(self) -> None:
+            nonlocal lock_enters
+            lock_enters += 1
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(mcp, "_file_root_lock", CountingLock())
     session = _session()
 
     assert await mcp._read_file(session, "one.txt") == b"one.txt"
     assert await mcp._read_file(session, "two.txt") == b"two.txt"
     assert opened == [str(tmp_path)]
     assert [entry[:2] for entry in reads] == [(73, "one.txt"), (73, "two.txt")]
+    assert lock_enters == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_file_reads_open_one_root_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    opened: list[str] = []
+
+    def open_root(path: str) -> int:
+        opened.append(path)
+        time.sleep(0.05)
+        return 73
+
+    monkeypatch.setattr(server_module, "_open_root", open_root)
+    monkeypatch.setattr(
+        server_module,
+        "read_beneath",
+        lambda _fd, path, *, max_bytes: path.encode(),
+    )
+    mcp = _server(file_root=tmp_path)
+    session = _session()
+
+    assert await asyncio.gather(
+        mcp._read_file(session, "one.txt"),
+        mcp._read_file(session, "two.txt"),
+    ) == [b"one.txt", b"two.txt"]
+    assert opened == [str(tmp_path)]
 
 
 @pytest.mark.asyncio
@@ -508,6 +848,23 @@ async def test_policy_denial_preserves_reason_and_has_a_default() -> None:
 
     assert explained == "the caller may not 'record:read': outside tenant"
     assert defaulted == "the caller may not 'record:read': denied"
+
+
+@pytest.mark.asyncio
+async def test_policy_authorization_requires_exact_true() -> None:
+    requirement = AuthRequirement(policies=(PolicyRequirement("record:read", 'Record::"one"'),))
+    entry = _Gate("record", requirement)
+    identity = Identity("ada")
+
+    class TruthyAuthorizer:
+        async def authorize(self, _request: Request, _policy: PolicyRequirement) -> Any:
+            return SimpleNamespace(allowed="yes", reason="not an exact authorization")
+
+    denied = await _server(authorizer=TruthyAuthorizer())._authorize(
+        _request(identity), entry
+    )
+
+    assert denied == "the caller may not 'record:read': not an exact authorization"
 
 
 @pytest.mark.asyncio
@@ -638,6 +995,30 @@ async def test_sampling_omits_every_absent_optional_parameter(
     assert set(asked[0]) == {"messages", "maxTokens"}
 
 
+@pytest.mark.parametrize("max_tokens", [0, -1, True, 1.5])
+@pytest.mark.asyncio
+async def test_sampling_refuses_a_nonpositive_or_noninteger_token_limit(
+    max_tokens: Any,
+) -> None:
+    mcp = _server()
+
+    @mcp.tool(description="Samples with an invalid bound.", sampling=True)
+    async def sampler(_request: Request) -> dict[str, str]:
+        return {"unused": "handler"}
+
+    context = ToolContext(
+        "session",
+        1,
+        "sampler",
+        _server=mcp,
+        _session=_session(),
+        _request=_request(),
+    )
+
+    with pytest.raises(ValueError, match="max_tokens.*positive integer"):
+        await context.sample("hello", max_tokens=max_tokens)
+
+
 @pytest.mark.asyncio
 async def test_sampling_resolves_identity_for_policy_or_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
@@ -657,6 +1038,7 @@ async def test_sampling_resolves_identity_for_policy_or_rate_limit(
         return {"unused": "handler"}
 
     identified: list[str] = []
+    partition_keys: list[str | None] = []
 
     async def identify(_self: MCP, _request: Request) -> Identity:
         identified.append("called")
@@ -682,9 +1064,19 @@ async def test_sampling_resolves_identity_for_policy_or_rate_limit(
     ) -> dict[str, Any]:
         return {"content": {"type": "text", "text": "answer"}}
 
+    def throttle(
+        _self: MCP,
+        _tool: Any,
+        _session: Session,
+        partition_key: str | None,
+    ) -> float:
+        partition_keys.append(partition_key)
+        return 0.0
+
     monkeypatch.setattr(MCP, "_identify", identify)
     monkeypatch.setattr(MCP, "_authorize", authorize)
     monkeypatch.setattr(MCP, "_client_request", client_request)
+    monkeypatch.setattr(MCP, "_throttle", throttle)
 
     for name in ("policy_tool", "limited_tool"):
         context = ToolContext(
@@ -698,11 +1090,94 @@ async def test_sampling_resolves_identity_for_policy_or_rate_limit(
         await context.sample("hello")
 
     assert identified == ["called", "called"]
+    assert partition_keys[0] is None
+    assert partition_keys[1] == "4:User0:ada"
+
+
+@pytest.mark.asyncio
+async def test_transport_rate_limits_isolate_identity_types() -> None:
+    mcp = _server()
+
+    @mcp.tool(description="One per hour.", rate_limit=ToolRateLimit(1, window=3600))
+    async def limited(_request: Request) -> str:
+        return "ok"
+
+    session = _session()
+    for identifier, identity in enumerate(
+        (Identity("same", type="User"), Identity("same", type="Service")),
+        start=1,
+    ):
+        result = await mcp._tools_call(
+            _request(identity),
+            session,
+            Message(
+                "tools/call",
+                {"name": "limited"},
+                id=identifier,
+                is_request=True,
+            ),
+        )
+        assert result["content"][0]["text"] == "ok"
 
 
 @dataclass
 class _OptionalAnswer:
     note: str = "default"
+
+
+@pytest.mark.asyncio
+async def test_elicitation_partitions_only_a_declared_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = _server()
+
+    @mcp.tool(description="Elicits without a limit.", elicitation=True)
+    async def unbounded(_request: Request) -> dict[str, str]:
+        return {"unused": "handler"}
+
+    @mcp.tool(
+        description="Elicits with a limit.",
+        elicitation=True,
+        rate_limit=ToolRateLimit(1000),
+    )
+    async def bounded(_request: Request) -> dict[str, str]:
+        return {"unused": "handler"}
+
+    partition_keys: list[str | None] = []
+
+    def throttle(
+        _self: MCP,
+        _tool: Any,
+        _session: Session,
+        partition_key: str | None,
+    ) -> float:
+        partition_keys.append(partition_key)
+        return 0.0
+
+    async def client_request(
+        _self: MCP,
+        _session: Session,
+        _method: str,
+        _params: dict[str, Any],
+    ) -> dict[str, str]:
+        return {"action": "decline"}
+
+    monkeypatch.setattr(MCP, "_throttle", throttle)
+    monkeypatch.setattr(MCP, "_client_request", client_request)
+    identity = Identity("ada", type="Service")
+    for name in ("unbounded", "bounded"):
+        context = ToolContext(
+            "session",
+            name,
+            name,
+            identity=identity,
+            _server=mcp,
+            _session=_session(),
+            _request=_request(identity),
+        )
+        assert await context.elicit("Answer", _OptionalAnswer) is None
+
+    assert partition_keys == [None, "7:Service0:ada"]
 
 
 @pytest.mark.asyncio

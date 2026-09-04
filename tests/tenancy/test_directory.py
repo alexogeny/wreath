@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from wreath import Request
@@ -7,6 +9,7 @@ from wreath.tenancy import (
     InMemoryTenantDirectory,
     Tenancy,
     TenancyError,
+    TenancyMiddleware,
     Tenant,
     TenantHeader,
     TenantHostLabel,
@@ -19,6 +22,7 @@ from wreath.tenancy import (
     cedar_context,
     check_enqueue_tenant,
     current_tenant,
+    deprovision_tenant,
     telemetry_attributes,
     tenant_scope,
 )
@@ -77,7 +81,7 @@ def test_duplicate_tenant_selectors_are_refused(
             "path": "/",
             "headers": headers,
         },
-        None,
+        cast(Any, None),
     )
     tenancy = Tenancy(
         directory=InMemoryTenantDirectory([ACME, Tenant("globex", "tenant_globex")]),
@@ -91,6 +95,63 @@ def test_a_tenant_carries_identity_placement_and_lifecycle() -> None:
     assert ACME.key == "acme"
     assert ACME.status is TenantStatus.ACTIVE
     assert ACME.context().schema == "tenant_acme"
+
+
+def test_a_tenant_snapshots_metadata_at_the_directory_boundary() -> None:
+    metadata = {"plan": "free", "limits": {"seats": 2}}
+    tenant = Tenant(key="mutable", schema="tenant_mutable", metadata=metadata)
+
+    metadata["plan"] = "enterprise"
+    metadata["limits"]["seats"] = 200
+
+    assert tenant.metadata == {"plan": "free", "limits": {"seats": 2}}
+
+
+def test_tenant_metadata_freezes_nested_sequences_and_refuses_cycles() -> None:
+    nested = [{"scope": "read"}]
+    tenant = Tenant(key="nested", schema="tenant_nested", metadata={"grants": nested})
+    nested[0]["scope"] = "admin"
+    nested.append({"scope": "write"})
+    assert tenant.metadata == {"grants": ({"scope": "read"},)}
+
+    cyclic = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(TenancyError, match="must not contain cycles"):
+        Tenant(key="cyclic", schema="tenant_cyclic", metadata=cyclic)
+
+    tagged = Tenant(key="tagged", schema="tenant_tagged", metadata={"tags": {"a", "b"}})
+    assert tagged.metadata["tags"] == frozenset({"a", "b"})
+
+
+def test_a_directory_refuses_two_rows_for_the_same_external_tenant_key() -> None:
+    with pytest.raises(TenancyError, match="duplicate tenant key"):
+        InMemoryTenantDirectory(
+            [
+                Tenant(key="acme", schema="tenant_acme"),
+                Tenant(key="acme", schema="tenant_globex"),
+            ]
+        )
+
+
+def test_a_directory_update_cannot_remap_an_external_key_to_another_schema() -> None:
+    directory = InMemoryTenantDirectory([ACME])
+    with pytest.raises(TenancyError, match="cannot change its schema or role"):
+        directory.add(Tenant(key="acme", schema="tenant_globex", role="tenant_globex"))
+
+
+def test_a_directory_may_add_a_new_key_and_update_status_in_the_same_placement() -> None:
+    directory = InMemoryTenantDirectory([ACME])
+    directory.add(Tenant(key="globex", schema="tenant_globex"))
+    directory.add(
+        Tenant(
+            key="acme",
+            schema=ACME.schema,
+            role=ACME.role,
+            status=TenantStatus.SUSPENDED,
+        )
+    )
+    assert directory.resolve("globex").schema == "tenant_globex"
+    assert directory.resolve("acme").status is TenantStatus.SUSPENDED
 
 
 def test_a_tenant_key_that_is_not_an_identifier_is_refused_at_construction() -> None:
@@ -131,6 +192,25 @@ def test_tenant_resolution_has_no_default_source() -> None:
         Tenancy(directory=InMemoryTenantDirectory([ACME]))
 
 
+@pytest.mark.parametrize("trusted", [1, "yes", object()])
+def test_a_tenant_header_requires_the_exact_trusted_flag(trusted) -> None:
+    with pytest.raises(TenancyError, match="trusted=True"):
+        Tenancy(
+            directory=InMemoryTenantDirectory([ACME]),
+            source=TenantHeader("X-Tenant", trusted=trusted),
+        )
+
+
+@pytest.mark.parametrize("optional", [1, "yes", object()])
+def test_optional_tenant_middleware_requires_an_exact_boolean(optional) -> None:
+    tenancy = Tenancy(
+        directory=InMemoryTenantDirectory([ACME]),
+        source=TenantHeader("X-Tenant", trusted=True),
+    )
+    with pytest.raises(TenancyError, match="optional must be true or false"):
+        TenancyMiddleware(tenancy, optional=optional)
+
+
 def test_a_resolved_name_is_looked_up_and_never_used_as_a_schema() -> None:
     directory = InMemoryTenantDirectory([Tenant(key="acme", schema="t_7f3a", role="r_7f3a")])
     tenancy = Tenancy(directory=directory, source=TenantHeader("X-Tenant", trusted=True))
@@ -153,6 +233,12 @@ def test_the_host_source_requires_its_suffix_and_refuses_the_apex() -> None:
     assert tenancy.resolve_request(_Request({"host": "acme.example.com"})).key == "acme"
     with pytest.raises(UnknownTenant):
         tenancy.resolve_request(_Request({"host": "example.com"}))
+
+
+def test_the_host_source_refuses_an_empty_suffix_at_declaration_time() -> None:
+    for suffix in ("", None, 7):
+        with pytest.raises(TenancyError, match="non-empty DNS suffix"):
+            TenantHostLabel(cast(Any, suffix))
 
 
 def test_the_host_source_ignores_a_port_and_is_case_insensitive() -> None:
@@ -240,3 +326,49 @@ def test_an_explicit_tenant_contradicting_the_scope_is_refused() -> None:
 def test_outside_a_scope_an_explicit_tenant_is_passed_through() -> None:
     assert check_enqueue_tenant("globex") == "globex"
     assert check_enqueue_tenant(None) == ""
+
+
+async def test_deprovision_requires_the_exact_force_confirmation() -> None:
+    class OccupiedConnection:
+        def __init__(self) -> None:
+            self.executed = []
+
+        async def fetch(self, *args):
+            return [("items",)]
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+
+    connection = OccupiedConnection()
+    with pytest.raises(TenancyError, match="force must be true or false"):
+        await deprovision_tenant(connection, ACME, force=cast(Any, 1))
+    assert connection.executed == []
+
+
+async def test_deprovision_checks_an_occupied_schema_unless_force_is_exactly_true() -> None:
+    class Connection:
+        def __init__(self) -> None:
+            self.fetches = 0
+            self.executed = []
+
+        async def fetch(self, *args):
+            self.fetches += 1
+            return [("items",)]
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+
+    guarded = Connection()
+    with pytest.raises(TenancyError, match="not empty"):
+        await deprovision_tenant(guarded, ACME, force=False)
+    assert guarded.fetches == 1
+    assert guarded.executed == []
+
+    confirmed = Connection()
+    await deprovision_tenant(confirmed, ACME, force=True)
+    assert confirmed.fetches == 0
+    assert confirmed.executed == [
+        'DROP SCHEMA IF EXISTS "tenant_acme" CASCADE',
+        'DROP OWNED BY "tenant_acme" CASCADE',
+        'DROP ROLE IF EXISTS "tenant_acme"',
+    ]

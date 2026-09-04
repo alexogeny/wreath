@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import pytest
 
@@ -73,6 +74,12 @@ def test_invalid_agent_tool_selections_refuse_at_construction(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         configured_mcp().executor(*names, max_tools=max_tools)
+
+
+@pytest.mark.parametrize("max_tools", [True, 1.5, float("nan"), float("inf")])
+def test_agent_tool_selection_refuses_non_integer_limits(max_tools: object) -> None:
+    with pytest.raises(TypeError, match="max_tools must be an integer"):
+        configured_mcp().executor("echo", max_tools=cast(Any, max_tools))
 
 
 def test_agent_tool_selection_refuses_an_empty_name() -> None:
@@ -151,6 +158,48 @@ class Authorizer:
         if narrowing is not None and not narrowing.permits(requirement.action):
             return AuthorizationDecision(False, "delegation scope does not cover this action")
         return AuthorizationDecision(self.allowed, None if self.allowed else "outside tenant")
+
+
+class PausingAuthorizer:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.proceed = asyncio.Event()
+        self.seen: str | None = None
+
+    async def authorize(self, request: Any, _requirement: Any) -> AuthorizationDecision:
+        self.started.set()
+        await self.proceed.wait()
+        self.seen = request.state.mcp.arguments["query"]["value"]
+        return AuthorizationDecision(True)
+
+
+async def test_direct_invocation_snapshots_arguments_before_authorization() -> None:
+    authorizer = PausingAuthorizer()
+    mcp = MCP(name="agents", version="1", authorizer=authorizer)
+
+    @mcp.tool(description="Read a record.", action="Record::read", resource='Record::"7"')
+    async def read(_request: Any, query: Annotated[Query, Body()]) -> str:
+        return query.value
+
+    arguments = {"query": {"value": "allowed"}}
+    task = asyncio.create_task(
+        mcp.executor("read").invoke(
+            "read",
+            arguments,
+            tenant="tenant-a",
+            principal=Identity("user-7"),
+            delegation=None,
+            call_id="call-1",
+        )
+    )
+    await authorizer.started.wait()
+    arguments["query"]["value"] = "switched"
+    authorizer.proceed.set()
+
+    result = await task
+
+    assert authorizer.seen == "allowed"
+    assert result.text == "allowed"
 
 
 async def test_direct_invocation_reuses_cedar_and_delegation_scope() -> None:
@@ -429,6 +478,32 @@ async def test_direct_rate_limits_are_isolated_by_tenant_and_principal() -> None
             call_id="6",
         )
     ).text == "ok"
+
+
+async def test_direct_rate_limits_isolate_identity_types_and_namespaces() -> None:
+    mcp = MCP(name="agents", version="1")
+
+    @mcp.tool(description="One per hour.", rate_limit=ToolRateLimit(1, window=3600))
+    async def limited(_request: Any) -> str:
+        return "ok"
+
+    executor = mcp.executor("limited")
+    identities = (
+        Identity("same", type="User", namespace="issuer-a"),
+        Identity("same", type="Service", namespace="issuer-a"),
+        Identity("same", type="User", namespace="issuer-b"),
+    )
+
+    for index, identity in enumerate(identities):
+        result = await executor.invoke(
+            "limited",
+            {},
+            tenant="tenant-a",
+            principal=identity,
+            delegation=None,
+            call_id=str(index),
+        )
+        assert result.text == "ok"
 
 
 async def test_direct_invocation_refuses_ambiguous_or_invalid_identity_inputs() -> None:

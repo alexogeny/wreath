@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
 from decimal import Decimal as _Decimal
+from types import MappingProxyType
 from typing import Any, cast
 from urllib.parse import quote, urlencode
 
@@ -173,6 +174,11 @@ class ModelAdmin:
     #: matching the permission manifest's own split and `crud`'s `precision`.
     resource: str
     meta: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "python_types", MappingProxyType(dict(self.python_types)))
+        object.__setattr__(self, "field_access", MappingProxyType(dict(self.field_access)))
+        object.__setattr__(self, "meta", MappingProxyType(dict(self.meta)))
 
 
 class Admin:

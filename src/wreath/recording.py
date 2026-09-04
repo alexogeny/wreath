@@ -16,6 +16,7 @@ file recovered from a crash is where a strict reader is least useful.
 
 from __future__ import annotations
 
+import math
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -308,7 +309,13 @@ class CapturePolicy:
     max_matches: int = 0
 
     def __post_init__(self) -> None:
-        _require(self.expiry_seconds >= 0, "expiry_seconds must be >= 0")
+        _require(
+            not isinstance(self.expiry_seconds, bool)
+            and isinstance(self.expiry_seconds, int | float)
+            and math.isfinite(self.expiry_seconds)
+            and self.expiry_seconds >= 0,
+            "expiry_seconds must be a finite number >= 0",
+        )
         _require(self.max_matches >= 0, "max_matches must be >= 0")
 
 

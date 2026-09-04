@@ -32,6 +32,8 @@ from .. import BillingCapabilities
 
 _ACCOUNT = re.compile(r"acct_[A-Za-z0-9]+\Z")
 _CHECKOUT_SESSION = re.compile(r"cs_[A-Za-z0-9_]+\Z")
+_PORTAL_SESSION = re.compile(r"bps_[A-Za-z0-9_]+\Z")
+_REFUND = re.compile(r"re_[A-Za-z0-9_]+\Z")
 _SUBSCRIPTION = re.compile(r"sub_[A-Za-z0-9]+\Z")
 _VERSION = re.compile(
     r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\.(?P<release>[a-z][a-z0-9_]*)\Z"
@@ -39,10 +41,16 @@ _VERSION = re.compile(
 _MANAGED_PAYMENTS_MINIMUM = date(2025, 3, 31)
 _FEE_PERCENT = re.compile(r"(?:0|[1-9]\d{0,2})(?:\.\d{1,2})?\Z")
 _INVALID_JSON = object()
+_MAX_AMOUNT = 99_999_999
+_MAX_IDEMPOTENCY_KEY = 255
 
 
 class StripeError(RuntimeError):
     pass
+
+
+def _unsafe_url(value: str) -> bool:
+    return any(ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in value)
 
 
 def _fee_percent(value: str | None) -> str | None:
@@ -95,9 +103,27 @@ def _projected_account(
 
 
 def _fee_amount(value: int | None) -> int | None:
-    if value is not None and (type(value) is not int or value <= 0):
-        raise ValueError("Stripe application_fee_amount must be positive integer minor units")
+    if value is not None and (
+        type(value) is not int or value <= 0 or value > _MAX_AMOUNT
+    ):
+        raise ValueError(
+            "Stripe application_fee_amount must be positive integer minor units "
+            "of at most eight digits"
+        )
     return value
+
+
+def _idempotency_key(value: str) -> None:
+    if type(value) is not str or not value or len(value) > _MAX_IDEMPOTENCY_KEY:
+        raise ValueError("Stripe idempotency_key must contain 1 to 255 visible ASCII characters")
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise ValueError(
+            "Stripe idempotency_key must contain 1 to 255 visible ASCII characters"
+        ) from error
+    if any(character <= 0x20 or character == 0x7F for character in encoded):
+        raise ValueError("Stripe idempotency_key must contain 1 to 255 visible ASCII characters")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,25 +224,48 @@ class StripeWebhookPolicy:
 
 
 def _https_url(value: str, field: str) -> Any:
+    if type(value) is not str or _unsafe_url(value):
+        raise ValueError(f"{field} must be an absolute HTTPS URL without raw controls or spaces")
     parsed = urlsplit(value)
     if (
         parsed.scheme != "https"
         or not parsed.netloc
         or parsed.hostname is None
         or parsed.username is not None
-        or parsed.password is not None
+        or parsed.fragment
     ):
         raise ValueError(f"{field} must be an absolute HTTPS URL")
     try:
-        _port = parsed.port
+        port = parsed.port
     except ValueError as error:
         raise ValueError(f"{field} must use a valid HTTPS port") from error
+    if port == 0:
+        raise ValueError(f"{field} must use a nonzero HTTPS port")
     return parsed
+
+
+def _provider_url(value: str, hostname: str, field: str) -> None:
+    message = f"Stripe {field} URL must use {hostname} over HTTPS"
+    if _unsafe_url(value):
+        raise ValueError(message)
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(message) from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != hostname
+        or parsed.username is not None
+        or port not in {None, 443}
+        or parsed.fragment
+    ):
+        raise ValueError(message)
 
 
 def _return_origin(value: str) -> str:
     parsed = _https_url(value, "allowed return origin")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+    if parsed.path not in {"", "/"} or parsed.query:
         raise ValueError("allowed return origin must contain only scheme, host, and optional port")
     port = parsed.port
     suffix = "" if port in {None, 443} else f":{port}"
@@ -245,6 +294,7 @@ class StripeBilling:
         "_api_version",
         "_client",
         "_connect",
+        "_livemode",
         "_managed_payments",
         "_return_origins",
         "capabilities",
@@ -282,9 +332,18 @@ class StripeBilling:
             api_version.encode("ascii")
         except UnicodeEncodeError as error:
             raise ValueError("Stripe api_key and api_version must be ASCII") from error
+        if any(ord(character) <= 0x20 or ord(character) == 0x7F for character in revealed):
+            raise ValueError("Stripe api_key must contain only visible ASCII characters")
+        if revealed.startswith(("rk_test_", "sk_test_")):
+            livemode = False
+        elif revealed.startswith(("rk_live_", "sk_live_")):
+            livemode = True
+        else:
+            raise ValueError("Stripe api_key must be a restricted or secret API key")
         self._client = client
         self._api_key = api_key
         self._api_version = api_version
+        self._livemode = livemode
         self._managed_payments = managed_payments
         self._connect = connect
         self._return_origins = return_origins
@@ -342,7 +401,7 @@ class StripeBilling:
     def _account(value: str | None, operation: str) -> str:
         if value is None:
             raise ValueError(f"Connect {operation} requires merchant_account")
-        if _ACCOUNT.fullmatch(value) is None:
+        if not isinstance(value, str) or _ACCOUNT.fullmatch(value) is None:
             raise ValueError("Connect merchant_account must be a Stripe acct_ identifier")
         return value
 
@@ -355,6 +414,7 @@ class StripeBilling:
         idempotency_key: str,
         operation: str,
     ) -> dict[str, Any]:
+        _idempotency_key(idempotency_key)
         response = await self._client.post(
             target,
             headers=headers,
@@ -375,6 +435,9 @@ class StripeBilling:
     ) -> CheckoutSession:
         self._return_url(request.success_url, "success_url")
         self._return_url(request.cancel_url, "cancel_url")
+        connect = self._connect
+        if connect is None and request.merchant_account is not None:
+            raise ValueError("merchant_account requires Stripe Connect")
         headers = self._headers()
         fields: list[tuple[str, str | int]] = [
             ("mode", request.mode),
@@ -386,7 +449,6 @@ class StripeBilling:
             fields.append(("managed_payments[enabled]", "true"))
         if request.customer is not None:
             fields.append(("customer", request.customer))
-        connect = self._connect
         if connect is not None:
             account = self._account(request.merchant_account, "checkout")
             fee_percent = connect.charges.application_fee_percent
@@ -458,19 +520,11 @@ class StripeBilling:
         )
         session_id = payload.get("id")
         checkout_url = payload.get("url")
-        if not isinstance(session_id, str) or not session_id:
+        if not isinstance(session_id, str) or _CHECKOUT_SESSION.fullmatch(session_id) is None:
             raise StripeError("Stripe checkout response is missing id")
         if not isinstance(checkout_url, str):
             raise StripeError("Stripe checkout response is missing url")
-        parsed_url = urlsplit(checkout_url)
-        if (
-            parsed_url.scheme != "https"
-            or parsed_url.hostname != "checkout.stripe.com"
-            or parsed_url.username is not None
-            or parsed_url.password is not None
-            or parsed_url.port not in {None, 443}
-        ):
-            raise ValueError("Stripe checkout URL must use checkout.stripe.com over HTTPS")
+        _provider_url(checkout_url, "checkout.stripe.com", "checkout")
         expires_at = payload.get("expires_at")
         if expires_at is not None and type(expires_at) is not int:
             raise StripeError("Stripe checkout response expires_at must be a timestamp")
@@ -489,12 +543,23 @@ class StripeBilling:
 
     async def create_portal(self, request: PortalRequest, *, idempotency_key: str) -> PortalSession:
         self._return_url(request.return_url, "return_url")
+        connect = self._connect
+        if connect is None and request.merchant_account is not None:
+            raise ValueError("merchant_account requires Stripe Connect")
+        if (
+            connect is not None
+            and isinstance(connect.charges, DestinationCharges)
+            and not connect.charges.on_behalf_of
+            and request.merchant_account is not None
+        ):
+            raise ValueError(
+                "merchant_account requires direct Connect or destination on_behalf_of portal"
+            )
         headers = self._headers()
         fields: list[tuple[str, str | int]] = [
             ("customer", request.customer),
             ("return_url", request.return_url),
         ]
-        connect = self._connect
         if connect is not None and isinstance(connect.charges, DirectCharges):
             account = self._account(request.merchant_account, "portal")
             headers.append((b"stripe-account", account.encode("ascii")))
@@ -514,22 +579,16 @@ class StripeBilling:
         )
         session_id = payload.get("id")
         portal_url = payload.get("url")
-        if not isinstance(session_id, str) or not session_id:
+        if not isinstance(session_id, str) or _PORTAL_SESSION.fullmatch(session_id) is None:
             raise StripeError("Stripe customer portal response is missing id")
         if not isinstance(portal_url, str):
             raise StripeError("Stripe customer portal response is missing url")
-        parsed = urlsplit(portal_url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != "billing.stripe.com"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in {None, 443}
-        ):
-            raise ValueError("Stripe customer portal URL must use billing.stripe.com over HTTPS")
+        _provider_url(portal_url, "billing.stripe.com", "customer portal")
         return PortalSession(provider="stripe", id=session_id, url=portal_url)
 
     async def create_refund(self, request: RefundRequest, *, idempotency_key: str) -> Refund:
+        if request.amount is not None and request.amount.minor > _MAX_AMOUNT:
+            raise ValueError("Stripe refund amount must contain at most eight minor-unit digits")
         headers = self._headers()
         fields: list[tuple[str, str | int]] = [("payment_intent", request.payment)]
         if request.amount is not None:
@@ -562,7 +621,7 @@ class StripeBilling:
         status = payload.get("status")
         amount = payload.get("amount")
         currency = payload.get("currency")
-        if not isinstance(refund_id, str) or not refund_id:
+        if not isinstance(refund_id, str) or _REFUND.fullmatch(refund_id) is None:
             raise StripeError("Stripe refund response is missing id")
         try:
             state = RefundState(status)
@@ -570,7 +629,7 @@ class StripeBilling:
             raise StripeError(
                 f"Stripe refund response has unsupported status {status!r}"
             ) from error
-        if type(amount) is not int or amount < 0:
+        if type(amount) is not int or amount < 0 or amount > _MAX_AMOUNT:
             raise StripeError("Stripe refund response has invalid amount")
         if not isinstance(currency, str):
             raise StripeError("Stripe refund response has invalid currency")

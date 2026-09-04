@@ -6,7 +6,7 @@ import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -83,7 +83,7 @@ def test_a_bare_bearer_challenge_has_no_trailing_separator() -> None:
     assert bearer_challenge() == b"Bearer"
 
 
-def _login_app(provider: OidcProvider, *, seed: bool = False) -> Wreath:
+def _login_app(provider: Any, *, seed: bool = False) -> Wreath:
     app = Wreath()
     if seed:
         app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
@@ -94,6 +94,7 @@ def _login_app(provider: OidcProvider, *, seed: bool = False) -> Wreath:
                 {
                     "_oidc_state_idp": "issued",
                     "_oidc_verifier_idp": "verifier",
+                    "_oidc_nonce_idp": "nonce",
                 }
             )
             return JSONResponse({})
@@ -182,6 +183,58 @@ async def test_callback_refuses_duplicate_security_parameters(query: bytes) -> N
     assert client.calls == 0
 
 
+async def test_callback_requires_the_pending_nonce_before_token_exchange() -> None:
+    callback, client = _callback_with_recording_client()
+    session = {
+        "_oidc_state_idp": "issued",
+        "_oidc_verifier_idp": "verifier",
+    }
+
+    response = await callback(
+        SimpleNamespace(
+            query_string=b"code=code&state=issued",
+            state=SimpleNamespace(session=session),
+        )
+    )
+
+    assert response.status == 400
+    assert response.body == b'{"error":"invalid_state"}'
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"_oidc_state_idp": "other"},
+        {"_oidc_verifier_idp": ""},
+        {"_oidc_verifier_idp": 7},
+        {"_oidc_nonce_idp": ""},
+        {"_oidc_nonce_idp": 7},
+    ],
+)
+async def test_callback_refuses_each_malformed_pending_binding(
+    changes: dict[str, object],
+) -> None:
+    callback, client = _callback_with_recording_client()
+    session: dict[str, object] = {
+        "_oidc_state_idp": "issued",
+        "_oidc_verifier_idp": "verifier",
+        "_oidc_nonce_idp": "nonce",
+    }
+    session.update(changes)
+
+    response = await callback(
+        SimpleNamespace(
+            query_string=b"code=code&state=issued",
+            state=SimpleNamespace(session=session),
+        )
+    )
+
+    assert response.status == 400
+    assert response.body == b'{"error":"invalid_state"}'
+    assert client.calls == 0
+
+
 @pytest.mark.parametrize("query", [b"state=issued", b"code=code"])
 async def test_incomplete_callback_does_not_consume_the_pending_flow(query: bytes) -> None:
     callback, client = _callback_with_recording_client()
@@ -256,6 +309,42 @@ async def test_successful_token_exchange_reaches_the_id_token_validation() -> No
     assert response.json() == {"error": "missing_id_token"}
 
 
+async def test_callback_refuses_an_id_token_for_another_login_nonce() -> None:
+    class Response:
+        status = 200
+        body = b'{"id_token":"token"}'
+
+    class Client:
+        async def post(self, *args: Any, **kwargs: Any) -> Response:
+            return Response()
+
+    class Provider:
+        issuer = "https://idp.example"
+        authorization_endpoint = "https://idp.example/authorize"
+        token_endpoint = "https://idp.example/token"
+        _client = Client()
+
+        def bearer_verifier(self, *, audience: str):
+            async def verify(token: str) -> object:
+                return SimpleNamespace(claims={"nonce": "another-login"})
+
+            return verify
+
+    app = _login_app(Provider(), seed=True)
+
+    async with TestClient(app) as client:
+        seeded = await client.get("/seed")
+        cookie = seeded.header("set-cookie")
+        assert cookie is not None
+        response = await client.get(
+            "/auth/callback?code=code&state=issued",
+            headers={"cookie": cookie.split(";", 1)[0]},
+        )
+
+    assert response.status == 401
+    assert response.json() == {"error": "nonce_mismatch"}
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -270,6 +359,83 @@ def test_client_registration_refuses_each_invalid_secret_or_encryption_shape(
 ) -> None:
     with pytest.raises(ValueError):
         ClientRegistration(client_id="invalid", **options)
+
+
+@pytest.mark.parametrize("client_id", [1, "", "client\tname", "client\x7fname"])
+def test_client_registration_requires_an_unambiguous_client_id(client_id: object) -> None:
+    with pytest.raises(ValueError, match="client_id.*non-empty.*controls"):
+        ClientRegistration(client_id=cast(Any, client_id))
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [None, 1, "", "read admin", 'read"admin', "read\\admin", "réad", "read\x7fadmin"],
+)
+def test_client_registration_refuses_ambiguous_scope_tokens(scope: object) -> None:
+    with pytest.raises(ValueError, match="scope.*RFC 6749 scope-token"):
+        ClientRegistration(client_id="client", scopes=cast(Any, (scope,)))
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "/relative/callback",
+        "https://operator@client.example/callback",
+        "https://client.example/callback#fragment",
+        "https://client.example/call\tback",
+        "https://client.example:invalid/callback",
+        "https://client.example\\@attacker.example/callback",
+        "https://client.example/call\\back",
+        "http:/missing-host",
+        b"https://client.example/callback",
+    ],
+)
+def test_client_registration_refuses_ambiguous_redirect_uris(redirect_uri: object) -> None:
+    with pytest.raises(ValueError, match="redirect_uri.*absolute.*fragment"):
+        ClientRegistration(
+            client_id="client",
+            redirect_uris=cast(Any, (redirect_uri,)),
+        )
+
+
+def test_client_registration_refuses_zero_redirect_port() -> None:
+    with pytest.raises(ValueError, match="redirect_uri.*absolute"):
+        ClientRegistration(
+            client_id="client",
+            redirect_uris=("https://client.example:0/callback",),
+        )
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "com.example.app:/oauth2redirect",
+        "http://127.0.0.1:49152/callback?flow=native",
+    ],
+)
+def test_client_registration_preserves_native_application_redirects(
+    redirect_uri: str,
+) -> None:
+    client = ClientRegistration(client_id="native", redirect_uris=(redirect_uri,))
+
+    assert client.redirect_uris == (redirect_uri,)
+
+
+@pytest.mark.parametrize("scope", ["!", "#", "]"])
+def test_client_registration_preserves_each_edge_of_scope_token_grammar(scope: str) -> None:
+    client = ClientRegistration(client_id="client", scopes=(scope,))
+
+    assert client.scopes == (scope,)
+
+
+def test_client_registration_bounds_scope_count_and_size() -> None:
+    with pytest.raises(ValueError, match="at most 256 scopes"):
+        ClientRegistration(
+            client_id="client",
+            scopes=tuple(f"scope-{index}" for index in range(257)),
+        )
+    with pytest.raises(ValueError, match="exceeds 1024 characters"):
+        ClientRegistration(client_id="client", scopes=("x" * 1025,))
 
 
 @pytest.mark.parametrize("detail_name", [None, 1, b"payment", ""])
@@ -323,6 +489,18 @@ def test_authorization_details_refuse_more_than_64_objects() -> None:
         _detail_server().validate_authorization_details(details)
 
 
+def test_authorization_details_refuse_wide_objects_before_copying_them() -> None:
+    class WideDetail(dict[str, object]):
+        def items(self):
+            raise AssertionError("oversized authorization detail was traversed")
+
+    detail = WideDetail(type="payment")
+    detail.update({f"field-{index}": index for index in range(64)})
+
+    with pytest.raises(OAuthRefusal, match="at most 64 fields"):
+        _detail_server().validate_authorization_details([detail])
+
+
 @pytest.mark.parametrize("detail", [None, 1, "payment", ["payment"]])
 def test_authorization_details_require_each_entry_to_be_an_object(detail: object) -> None:
     with pytest.raises(OAuthRefusal, match=r"authorization_details\[0\] must be an object"):
@@ -362,6 +540,49 @@ def _introspection_server() -> AuthorizationServer:
         introspection_signed_response_alg="HS256",
     )
     return _server(clients=(resource,))
+
+
+def test_introspection_registration_requires_confidential_matching_client() -> None:
+    public = ClientRegistration(
+        client_id="public-resource",
+        introspection_signed_response_alg="HS256",
+    )
+    with pytest.raises(ValueError, match="must be confidential"):
+        _server(clients=(public,))
+
+    mismatch = ClientRegistration(
+        client_id="resource",
+        confidential=True,
+        client_secret=b"r" * 32,
+        introspection_signed_response_alg="HS512",
+    )
+    with pytest.raises(ValueError, match="server signs with 'HS256'"):
+        _server(clients=(mismatch,))
+
+
+def test_introspection_registration_requires_complete_signer_surface() -> None:
+    client = ClientRegistration(
+        client_id="resource",
+        confidential=True,
+        client_secret=b"r" * 32,
+        introspection_signed_response_alg="HS256",
+    )
+
+    class EncodeOnly:
+        algorithm = "HS256"
+
+        def encode(self, claims: object) -> str:
+            return "token"
+
+    with pytest.raises(ValueError, match="encode_with_type"):
+        _server(clients=(client,), signer=EncodeOnly())
+
+    class NoVerifier(EncodeOnly):
+        def encode_with_type(self, claims: object, typ: str) -> str:
+            return "token"
+
+    with pytest.raises(ValueError, match=r"verifying_key\(\)"):
+        _server(clients=(client,), signer=NoVerifier())
 
 
 def _active_claims(**changes: object) -> dict[str, object]:
@@ -467,6 +688,32 @@ def test_introspection_refuses_boolean_expiry_even_before_epoch() -> None:
     ) == {"active": False}
 
 
+@pytest.mark.parametrize("expires", [float("nan"), float("inf"), -float("inf")])
+def test_introspection_refuses_nonfinite_expiry(expires: float) -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(exp=expires))
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    ) == {"active": False}
+
+
+@pytest.mark.parametrize("expires", [2000.5, 10**1000])
+def test_introspection_accepts_finite_numeric_expiry(expires: float | int) -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(exp=expires))
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    )["active"] is True
+
+
 def test_introspection_jwt_requires_registered_response_algorithm() -> None:
     client = ClientRegistration(
         client_id="ordinary-resource",
@@ -555,6 +802,21 @@ def test_issuer_requires_a_host_and_refuses_each_credential_form(issuer: str) ->
         AuthorizationServer(issuer=issuer, secret=b"s" * 32)
 
 
+def test_issuer_refuses_zero_port() -> None:
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        AuthorizationServer(issuer="https://issuer.example:0", secret=b"s" * 32)
+
+
+def test_authorization_server_refuses_duplicate_client_registrations() -> None:
+    replacement = ClientRegistration(
+        client_id="public",
+        redirect_uris=("https://attacker.example/callback",),
+    )
+
+    with pytest.raises(ValueError, match="duplicate OAuth client.*public"):
+        _server(clients=(PUBLIC, replacement))
+
+
 def test_string_and_bytes_signing_secrets_are_preserved() -> None:
     text = "s" * 32
     assert _server(secret=text).secret == text.encode()
@@ -572,6 +834,45 @@ def test_missing_signing_secret_is_generated(monkeypatch: pytest.MonkeyPatch) ->
 def test_refresh_lifetime_must_be_positive(refresh_ttl: float) -> None:
     with pytest.raises(ValueError, match="refresh_ttl must be positive"):
         _server(refresh_ttl=refresh_ttl)
+
+
+@pytest.mark.parametrize("code_ttl", [True, 0, -1, 601])
+def test_code_lifetime_has_an_exact_bounded_numeric_shape(code_ttl: object) -> None:
+    with pytest.raises(ValueError, match="code_ttl must be positive and at most 600"):
+        _server(code_ttl=cast(Any, code_ttl))
+
+
+@pytest.mark.parametrize("capacity", [True, 0, -1, 1.5, "10"])
+def test_pending_grant_capacity_requires_a_positive_integer(capacity: object) -> None:
+    with pytest.raises(ValueError, match="expected a positive integer"):
+        _server(max_pending_grants=cast(Any, capacity))
+
+
+@pytest.mark.parametrize("now", [float("nan"), float("inf"), -float("inf")])
+def test_grants_refuse_nonfinite_issue_times(now: float) -> None:
+    server = _server()
+
+    with pytest.raises(ValueError, match="OAuth now must be finite"):
+        server.issue_code(
+            client_id="public",
+            subject="user",
+            challenge=_challenge("verifier"),
+            redirect_uri="https://client.example/public",
+            now=now,
+        )
+    with pytest.raises(ValueError, match="OAuth now must be finite"):
+        server.issue_refresh(subject="user", now=now)
+
+
+@pytest.mark.parametrize("now", [True, "1000", object()])
+def test_grants_refuse_non_numeric_issue_times(now: object) -> None:
+    with pytest.raises(ValueError, match="OAuth now must be finite"):
+        _server().issue_refresh(subject="user", now=cast(Any, now))
+
+
+def test_grants_preserve_large_integer_issue_times() -> None:
+    moment = 10**1000
+    assert _server().issue_refresh(subject="user", now=moment).issued_at == moment
 
 
 def test_public_client_refuses_a_presented_secret() -> None:
@@ -631,6 +932,45 @@ def test_unknown_authorization_code_is_refused() -> None:
     assert raised.value.reason == "unknown-code"
 
 
+@pytest.mark.parametrize("verifier", [b"verifier", "vérifier", "x" * 129])
+def test_code_redemption_refuses_each_invalid_verifier_shape(verifier: object) -> None:
+    server = _server()
+    code = server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+    )
+
+    with pytest.raises(OAuthRefusal) as raised:
+        server.redeem(
+            code,
+            verifier=cast(Any, verifier),
+            client_id="public",
+            redirect_uri="https://client.example/public",
+        )
+
+    assert raised.value.reason == "pkce-mismatch"
+
+
+def test_oversized_pkce_verifier_is_refused_before_hashing() -> None:
+    server = _server()
+    code = server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+    )
+
+    with pytest.raises(OAuthRefusal, match="at most 128 characters"):
+        server.redeem(
+            code,
+            verifier="x" * 129,
+            client_id="public",
+            redirect_uri="https://client.example/public",
+        )
+
+
 def test_access_token_uses_supplied_time_and_omits_absent_optional_claims() -> None:
     server = _server()
     token = server.issue_access(subject=None, audience="api", now=1234.75)
@@ -640,6 +980,10 @@ def test_access_token_uses_supplied_time_and_omits_absent_optional_claims() -> N
     assert "sub" not in claims
     assert "scope" not in claims
     assert "tenant" not in claims
+    assert "client_id" not in claims
+    assert "cnf" not in claims
+    assert "authorization_details" not in claims
+    assert token.token_type == "Bearer"
 
 
 def test_access_token_includes_present_optional_claims() -> None:
@@ -653,6 +997,34 @@ def test_access_token_includes_present_optional_claims() -> None:
     assert claims["sub"] == "user"
     assert claims["scope"] == "read write"
     assert claims["tenant"] == "acme"
+
+
+@pytest.mark.parametrize("scope", [1, ""])
+def test_access_token_refuses_invalid_scope_elements(scope: object) -> None:
+    with pytest.raises(OAuthRefusal, match="scope.*RFC 6749 scope-token"):
+        _server().issue_access(
+            subject="user",
+            audience="api",
+            scope=cast(Any, (scope,)),
+        )
+
+
+def test_requested_scopes_are_bounded_before_exhausting_an_iterable() -> None:
+    def scopes():
+        yield from (f"scope-{index}" for index in range(257))
+        raise AssertionError("scope iterable was consumed past its bound")
+
+    with pytest.raises(OAuthRefusal, match="at most 256"):
+        _server().issue_access(subject="user", audience="api", scope=scopes())
+
+
+def test_scope_tokens_have_a_bounded_encoded_size() -> None:
+    with pytest.raises(OAuthRefusal, match="at most 1024"):
+        _server().issue_access(
+            subject="user",
+            audience="api",
+            scope=("x" * 1025,),
+        )
 
 
 def test_refresh_is_minted_only_when_requested_for_a_subject() -> None:
@@ -687,6 +1059,55 @@ def test_client_credentials_defaults_to_registered_scopes() -> None:
 def test_refresh_defaults_its_audience_to_the_issuer() -> None:
     refresh = _server().issue_refresh(subject="user")
     assert refresh.audience == "https://issuer.example"
+
+
+def test_refresh_authority_is_not_mutable_through_the_returned_record() -> None:
+    server = _detail_server()
+    refresh = server.issue_refresh(
+        subject="user",
+        authorization_details=[{"type": "payment", "amount": 1}],
+    )
+
+    refresh.authorization_details[0]["amount"] = 1_000_000
+    rotated = server.rotate(refresh)
+
+    assert rotated.authorization_details[0]["amount"] == 1
+
+
+def test_dpop_bound_grants_require_and_preserve_the_same_key() -> None:
+    client = ClientRegistration(client_id="dpop", dpop_bound_access_tokens=True)
+    server = _server(clients=(client,))
+
+    with pytest.raises(OAuthRefusal) as raised:
+        server.issue_access(subject="user", audience="api", client_id="dpop")
+    assert raised.value.reason == "invalid-dpop-proof"
+    assert (
+        server.issue_access(
+            subject="user",
+            audience="api",
+            client_id="dpop",
+            dpop_jkt="key-thumbprint",
+        ).token_type
+        == "DPoP"
+    )
+
+    first = server.issue_refresh(
+        subject="user",
+        client_id="dpop",
+        dpop_jkt="key-thumbprint",
+    )
+    with pytest.raises(OAuthRefusal) as raised:
+        server.rotate(first, client_id="dpop", dpop_jkt="other-thumbprint")
+    assert raised.value.reason == "invalid-dpop-proof"
+    rotated = server.rotate(first, client_id="dpop", dpop_jkt="key-thumbprint")
+    with pytest.raises(OAuthRefusal) as raised:
+        server.rotate(first, client_id="dpop", dpop_jkt="other-thumbprint")
+    assert raised.value.reason == "invalid-dpop-proof"
+    assert not server.is_revoked(rotated.access_token)
+    with pytest.raises(OAuthRefusal) as raised:
+        server.rotate(first, client_id="dpop", dpop_jkt="key-thumbprint")
+    assert raised.value.reason == "refresh-reused"
+    assert server.is_revoked(rotated.access_token)
 
 
 def test_reused_bound_refresh_authenticates_before_revoking() -> None:
@@ -773,6 +1194,69 @@ def test_expired_spent_refresh_evidence_is_reclaimed() -> None:
     assert first.token not in server._spent
 
 
+def test_pending_grant_capacity_refuses_before_state_grows() -> None:
+    server = _server(max_pending_grants=2)
+    server.issue_refresh(subject="user", now=0)
+
+    with pytest.raises(OAuthRefusal, match="pending grant state.*2 entry limit") as raised:
+        server.issue_code(
+            client_id="public",
+            subject="user",
+            challenge=_challenge("verifier"),
+            redirect_uri="https://client.example/public",
+            now=0,
+        )
+
+    assert raised.value.reason == "server-busy"
+
+
+def test_pending_grant_cleanup_preserves_unexpired_codes() -> None:
+    server = _server(code_ttl=60, max_pending_grants=2)
+    first = server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+        now=0,
+    )
+    second = server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+        now=30,
+    )
+
+    assert first in server._codes
+    assert second in server._codes
+
+
+def test_expired_codes_and_refreshes_release_pending_capacity() -> None:
+    code_server = _server(code_ttl=1, max_pending_grants=1)
+    first_code = code_server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+        now=0,
+    )
+    second_code = code_server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge=_challenge("verifier"),
+        redirect_uri="https://client.example/public",
+        now=2,
+    )
+    assert first_code not in code_server._codes
+    assert second_code in code_server._codes
+
+    refresh_server = _server(refresh_ttl=1, max_pending_grants=2)
+    first_refresh = refresh_server.issue_refresh(subject="user", now=0)
+    second_refresh = refresh_server.issue_refresh(subject="user", now=2)
+    assert first_refresh.token not in refresh_server._refresh
+    assert second_refresh.token in refresh_server._refresh
+
+
 def test_expired_access_revocations_do_not_exhaust_pending_grant_capacity() -> None:
     server = _server(lifetime=1, max_pending_grants=4)
     for index in range(4):
@@ -806,3 +1290,27 @@ def test_non_finite_or_boolean_token_expiry_is_not_used_for_revocation_cleanup(
 
     assert token not in server._revoked_expiries
     assert token in server._revoked
+
+
+def test_access_revocation_tracks_the_compact_token_and_verified_identifier() -> None:
+    server = _server()
+    issued = server.issue_access(subject="user", audience="api", now=1000)
+    claims = _claims(issued.access_token)
+
+    server._revoke_access(issued.access_token)
+
+    assert server.is_revoked(issued.access_token)
+    assert server.is_revoked(claims)
+    assert claims["jti"] in server._revoked_ids
+    assert server._revoked_expiries[issued.access_token] == (claims["jti"], 4600.0)
+
+
+def test_malformed_access_revocation_does_not_invent_a_token_identifier() -> None:
+    server = _server()
+
+    server._revoke_access("malformed")
+
+    assert server.is_revoked("malformed")
+    assert not server.is_revoked({"jti": "malformed"})
+    assert server._revoked_ids == set()
+    assert server._revoked_expiries == {}

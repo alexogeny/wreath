@@ -247,6 +247,18 @@ def test_generation_is_deterministic() -> None:
     assert _generate_fixture() == _generate_fixture()
 
 
+def test_base_url_environment_name_cannot_inject_typescript() -> None:
+    from tests.typegen.app import app
+
+    api = build_api_model(app)
+    source = render_typescript(
+        api,
+        base_url_env='X; globalThis.injected = true; //',
+    )["index.ts"]
+
+    assert '.env?.["X; globalThis.injected = true; //"]' in source
+
+
 def test_no_secrets_paths_or_timestamps_in_output() -> None:
     import re
 

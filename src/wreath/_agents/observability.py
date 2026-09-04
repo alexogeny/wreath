@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import hashlib
-from collections.abc import Callable, Mapping
+import hmac
+import math
+import secrets
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -9,6 +11,7 @@ from ..recording import BodyCapture, RedactionPolicy
 from .identity import principal_id
 
 AgentOutcome = Literal["succeeded", "failed", "denied", "cancelled", "unknown"]
+_UTF8_CHUNK_CHARACTERS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,11 @@ class AgentUsage:
     cached_input_tokens: int = 0
 
     def __post_init__(self) -> None:
+        if any(
+            type(value) is not int
+            for value in (self.input_tokens, self.output_tokens, self.cached_input_tokens)
+        ):
+            raise TypeError("agent usage counts must be integers")
         if min(self.input_tokens, self.output_tokens, self.cached_input_tokens) < 0:
             raise ValueError("agent usage counts must be non-negative")
 
@@ -41,12 +49,20 @@ class AgentCapturePolicy:
     redact: Callable[[str, Any], str] | None = None
 
     def __post_init__(self) -> None:
+        fields = frozenset(self.fields)
+        if any(not isinstance(field, str) or not field for field in fields):
+            raise ValueError("agent payload fields must be non-empty strings")
+        object.__setattr__(self, "fields", fields)
         mode = self.redaction.dependency
         if mode is BodyCapture.NONE:
             raise ValueError("agent payload capture requires dependency capture opt-in")
         if not self.fields:
             raise ValueError("agent payload capture requires at least one field")
-        if self.redaction.max_fields < len(self.fields):
+        if type(self.redaction.max_fields) is not int:
+            raise TypeError("agent payload max_fields must be an integer")
+        if type(self.redaction.max_body_bytes) is not int:
+            raise TypeError("agent payload max_body_bytes must be an integer")
+        if self.redaction.max_fields < len(fields):
             raise ValueError("agent payload fields exceed redaction max_fields")
         if self.redaction.max_body_bytes < 1:
             raise ValueError("agent payload capture requires a positive max_body_bytes")
@@ -82,15 +98,38 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _utf8_chunks(value: str) -> Iterator[bytes]:
+    if len(value) <= _UTF8_CHUNK_CHARACTERS:
+        yield value.encode()
+        return
+    for offset in range(0, len(value), _UTF8_CHUNK_CHARACTERS):
+        yield value[offset : offset + _UTF8_CHUNK_CHARACTERS].encode()
+
+
+def _utf8_length(value: str) -> int:
+    return sum(len(chunk) for chunk in _utf8_chunks(value))
+
+
+def _keyed_fingerprint(value: str, key: bytes) -> tuple[int, str]:
+    digest = hmac.new(key, digestmod="sha256")
+    length = 0
+    for chunk in _utf8_chunks(value):
+        length += len(chunk)
+        digest.update(chunk)
+    return length, digest.hexdigest()
+
+
 def _truncate_utf8(value: str, limit: int) -> tuple[str, bool]:
-    encoded = value.encode()
+    characters = len(value)
+    candidate = value[:limit]
+    encoded = candidate.encode()
     if len(encoded) <= limit:
-        return value, False
+        return candidate, characters > limit
     return encoded[:limit].decode("utf-8", "ignore"), True
 
 
 class AgentObservability:
-    __slots__ = ("_capture", "_record", "recording_errors")
+    __slots__ = ("_capture", "_hash_key", "_record", "recording_errors")
 
     def __init__(
         self,
@@ -102,6 +141,11 @@ class AgentObservability:
             raise ValueError("agent payload capture requires an observer")
         self._record = None if observer is None else observer.record
         self._capture = capture
+        self._hash_key = (
+            secrets.token_bytes(32)
+            if capture is not None and capture.redaction.dependency is BodyCapture.HASHED
+            else None
+        )
         self.recording_errors = 0
 
     async def _emit(self, event: AgentObservation) -> None:
@@ -127,13 +171,17 @@ class AgentObservability:
             if field not in payloads:
                 continue
             value = _text(payloads[field])
-            length = len(value.encode())
             if mode is BodyCapture.METADATA:
+                length = _utf8_length(value)
                 captured.append(CapturedAgentPayload(field, length))
                 continue
             if mode is BodyCapture.HASHED:
-                rendered = hashlib.sha256(value.encode()).hexdigest()
+                hash_key = self._hash_key
+                if hash_key is None:
+                    raise RuntimeError("hashed capture has no fingerprint key")
+                length, rendered = _keyed_fingerprint(value, hash_key)
             else:
+                length = _utf8_length(value)
                 redactor = policy.redact
                 if redactor is None:
                     raise RuntimeError("structured capture has no redactor")
@@ -166,6 +214,11 @@ class AgentObservability:
         payload: tuple[CapturedAgentPayload, ...],
         **values: Any,
     ) -> AgentObservation:
+        if (
+            type(duration) not in {int, float}
+            or not math.isfinite(duration)
+        ):
+            raise ValueError("agent observation duration must be a finite number")
         if duration < 0:
             raise ValueError("agent observation duration must be non-negative")
         if outcome not in {"succeeded", "failed", "denied", "cancelled", "unknown"}:

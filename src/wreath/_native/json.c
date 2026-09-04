@@ -1211,19 +1211,19 @@ wreath_json_loads_validation(PyObject *arg, PyObject *plan, PyObject *loc_seq)
 static PyObject *
 stdlib_loads(PyObject *arg)
 {
-    static PyObject *loads = NULL;
-    if (loads == NULL) {
-        PyObject *module = PyImport_ImportModule("json");
-        if (module == NULL) {
-            return NULL;
-        }
-        loads = PyObject_GetAttrString(module, "loads");
-        Py_DECREF(module);
-        if (loads == NULL) {
-            return NULL;
-        }
+    /* native-lint: allow NC004 -- caching loads here retains another interpreter's callable */
+    PyObject *module = PyImport_ImportModule("json");
+    if (module == NULL) {
+        return NULL;
     }
-    return PyObject_CallOneArg(loads, arg);
+    PyObject *loads = PyObject_GetAttrString(module, "loads");
+    Py_DECREF(module);
+    if (loads == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallOneArg(loads, arg);
+    Py_DECREF(loads);
+    return result;
 }
 
 PyObject *

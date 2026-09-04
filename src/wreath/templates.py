@@ -104,30 +104,27 @@ class TemplateDirectory:
         self._encoding = encoding
         # A trusted root descriptor so both direct compiles and includes are read
         # beneath the root without following symlinks out of it.
-        self._root_fd = open_root(self.root) if _HAVE_DIR_FD else -1
+        if not _HAVE_DIR_FD:
+            raise ContainmentError("platform lacks openat/dir_fd support")
+        self._root_fd = open_root(self.root)
 
     def _read(self, name: str) -> str | None:
         # Contain lookups within the root; a traversing or symlinked name (direct
         # or via an include) resolves to None, so it is never read or compiled.
-        if _HAVE_DIR_FD:
-            try:
-                fd, _info = open_beneath(self._root_fd, name)
-            except ContainmentError, OSError:
-                return None
-            try:
-                return _read_all(fd).decode(self._encoding)
-            finally:
-                os.close(fd)
-        # No openat: resolve symlinks and contain against the real root path.
-        target = os.path.realpath(os.path.join(self.root, name))
-        root = os.path.realpath(self.root)
-        if target != root and not target.startswith(root + os.sep):
+        try:
+            fd, _info = open_beneath(self._root_fd, name)
+        except ContainmentError, OSError:
             return None
         try:
-            with open(target, encoding=self._encoding) as handle:
-                return handle.read()
-        except FileNotFoundError:
-            return None
+            return _read_all(fd).decode(self._encoding)
+        finally:
+            os.close(fd)
+
+    def close(self) -> None:
+        """Release the trusted root descriptor. Safe to call more than once."""
+        fd, self._root_fd = self._root_fd, -1
+        if fd >= 0:
+            os.close(fd)
 
     def compile(self, name: str) -> Template:
         source = self._read(name)

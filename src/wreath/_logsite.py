@@ -241,8 +241,8 @@ class SiteRegistry:
     __slots__ = ("_by_id", "_by_name", "_by_template", "_capacity", "_key", "_overflow")
 
     def __init__(self, capacity: int = DEFAULT_SITE_CAPACITY) -> None:
-        if capacity < 1:
-            raise LogSiteError(f"site capacity must be positive, got {capacity}")
+        if type(capacity) is not int or capacity < 1:
+            raise LogSiteError(f"site capacity must be a positive integer, got {capacity}")
         self._capacity = capacity
         self._by_id: list[LogSite] = []
         self._by_name: dict[str, LogSite] = {}
@@ -268,8 +268,8 @@ class SiteRegistry:
         ids are already on records in flight, and evicting them would make those
         records unreadable. The ceiling binds new registrations only.
         """
-        if capacity < 1:
-            raise LogSiteError(f"site capacity must be positive, got {capacity}")
+        if type(capacity) is not int or capacity < 1:
+            raise LogSiteError(f"site capacity must be a positive integer, got {capacity}")
         self._capacity = capacity
 
     @property

@@ -193,6 +193,14 @@ def parse_dictionary(
     objects the serializer consumes, so newer fields do not grow independent
     structured-field grammars.
     """
+    if type(max_bytes) is not int:
+        raise TypeError("structured dictionary max bytes must be an integer")
+    if max_bytes < 1:
+        raise ValueError("structured dictionary max bytes must be a positive integer")
+    if type(max_members) is not int:
+        raise TypeError("structured dictionary max members must be an integer")
+    if max_members < 1:
+        raise ValueError("structured dictionary max members must be a positive integer")
     if isinstance(value, bytes):
         text = value.decode("latin-1")
     elif isinstance(value, str):

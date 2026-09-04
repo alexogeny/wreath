@@ -112,7 +112,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Final
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
 from ._capability_map import CapabilityMap
@@ -240,7 +240,13 @@ def _verification_plan(raw_input: bytes, raw_signature: bytes) -> Any:
     )
 
 
+def _is_structured_string(value: str) -> bool:
+    return value.isascii() and value.isprintable()
+
+
 def _serialize_string(value: str) -> str:
+    if not _is_structured_string(value):
+        raise SignatureError("value must be a printable ASCII Structured Fields string")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -518,6 +524,18 @@ class SigningKey:
     sign: Callable[[bytes], bytes]
     agent: str | None = None
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.key_id, str)
+            or not self.key_id
+            or not _is_structured_string(self.key_id)
+        ):
+            raise ValueError("SigningKey key_id must be a non-empty Structured Fields string")
+        if self.agent is not None and (
+            not isinstance(self.agent, str) or not _is_structured_string(self.agent)
+        ):
+            raise ValueError("SigningKey agent must be a Structured Fields string or None")
+
 
 class _Directory:
     """One operator's published keys, replaced wholesale off the request path.
@@ -534,17 +552,32 @@ class _Directory:
     __slots__ = ("_keys", "origin", "path", "url")
 
     def __init__(self, url: str) -> None:
-        if not url.startswith("https://"):
-            # An unauthenticated origin publishing verification keys makes the
-            # whole signature meaningless: whoever can rewrite the response can
-            # mint keys. There is no development exception, because the
-            # development exception is what ships.
-            raise ValueError("signature directories must be https")
+        message = (
+            f"signature directory URL {url!r} must be https, absolute, and contain "
+            "no credentials or fragment"
+        )
+        if any(
+            ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in url
+        ):
+            raise ValueError(message)
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError(message) from error
+        if (
+            port == 0
+            or parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.fragment
+        ):
+            raise ValueError(message)
         self.url = url
-        scheme, _, rest = url.partition("://")
-        host, _, path = rest.partition("/")
-        self.origin = f"{scheme}://{host}"
-        self.path = "/" + path
+        self.origin = f"https://{parsed.netloc}"
+        self.path = parsed.path or "/"
+        if parsed.query:
+            self.path += f"?{parsed.query}"
         self._keys: dict[str, OkpPublicKey] = {}
 
     def key(self, key_id: str) -> OkpPublicKey | None:
@@ -666,13 +699,21 @@ class Signatures:
         refresh_on_startup: bool = True,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        if not isfinite(max_age) or max_age <= 0:
+        if (
+            type(max_age) not in (int, float)
+            or not isfinite(max_age)
+            or max_age <= 0
+        ):
             raise ValueError("signature max_age must be finite and positive")
         if profile != WEB_BOT_AUTH_2026:
             raise ValueError(
                 f"unknown signature profile {profile!r}; "
                 f"this build implements {WEB_BOT_AUTH_2026!r}"
             )
+        if type(refresh_on_startup) is not bool:
+            raise ValueError("refresh_on_startup must be a bool")
+        if clock is not None and not callable(clock):
+            raise ValueError("clock must be callable or None")
         self.profile = profile
         self.max_age = max_age
         self._required = tuple(name.lower() for name in required)
@@ -697,7 +738,10 @@ class Signatures:
         return tuple(directory.url for directory in self._directories)
 
     def _now(self) -> float:
-        return time.time() if self._clock is None else self._clock()
+        value = time.time() if self._clock is None else self._clock()
+        if type(value) not in (int, float) or not isfinite(value):
+            raise SignatureError("signature clock must return a finite number")
+        return value
 
     def install(self, url: str, document: Mapping[str, Any]) -> int:
         """Install a fetched directory document. Returns usable key count.
@@ -842,15 +886,17 @@ class Signatures:
         )
 
         created = params.get("created")
-        if not isinstance(created, int):
+        if type(created) is not int:
             raise SignatureError("signature has no created parameter")
         now = self._now()
         if abs(now - created) > self.max_age:
             raise SignatureError("signature created outside the accepted window")
         expires = params.get("expires")
-        # A malformed value must reach signature refusal, not an early TypeError.
-        if isinstance(expires, int) and now > expires:
-            raise SignatureError("signature has expired")
+        if expires is not None:
+            if type(expires) is not int:
+                raise SignatureError("signature expires parameter must be an integer")
+            if now > expires:
+                raise SignatureError("signature has expired")
 
         alg = params.get("alg")
         if alg is not None and alg not in _ALGORITHMS:

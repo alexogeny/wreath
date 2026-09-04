@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from .._auth.models import Identity, qualified_identity_value
+from .._auth.models import Identity, qualified_identity_key, qualified_identity_value
+from .._json import dumps as _json_dumps
+from .._json import loads as _json_loads
 from ..binding import ValidationError
 from ..request import Request
 from . import record as _record
@@ -166,6 +168,8 @@ class ToolExecutor:
         *,
         max_tools: int = 32,
     ) -> None:
+        if type(max_tools) is not int:
+            raise TypeError("max_tools must be an integer")
         if max_tools < 1:
             raise ValueError("max_tools must be at least 1")
         if len(names) > max_tools:
@@ -222,6 +226,7 @@ class ToolExecutor:
             raise ValueError("call_id must be a non-empty string")
         if not isinstance(arguments, Mapping):
             raise TypeError("tool arguments must be a mapping")
+        arguments = _json_loads(_json_dumps(arguments))
         tool = self._tools.get(name)
         if tool is None:
             raise ValueError(f"tool {name!r} is not in this agent's selected catalog")
@@ -276,7 +281,12 @@ class ToolExecutor:
             subject = (
                 "anonymous"
                 if principal_id is None
-                else f"principal:{len(str(principal_id))}:{principal_id}"
+                else "principal:"
+                + qualified_identity_key(
+                    str(getattr(identity, "type", "")),
+                    str(getattr(identity, "namespace", "")),
+                    str(principal_id),
+                )
             )
             key = f"agent:{len(tenant)}:{tenant}:{subject}"
             retry_after = limiter.try_acquire(key, 1.0, time.monotonic())

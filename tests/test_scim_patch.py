@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
 from wreath._scim.patch import (
@@ -35,7 +37,7 @@ def group_document() -> dict[str, object]:
     }
 
 
-def patch(*operations: dict[str, object]) -> dict[str, object]:
+def patch(*operations: Mapping[str, object]) -> dict[str, object]:
     return {"schemas": [PATCH_OP_URN], "Operations": list(operations)}
 
 
@@ -70,6 +72,13 @@ def test_each_malformed_path_has_its_own_refusal(source: str, fragment: str) -> 
     assert fragment in caught.value.detail
 
 
+def test_a_patch_path_has_a_bounded_length() -> None:
+    with pytest.raises(PatchError) as caught:
+        parse_path("m" * 2049, shape=GROUP)
+    assert caught.value.scim_type == "invalidPath"
+    assert "at most 2048 characters" in caught.value.detail
+
+
 def test_a_body_naming_the_wrong_schema_is_refused() -> None:
     with pytest.raises(PatchError) as caught:
         apply(user_document(), {"schemas": ["nope"], "Operations": []}, shape=USER)
@@ -81,6 +90,18 @@ def test_a_body_with_no_operations_is_refused() -> None:
     with pytest.raises(PatchError) as caught:
         apply(user_document(), {"Operations": []}, shape=USER)
     assert "non-empty Operations list" in caught.value.detail
+
+
+def test_a_body_cannot_carry_two_spellings_of_operations() -> None:
+    operation = [{"op": "replace", "path": "active", "value": False}]
+    with pytest.raises(PatchError) as caught:
+        apply(
+            user_document(),
+            {"Operations": operation, "operations": operation},
+            shape=USER,
+        )
+    assert caught.value.scim_type == "invalidSyntax"
+    assert "more than once" in caught.value.detail
 
 
 def test_more_operations_than_the_ceiling_are_refused() -> None:
@@ -154,6 +175,46 @@ def test_a_pathless_replace_applies_each_key_as_a_path() -> None:
     assert result["userName"] == "b@e.com"
 
 
+def test_a_pathless_operation_cannot_bypass_the_operation_ceiling_with_aliases() -> None:
+    with pytest.raises(PatchError) as caught:
+        apply(
+            user_document(),
+            patch(
+                {
+                    "op": "replace",
+                    "value": {
+                        "one:userName": "one@example.com",
+                        "two:active": False,
+                        "three:password": "secret",
+                        "four:userName": "four@example.com",
+                    },
+                }
+            ),
+            shape=USER,
+        )
+    assert caught.value.scim_type == "invalidValue"
+    assert "at most 3 attributes" in caught.value.detail
+
+
+def test_a_pathless_operation_refuses_duplicate_attribute_spellings() -> None:
+    with pytest.raises(PatchError) as caught:
+        apply(
+            user_document(),
+            patch(
+                {
+                    "op": "replace",
+                    "value": {
+                        "one:userName": "one@example.com",
+                        "two:UserName": "two@example.com",
+                    },
+                }
+            ),
+            shape=USER,
+        )
+    assert caught.value.scim_type == "invalidSyntax"
+    assert "more than once" in caught.value.detail
+
+
 def test_a_pathless_replace_still_refuses_a_read_only_key() -> None:
     with pytest.raises(PatchError) as caught:
         apply(
@@ -219,6 +280,18 @@ def test_replacing_a_selected_element_replaces_the_whole_element() -> None:
     assert result["members"] == [{"value": "9"}]
 
 
+@pytest.mark.parametrize("value", [[], [{"value": "8"}, {"value": "9"}]])
+def test_replacing_a_selected_element_needs_exactly_one_replacement(value: object) -> None:
+    with pytest.raises(PatchError) as caught:
+        apply(
+            group_document(),
+            patch({"op": "replace", "path": 'members[value eq "7"]', "value": value}),
+            shape=GROUP,
+        )
+    assert caught.value.scim_type == "invalidValue"
+    assert "exactly one element" in caught.value.detail
+
+
 def test_a_bare_string_member_means_the_same_as_an_object() -> None:
     result = apply(
         group_document(),
@@ -251,6 +324,71 @@ def test_removing_a_whole_multi_valued_attribute_clears_it() -> None:
     assert result["members"] == []
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["members.display", 'members[value eq "7"].display'],
+)
+def test_removing_a_member_sub_attribute_cannot_remove_the_member(path: str) -> None:
+    document = group_document()
+    with pytest.raises(PatchError) as caught:
+        apply(document, patch({"op": "remove", "path": path}), shape=GROUP)
+    assert caught.value.scim_type == "invalidValue"
+    assert "remove the selected member" in caught.value.detail
+    assert document["members"] == [{"value": "7", "type": "User"}]
+
+
+@pytest.mark.parametrize(
+    ("op", "path"),
+    [
+        ("add", 'members[value eq "7"]'),
+        ("add", "members.display"),
+        ("add", 'members[value eq "7"].display'),
+        ("replace", "members.display"),
+    ],
+)
+def test_a_member_operation_cannot_ignore_its_sub_attribute(op: str, path: str) -> None:
+    document = group_document()
+    with pytest.raises(PatchError) as caught:
+        apply(document, patch({"op": op, "path": path, "value": "9"}), shape=GROUP)
+    assert caught.value.scim_type == "invalidPath"
+    assert "whole multi-valued attribute" in caught.value.detail
+    assert document["members"] == [{"value": "7", "type": "User"}]
+
+
+def test_replacing_a_derived_member_sub_attribute_is_refused() -> None:
+    document = group_document()
+    with pytest.raises(PatchError) as caught:
+        apply(
+            document,
+            patch(
+                {
+                    "op": "replace",
+                    "path": 'members[value eq "7"].display',
+                    "value": "renamed",
+                }
+            ),
+            shape=GROUP,
+        )
+    assert caught.value.scim_type == "mutability"
+    assert "only its 'value'" in caught.value.detail
+    assert document["members"] == [{"value": "7", "type": "User"}]
+
+
+def test_replacing_a_selected_members_value_changes_its_identity() -> None:
+    result = apply(
+        group_document(),
+        patch(
+            {
+                "op": "replace",
+                "path": 'members[value eq "7"].value',
+                "value": "9",
+            }
+        ),
+        shape=GROUP,
+    )
+    assert result["members"] == [{"value": "9", "type": "User"}]
+
+
 def test_replacing_through_a_filter_that_matches_nothing_is_refused() -> None:
     with pytest.raises(PatchError) as caught:
         apply(
@@ -268,6 +406,36 @@ def test_replacing_a_whole_multi_valued_attribute_sets_it() -> None:
         shape=GROUP,
     )
     assert [member["value"] for member in result["members"]] == ["9"]
+
+
+def test_patch_multi_value_normalization_honors_an_element_ceiling() -> None:
+    with pytest.raises(PatchError) as caught:
+        apply(
+            group_document(),
+            patch(
+                {
+                    "op": "replace",
+                    "path": "members",
+                    "value": [{"value": "7"}, {"value": "9"}],
+                }
+            ),
+            shape=GROUP,
+            max_elements=1,
+        )
+    assert caught.value.scim_type == "tooMany"
+    assert "at most 1 elements" in caught.value.detail
+
+
+def test_put_multi_value_normalization_honors_an_element_ceiling() -> None:
+    with pytest.raises(PatchError) as caught:
+        replace(
+            group_document(),
+            {"members": [{"value": "7"}, {"value": "9"}]},
+            shape=GROUP,
+            max_elements=1,
+        )
+    assert caught.value.scim_type == "tooMany"
+    assert "at most 1 elements" in caught.value.detail
 
 
 def test_a_refusal_part_way_through_applies_nothing() -> None:
@@ -301,6 +469,28 @@ def test_a_replacement_ignores_read_only_and_unknown_attributes() -> None:
     assert result["groups"] == []
     assert "externalId" not in result
     assert result["meta"] == {"resourceType": "User"}
+
+
+def test_a_replacement_body_has_a_bounded_attribute_count() -> None:
+    body = {f"unknown{index}": index for index in range(MAX_OPERATIONS + 1)}
+    with pytest.raises(PatchError) as caught:
+        replace(user_document(), body, shape=USER)
+    assert caught.value.scim_type == "invalidValue"
+    assert f"at most {MAX_OPERATIONS} attributes" in caught.value.detail
+
+
+def test_a_replacement_refuses_duplicate_writable_attribute_spellings() -> None:
+    with pytest.raises(PatchError) as caught:
+        replace(
+            user_document(),
+            {
+                "one:userName": "one@example.com",
+                "two:UserName": "two@example.com",
+            },
+            shape=USER,
+        )
+    assert caught.value.scim_type == "invalidSyntax"
+    assert "more than once" in caught.value.detail
 
 
 def test_a_replacement_leaves_an_omitted_attribute_alone() -> None:

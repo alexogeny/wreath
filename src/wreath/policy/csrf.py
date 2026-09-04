@@ -26,6 +26,7 @@ see `CsrfPolicy` for why the origin check depends on it.
 from __future__ import annotations
 
 import hmac
+import inspect
 import math
 import re
 import time
@@ -44,6 +45,7 @@ from .._webpolicy import (
 )
 from ..request import Request
 from ..response import ProblemResponse
+from ._cookies import cookie_name_is_ambiguous
 
 # Token minting and validation are accelerated, because they were the most
 # expensive stage in the tape: ~11us per request, of which the HMAC itself was
@@ -258,7 +260,7 @@ class CsrfPolicy:
 
     def __init__(
         self,
-        secret: str | bytes,
+        secret: str | bytes | bytearray | memoryview,
         *,
         cookie_name: str = "wreath_csrf",
         header_name: str = "x-csrf-token",
@@ -271,9 +273,28 @@ class CsrfPolicy:
         exempt: Callable[[Request], bool] | None = None,
         allow_missing_origin: bool = False,
     ) -> None:
-        secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+        if isinstance(secret, str):
+            secret_bytes = secret.encode("utf-8")
+        elif isinstance(secret, bytes | bytearray | memoryview):
+            secret_bytes = bytes(secret)
+        else:
+            raise TypeError("CSRF secret must be str or bytes-like")
         if len(secret_bytes) < 32:
             raise ValueError("CSRF secret must contain at least 32 bytes")
+        if isinstance(max_age, float) and not math.isfinite(max_age):
+            raise ValueError("CSRF max_age must be positive and finite")
+        if not isinstance(max_age, int) or isinstance(max_age, bool):
+            raise TypeError("CSRF max_age must be an integer number of seconds")
+        if not isinstance(secure, bool):
+            raise TypeError("CSRF secure must be bool")
+        if not isinstance(allow_missing_origin, bool):
+            raise TypeError("CSRF allow_missing_origin must be bool")
+        if exempt is not None and (
+            not callable(exempt)
+            or inspect.iscoroutinefunction(exempt)
+            or inspect.iscoroutinefunction(type(exempt).__call__)
+        ):
+            raise TypeError("CSRF exempt must be a synchronous callable or None")
         if not _is_http_token(cookie_name) or not _is_http_token(header_name):
             raise ValueError("CSRF cookie and header names must be valid HTTP tokens")
         if form_field is not None and (not isinstance(form_field, str) or not form_field):
@@ -285,8 +306,10 @@ class CsrfPolicy:
             raise ValueError("a __Host- CSRF cookie must be Secure; pass secure=True")
         if cookie_name.startswith("__Secure-") and not secure:
             raise ValueError("a __Secure- CSRF cookie must be Secure; pass secure=True")
-        if not math.isfinite(max_age) or max_age <= 0:
+        if max_age <= 0:
             raise ValueError("CSRF max_age must be positive and finite")
+        if max_age > 2**63 - 1:
+            raise ValueError("CSRF max_age must be at most 2**63 - 1 seconds")
         normalized_same_site = same_site.lower()
         if normalized_same_site not in {"strict", "lax", "none"}:
             raise ValueError("same_site must be strict, lax, or none")
@@ -415,9 +438,17 @@ class CsrfPolicy:
 
     def _check_exemption(self, request: Request):
         try:
-            if self._exempt is not None and self._exempt(request):
+            if self._exempt is None:
+                return None
+            result = self._exempt(request)
+            if result is True:
                 return True
-            return None
+            if result is False:
+                return None
+            if inspect.iscoroutine(result):
+                result.close()
+            self.exempt_errors += 1
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
         except Exception:  # noqa: BLE001
             # Application code controls a security decision. Fail closed and
             # retain an observable counter so a broken predicate is diagnosable.
@@ -432,6 +463,10 @@ class CsrfPolicy:
         now: int,
     ):
         cookie = request.cookies.get(self._cookie_name)
+        if cookie is not None and cookie_name_is_ambiguous(
+            request.headers, self._cookie_name
+        ):
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
         valid, issued = False, now
         # `latin-1` cannot raise on an attacker-controlled cookie where ASCII
         # could turn a would-be 403 into a 500.
@@ -451,6 +486,7 @@ class CsrfPolicy:
     def _has_duplicate_security_header(self, request: Request) -> bool:
         seen_host = False
         seen_origin = False
+        seen_referer = False
         seen_token = False
         for raw_name, _ in request.headers:
             name = raw_name.lower()
@@ -462,6 +498,10 @@ class CsrfPolicy:
                 if seen_origin:
                     return True
                 seen_origin = True
+            elif name == b"referer":
+                if seen_referer:
+                    return True
+                seen_referer = True
             elif name == self._header_name_bytes:
                 if seen_token:
                     return True

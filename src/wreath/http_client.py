@@ -85,6 +85,8 @@ _ClientStream = _native_client.Http1ClientStream
 type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
 
 _HAPPY_EYEBALLS_DELAY = 0.25
+_MAX_DNS_ADDRESSES = 64
+_MAX_INFORMATIONAL_RESPONSES = 16
 
 # RFC 6052's well-known NAT64 prefix is globally routed, so `ipaddress` quite
 # correctly classifies an address inside it as global without interpreting the
@@ -101,6 +103,23 @@ _IPV4_COMPATIBLE_PREFIX = ipaddress.IPv6Network("::/96")
 _IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
 
 _AMBIGUOUS_TARGET_ESCAPES = ("%2e", "%2f", "%5c")
+
+
+def _validate_url_text(value: str, *, label: str) -> None:
+    if any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value):
+        raise ValueError(f"{label} contains a control character or space; percent-encode it")
+
+
+def _require_number(value: object, *, label: str) -> None:
+    if type(value) not in (int, float):
+        raise TypeError(f"{label} must be an int or float")
+
+
+def _is_finite_number(value: int | float) -> bool:
+    try:
+        return isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _validate_origin_path(path: str, *, label: str) -> None:
@@ -271,19 +290,23 @@ class ClientLimits:
     dns_cache_ttl: float = 30.0
 
     def __post_init__(self) -> None:
-        values = (
-            self.max_connections,
-            self.max_keepalive_connections,
-            self.max_waiters,
-            self.max_request_header_bytes,
-            self.max_response_header_bytes,
-            self.max_response_bytes,
-            self.read_high_water,
+        names = (
+            "max_connections",
+            "max_keepalive_connections",
+            "max_waiters",
+            "max_request_header_bytes",
+            "max_response_header_bytes",
+            "max_response_bytes",
+            "read_high_water",
         )
-        if any(value <= 0 for value in values):
+        for name in names:
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"ClientLimits {name} must be an integer")
+        if any(getattr(self, name) <= 0 for name in names):
             raise ValueError("client limits must be positive")
-        if self.dns_cache_ttl < 0:
-            raise ValueError("DNS cache TTL cannot be negative")
+        _require_number(self.dns_cache_ttl, label="ClientLimits dns_cache_ttl")
+        if not _is_finite_number(self.dns_cache_ttl) or self.dns_cache_ttl < 0:
+            raise ValueError("DNS cache TTL must be finite and non-negative")
         if self.max_keepalive_connections > self.max_connections:
             raise ValueError("max_keepalive_connections cannot exceed max_connections")
 
@@ -310,6 +333,10 @@ class ClientTLS:
     cafile: str | None = None
     capath: str | None = None
     verify: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.verify) is not bool:
+            raise TypeError("ClientTLS verify must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,9 +369,15 @@ class ClientTimeout:
     total: float | None = 45.0
 
     def __post_init__(self) -> None:
-        values = (self.pool, self.connect, self.tls, self.response_headers, self.response_body)
-        if any(not isfinite(value) or value <= 0 for value in values) or (
-            self.total is not None and (not isfinite(self.total) or self.total <= 0)
+        names = ("pool", "connect", "tls", "response_headers", "response_body")
+        for name in names:
+            _require_number(getattr(self, name), label=f"ClientTimeout {name}")
+        if self.total is not None:
+            _require_number(self.total, label="ClientTimeout total")
+        values = tuple(getattr(self, name) for name in names)
+        if any(not _is_finite_number(value) or value <= 0 for value in values) or (
+            self.total is not None
+            and (not _is_finite_number(self.total) or self.total <= 0)
         ):
             raise ValueError("client timeouts must be finite and positive")
 
@@ -394,11 +427,21 @@ class RetryPolicy:
     respect_retry_after: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.attempts) is not int:
+            raise TypeError("RetryPolicy attempts must be an integer")
+        for name in ("idempotent_only", "jitter", "respect_retry_after"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"RetryPolicy {name} must be a boolean")
+        object.__setattr__(self, "statuses", frozenset(self.statuses))
+        if any(type(status) is not int for status in self.statuses):
+            raise TypeError("RetryPolicy statuses must be integers")
         if self.attempts <= 0:
             raise ValueError("retry attempts must be positive")
+        _require_number(self.backoff_base, label="RetryPolicy backoff_base")
+        _require_number(self.backoff_cap, label="RetryPolicy backoff_cap")
         if (
-            not isfinite(self.backoff_base)
-            or not isfinite(self.backoff_cap)
+            not _is_finite_number(self.backoff_base)
+            or not _is_finite_number(self.backoff_cap)
             or self.backoff_base <= 0
             or self.backoff_cap <= 0
         ):
@@ -435,15 +478,20 @@ class RatePolicy:
     max_wait: float = 30.0
 
     def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise TypeError("RatePolicy enabled must be a boolean")
         if self.enabled:
+            _require_number(self.rate, label="RatePolicy rate")
+            _require_number(self.capacity, label="RatePolicy capacity")
+            _require_number(self.max_wait, label="RatePolicy max_wait")
             if (
-                not isfinite(self.rate)
-                or not isfinite(self.capacity)
+                not _is_finite_number(self.rate)
+                or not _is_finite_number(self.capacity)
                 or self.rate <= 0
                 or self.capacity <= 0
             ):
                 raise ValueError("an enabled RatePolicy needs finite positive rate and capacity")
-            if not isfinite(self.max_wait) or self.max_wait <= 0:
+            if not _is_finite_number(self.max_wait) or self.max_wait <= 0:
                 raise ValueError("RatePolicy max_wait must be finite and positive")
 
 
@@ -465,7 +513,12 @@ def _parse_retry_after(raw: bytes | None) -> float | None:
         seconds = int(text)
     except ValueError:
         return _http_date_delay(text)
-    return float(seconds) if seconds >= 0 else None
+    if seconds < 0:
+        return None
+    try:
+        return float(seconds)
+    except OverflowError:
+        return float("inf")
 
 
 def _http_date_delay(text: str) -> float | None:
@@ -516,6 +569,10 @@ class RedirectPolicy:
     max_hops: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise TypeError("RedirectPolicy enabled must be a boolean")
+        if type(self.max_hops) is not int:
+            raise TypeError("RedirectPolicy max_hops must be an integer")
         if self.max_hops < 0:
             raise ValueError("redirect max_hops cannot be negative")
         if self.enabled and self.max_hops == 0:
@@ -548,6 +605,11 @@ class TracePolicy:
     propagate: bool = True
     tracestate: bool = False
 
+    def __post_init__(self) -> None:
+        for name in ("propagate", "tracestate"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"TracePolicy {name} must be a boolean")
+
 
 @dataclass(frozen=True, slots=True)
 class DestinationPolicy:
@@ -560,9 +622,9 @@ class DestinationPolicy:
     what a hostname resolving to 127.0.0.1 or 169.254.169.254 has to pass, and
     it is why a DNS answer is validated in full rather than only the address
     that happens to win the connection race. Addresses under the well-known
-    NAT64 prefix and deprecated IPv4-compatible IPv6 literals are checked again
-    as their translated IPv4 destination, so a globally classified IPv6 answer
-    cannot tunnel to loopback or cloud metadata.
+    NAT64 prefix, IPv4-compatible literals, 6to4, Teredo, and ISATAP are checked
+    again as their translated IPv4 destination, so an IPv6 answer cannot tunnel
+    to loopback or cloud metadata.
 
     The defaults deny every non-global address. Loopback is denied too, so a
     client aimed at `http://localhost` in a test needs
@@ -584,6 +646,22 @@ class DestinationPolicy:
     allow_private: bool = False
     allow_loopback: bool = False
     allow_link_local: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schemes", frozenset(self.schemes))
+        object.__setattr__(self, "hosts", tuple(self.hosts))
+        object.__setattr__(self, "ports", frozenset(self.ports))
+        if any(type(scheme) is not str for scheme in self.schemes):
+            raise TypeError("DestinationPolicy schemes must be strings")
+        if any(type(host) is not str for host in self.hosts):
+            raise TypeError("DestinationPolicy hosts must be strings")
+        if any(type(port) is not int for port in self.ports):
+            raise TypeError("DestinationPolicy ports must be integers")
+        if any(port < 1 or port > 65535 for port in self.ports):
+            raise ValueError("DestinationPolicy ports must be between 1 and 65535")
+        for name in ("allow_private", "allow_loopback", "allow_link_local"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"DestinationPolicy {name} must be a boolean")
 
     def validate_url(self, parsed: SplitResult) -> None:
         """Check a parsed URL's scheme, credentials, host, and port.
@@ -633,6 +711,17 @@ class DestinationPolicy:
             ValueError: `value` is not a valid IP address.
         """
         address = ipaddress.ip_address(value.split("%", 1)[0])
+        if isinstance(address, ipaddress.IPv6Address):
+            for translated in (address.ipv4_mapped, address.sixtofour):
+                if translated is not None:
+                    self._validate_concrete_address(translated)
+            teredo = address.teredo
+            if teredo is not None:
+                server, client = teredo
+                self._validate_concrete_address(server)
+                self._validate_concrete_address(client)
+            if address.packed[-8:-4] == b"\x00\x00\x5e\xfe":
+                self._validate_concrete_address(ipaddress.IPv4Address(address.packed[-4:]))
         if address in _NAT64_WELL_KNOWN_PREFIX:
             translated = ipaddress.IPv4Address(address.packed[-4:])
             self._validate_concrete_address(translated)
@@ -703,6 +792,7 @@ class _StreamContext:
         "_body",
         "_client",
         "_connection",
+        "_framed_cleanly",
         "_headers",
         "_method",
         "_minor",
@@ -719,11 +809,14 @@ class _StreamContext:
         body: bytes,
     ) -> None:
         self._client = client
+        if len(method) > client._limits.max_request_header_bytes:
+            raise ClientError("request headers exceed configured limit")
         self._method = method.upper()
         self._target = target
         self._headers = headers
         self._body = body
         self._connection: Any = None
+        self._framed_cleanly = False
         self._minor = 1
         self._response_headers: list[tuple[bytes, bytes]] = []
 
@@ -740,18 +833,22 @@ class _StreamContext:
         client = self._client
         if not client._started:
             raise ClientClosed(f"HTTP client {client._name!r} is not started")
+        if client._rate_bucket is not None:
+            await client._throttle()
+        request_target = client._request_target(self._target)
+        request_headers = client._propagated(self._headers)
+        client._validate_request_head_inputs(self._method, len(request_target), request_headers)
         request = _client_codec.serialize_request(
             self._method,
-            client._request_target(self._target),
+            request_target,
             client._authority_bytes,
-            headers=client._propagated(self._headers),
+            headers=request_headers,
             body=self._body,
         )
         if len(request) - len(self._body) > client._limits.max_request_header_bytes:
             raise ClientError("request headers exceed configured limit")
         connection = await client._acquire()
         self._connection = connection
-        client._framed_cleanly = False
         try:
             connection.writer.write(request)
             await connection.writer.drain()
@@ -770,7 +867,7 @@ class _StreamContext:
             headers=tuple(headers),
             http_version=f"1.{minor}",
             reason=reason,
-            _chunks=client._iter_body(connection.reader, self._method, status, headers),
+            _chunks=client._iter_body(connection.reader, self._method, status, headers, self),
         )
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -784,7 +881,7 @@ class _StreamContext:
         # mid-message, and pooling it would hand the next caller a prefix.
         reusable = (
             exc_type is None
-            and client._framed_cleanly
+            and self._framed_cleanly
             and client._keeps_alive(self._minor, self._response_headers, True)
         )
         await client._release(connection, reusable)
@@ -962,10 +1059,6 @@ class HTTPClient:
         "_active",
         "_authority_bytes",
         "_base_path",
-        #: Set by `_iter_body` when a body reached its declared end. `stream`
-        #: reads it to decide whether the connection may be pooled -- a
-        #: partially-read response leaves the socket mid-message.
-        "_framed_cleanly",
         "_condition",
         "_capture_lock",
         "_capture_sequence",
@@ -1014,6 +1107,7 @@ class HTTPClient:
     ) -> None:
         if not name:
             raise ValueError("HTTP client name cannot be empty")
+        _validate_url_text(base_url, label="base_url")
         parsed = urlsplit(base_url)
         destination.validate_url(parsed)
         if parsed.query or parsed.fragment:
@@ -1025,6 +1119,8 @@ class HTTPClient:
         self._host = parsed.hostname.encode("idna").decode("ascii").lower()
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         _validate_origin_path(parsed.path, label="base_url path")
+        if not parsed.path.isascii():
+            raise ValueError("base_url path must be ASCII/percent-encoded")
         self._base_path = parsed.path.rstrip("/")
         self._authority_bytes = self._authority().encode("ascii")
         self._limits = limits
@@ -1068,7 +1164,6 @@ class HTTPClient:
         # a temporary dict-key tuple for every request.  The bounded dict below
         # remains the general cache and the observable private test seam.
         self._request_last_plan: tuple[str, str, str, bytes] | None = None
-        self._framed_cleanly = False
         self._reused = 0
         self._started = False
 
@@ -1321,7 +1416,8 @@ class HTTPClient:
             target: Origin-relative path, `/`-prefixed, ASCII/percent-encoded.
             headers: Raw byte pairs, sent in order after the client's own head.
             body: Sent verbatim. Copied to `bytes` once, so a buffer may be reused after.
-            idempotency_key: Sent as `Idempotency-Key`, and makes a non-idempotent method retryable.
+            idempotency_key: Non-empty value sent as `Idempotency-Key`; makes a
+                non-idempotent method retryable. Do not also supply that header.
 
         Returns:
             The response, body included.
@@ -1353,6 +1449,10 @@ class HTTPClient:
                 and self._rate_bucket is None
                 and (not self._trace.propagate or _telemetry.outbound_context.get(None) is None)
             ):
+                if headers:
+                    self._validate_request_head_inputs(
+                        method, len(self._base_path) + len(target), headers
+                    )
                 native = _client_codec.request_default(
                     self,
                     method,
@@ -1506,12 +1606,21 @@ class HTTPClient:
             raise ClientClosed(f"HTTP client {self._name!r} is not started")
         request_headers = headers
         if idempotency_key is not None:
+            if not idempotency_key:
+                raise ValueError("idempotency_key cannot be empty")
+            if len(idempotency_key) > self._limits.max_request_header_bytes:
+                raise ClientError("request headers exceed configured limit")
+            if any(name.lower() == b"idempotency-key" for name, _value in request_headers):
+                raise ValueError(
+                    "cannot pass both idempotency_key and an Idempotency-Key header"
+                )
             request_headers = (
                 *request_headers,
                 (b"idempotency-key", idempotency_key.encode("ascii")),
             )
         request_headers = self._propagated(request_headers)
         target_bytes = self._request_target(target)
+        self._validate_request_head_inputs(method, len(target_bytes), request_headers)
         method_upper = method.upper()
         payload = bytes(body)
         if not self._redirect.enabled:
@@ -1653,17 +1762,36 @@ class HTTPClient:
         if "#" in target:
             raise ValueError("request target cannot contain a fragment")
         _validate_origin_path(target.partition("?")[0], label="request target")
+        if len(self._base_path) + len(target) > self._limits.max_request_header_bytes:
+            raise ClientError("request headers exceed configured limit")
         combined = f"{self._base_path}{target}" if self._base_path else target
         try:
             return combined.encode("ascii")
         except UnicodeEncodeError as error:
             raise ValueError("request target must be ASCII/percent-encoded") from error
 
+    def _validate_request_head_inputs(
+        self, method: str, target_length: int, headers: tuple[tuple[bytes, bytes], ...]
+    ) -> None:
+        remaining = self._limits.max_request_header_bytes - len(method) - target_length
+        if remaining < 0:
+            raise ClientError("request headers exceed configured limit")
+        for name, value in headers:
+            if type(name) is not bytes or type(value) is not bytes:
+                raise TypeError("request header names and values must be bytes")
+            remaining -= len(name) + len(value) + 4
+            if remaining < 0:
+                raise ClientError("request headers exceed configured limit")
+
     def _redirect_target(self, current: str, location: bytes) -> str:
         try:
             value = location.decode("ascii")
         except UnicodeDecodeError as error:
             raise RedirectError("redirect location must be ASCII/percent-encoded") from error
+        try:
+            _validate_url_text(value, label="redirect location")
+        except ValueError as error:
+            raise RedirectError(str(error)) from error
         parsed = urlsplit(value)
         try:
             _validate_origin_path(parsed.path, label="redirect location")
@@ -1828,6 +1956,11 @@ class HTTPClient:
             addresses = tuple(cast(list[_AddressInfo], resolved))
             if not addresses:
                 raise DNSFailure("destination resolved to no addresses")
+            if len(addresses) > _MAX_DNS_ADDRESSES:
+                raise DNSFailure(
+                    f"destination resolved to too many addresses; maximum is {_MAX_DNS_ADDRESSES}"
+                )
+            addresses = tuple(dict.fromkeys(addresses))
             for family, _socket_type, _protocol, _canonical, sockaddr in addresses:
                 self._destination.validate_address(self._address(family, sockaddr))
             self._dns_addresses = addresses
@@ -1991,6 +2124,7 @@ class HTTPClient:
         method: str,
         status: int,
         headers: list[tuple[bytes, bytes]],
+        stream: _StreamContext,
     ) -> Any:
         """Yield the body as it arrives, and finish by yielding nothing.
 
@@ -2004,34 +2138,43 @@ class HTTPClient:
         caller streaming a 2 GB file has already said that is what it wants.
         The bound that still applies is the caller's own: it stops iterating.
         """
-        mode, length = _client_codec.response_framing(method, status, headers)
+        try:
+            mode, length = _client_codec.response_framing(method, status, headers)
+        except ValueError as error:
+            raise ProtocolError(str(error)) from error
         if mode == "none":
             self._reject_buffered_extra(reader)
-            self._framed_cleanly = True
+            stream._framed_cleanly = True
             return
         if mode == "chunked":
             async for chunk in self._iter_chunked(reader):
                 yield chunk
             self._reject_buffered_extra(reader)
-            self._framed_cleanly = True
+            stream._framed_cleanly = True
             return
         if mode == "length":
             remaining = length
             while remaining > 0:
-                chunk = await _timed(
-                    reader.read(min(64 * 1024, remaining)), self._timeout.response_body
-                )
+                try:
+                    chunk = await _timed(
+                        reader.read(min(64 * 1024, remaining)), self._timeout.response_body
+                    )
+                except TimeoutError as error:
+                    raise ResponseTimeout("timed out reading response body") from error
                 if not chunk:
                     raise ProtocolError("upstream closed mid-body")
                 remaining -= len(chunk)
                 yield chunk
             self._reject_buffered_extra(reader)
-            self._framed_cleanly = True
+            stream._framed_cleanly = True
             return
         # Close-delimited: the end *is* the close, so the connection can never
         # be reused afterwards however cleanly it ended.
         while True:
-            chunk = await _timed(reader.read(64 * 1024), self._timeout.response_body)
+            try:
+                chunk = await _timed(reader.read(64 * 1024), self._timeout.response_body)
+            except TimeoutError as error:
+                raise ResponseTimeout("timed out reading close-delimited response") from error
             if not chunk:
                 return
             yield chunk
@@ -2039,7 +2182,14 @@ class HTTPClient:
     async def _iter_chunked(self, reader: asyncio.StreamReader) -> Any:
         """Yield chunk payloads, verifying every size line and the trailers."""
         while True:
-            line = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
+            try:
+                line = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
+            except TimeoutError as error:
+                raise ResponseTimeout("timed out reading response chunk") from error
+            except asyncio.IncompleteReadError as error:
+                raise ProtocolError("upstream closed mid-chunk line") from error
+            except asyncio.LimitOverrunError as error:
+                raise ProtocolError("response chunk line exceeds limit") from error
             if len(line) > 1024:
                 raise ProtocolError("response chunk line exceeds limit")
             try:
@@ -2049,23 +2199,41 @@ class HTTPClient:
             if size == 0:
                 trailer_bytes = 0
                 while True:
-                    trailer = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
+                    try:
+                        trailer = await _timed(
+                            reader.readuntil(b"\r\n"), self._timeout.response_body
+                        )
+                    except TimeoutError as error:
+                        raise ResponseTimeout("timed out reading response trailer") from error
+                    except asyncio.IncompleteReadError as error:
+                        raise ProtocolError("upstream closed mid-trailer") from error
+                    except asyncio.LimitOverrunError as error:
+                        raise ProtocolError("response trailers exceed stream limit") from error
                     trailer_bytes += len(trailer)
                     if trailer_bytes > self._limits.max_response_header_bytes:
                         raise ProtocolError("response trailers exceed configured limit")
                     if trailer == b"\r\n":
                         return
+                    self._validate_trailer(trailer)
                 return
             remaining = size
             while remaining > 0:
-                chunk = await _timed(
-                    reader.read(min(64 * 1024, remaining)), self._timeout.response_body
-                )
+                try:
+                    chunk = await _timed(
+                        reader.read(min(64 * 1024, remaining)), self._timeout.response_body
+                    )
+                except TimeoutError as error:
+                    raise ResponseTimeout("timed out reading response chunk") from error
                 if not chunk:
                     raise ProtocolError("upstream closed mid-chunk")
                 remaining -= len(chunk)
                 yield chunk
-            terminator = await _timed(reader.readexactly(2), self._timeout.response_body)
+            try:
+                terminator = await _timed(reader.readexactly(2), self._timeout.response_body)
+            except TimeoutError as error:
+                raise ResponseTimeout("timed out reading response chunk") from error
+            except asyncio.IncompleteReadError as error:
+                raise ProtocolError("upstream closed mid-chunk terminator") from error
             if terminator != b"\r\n":
                 raise ProtocolError("chunk not terminated by CRLF")
 
@@ -2078,6 +2246,7 @@ class HTTPClient:
         two must not drift: a streamed response that parsed its head by a second
         set of rules would accept heads the buffered path refuses.
         """
+        informational = 0
         while True:
             try:
                 head = await _timed(reader.readuntil(b"\r\n\r\n"), self._timeout.response_headers)
@@ -2100,6 +2269,9 @@ class HTTPClient:
                 raise ProtocolError("protocol switching is not supported")
             if status >= 200:
                 return minor, status, reason, headers
+            informational += 1
+            if informational > _MAX_INFORMATIONAL_RESPONSES:
+                raise ProtocolError("too many informational responses")
 
     @staticmethod
     def _keeps_alive(minor: int, headers: list[tuple[bytes, bytes]], framed: bool) -> bool:
@@ -2219,6 +2391,20 @@ class HTTPClient:
         if buffered:
             raise ProtocolError("unsolicited bytes follow the framed response body")
 
+    @staticmethod
+    def _validate_trailer(trailer: bytes) -> None:
+        try:
+            parsed = _client_codec.parse_response_head(
+                b"HTTP/1.1 200 OK\r\n" + trailer + b"\r\n"
+            )
+        except ValueError as error:
+            raise ProtocolError(str(error)) from error
+        if parsed is None:
+            raise ProtocolError("complete response trailer was not parsed")
+        _minor, _status, _reason, headers, _consumed = parsed
+        if headers[0][0] in {b"content-length", b"transfer-encoding"}:
+            raise ProtocolError("response trailer contains a framing field")
+
     async def _read_chunked(self, reader: asyncio.StreamReader) -> bytes:
         body = bytearray()
         total = 0
@@ -2242,12 +2428,7 @@ class HTTPClient:
                         raise ProtocolError("response trailers exceed configured limit")
                     if trailer == b"\r\n":
                         return bytes(body)
-                    try:
-                        _client_codec.parse_response_head(
-                            b"HTTP/1.1 200 OK\r\n" + trailer + b"\r\n"
-                        )
-                    except ValueError as error:
-                        raise ProtocolError(str(error)) from error
+                    self._validate_trailer(trailer)
             total += size
             if total > self._limits.max_response_bytes:
                 raise ResponseTooLarge("response body exceeds configured limit")

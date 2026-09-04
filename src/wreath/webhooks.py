@@ -4,8 +4,8 @@ A webhook is somebody else's HTTP request arriving with a claim about who sent
 it, or one of yours leaving with the same claim attached. Both halves are here,
 and both are built around the same signature profile.
 
-**The profile.** Wreath signs `wreath-v1`: HMAC-SHA256 over the exact request
-body joined with the event's timestamp, id and type. The MAC covers the bytes
+**The profile.** Wreath signs `wreath-v2`: HMAC-SHA256 over the exact request
+body joined with the event's timestamp, id, type, version and lineage. The MAC covers the bytes
 that were sent, not a re-serialization of them, so a verifier that reformats the
 JSON before checking would fail -- which is the point. Signed fields are refused
 if they contain a control character, because the signature base joins them with
@@ -91,9 +91,40 @@ _SINGLETON_WEBHOOK_HEADERS = frozenset(
     }
 )
 _RELAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_DEFAULT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
-def _schema_component(name: str, table: str, statements: tuple[str, ...]) -> Any:
+def _valid_lease(lease_owner: object, lease_seconds: object) -> bool:
+    return (
+        isinstance(lease_owner, str)
+        and bool(lease_owner)
+        and not isinstance(lease_seconds, bool)
+        and isinstance(lease_seconds, int | float)
+        and lease_seconds > 0
+        and isfinite(lease_seconds)
+    )
+
+
+def _signature_profile_supported(
+    profile: str,
+    version: str,
+    correlation_id: str | None,
+    causation_id: str | None,
+) -> bool:
+    return profile == "wreath-v2-hmac-sha256" or (
+        profile == "wreath-v1-hmac-sha256"
+        and version == "1"
+        and correlation_id is None
+        and causation_id is None
+    )
+
+
+def _schema_component(
+    name: str,
+    table: str,
+    base: tuple[str, ...],
+    upgrade: tuple[str, ...],
+) -> Any:
     """Build the one schema-claim shape shared by inbox and outbox."""
     from .schema import Component, Step
 
@@ -101,7 +132,10 @@ def _schema_component(name: str, table: str, statements: tuple[str, ...]) -> Any
         name=name,
         schema="",
         relations=(table,),
-        steps=(Step(version=1, statements=statements),),
+        steps=(
+            Step(version=1, statements=base),
+            Step(version=2, statements=upgrade),
+        ),
     )
 
 
@@ -128,6 +162,8 @@ class WebhookEnvelope:
         causation_id: The id of the event that caused this one.
         ordering_key: Advisory grouping stored on an outbox row. Not signed, not enforced.
         relay_path: Services this event has already passed through. Signed, and loop-checked.
+        deduplication_id: Authenticated identity used by replay stores when provider event ids
+            are not signed. Defaults to `id`.
 
     Raises:
         ValueError: An empty or control-character field, a naive timestamp, or a bad relay path.
@@ -143,8 +179,17 @@ class WebhookEnvelope:
     causation_id: str | None = None
     ordering_key: str | None = None
     relay_path: tuple[str, ...] = ()
+    deduplication_id: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.body, bytes | bytearray | memoryview):
+            raise TypeError("webhook body must be bytes-like")
+        if type(self.body) is not bytes:
+            object.__setattr__(self, "body", bytes(self.body))
+        if not isinstance(self.relay_path, tuple | list):
+            raise TypeError("webhook relay_path must be a tuple or list of strings")
+        if type(self.relay_path) is not tuple:
+            object.__setattr__(self, "relay_path", tuple(self.relay_path))
         if not self.id or not self.type or not self.version:
             raise ValueError("webhook id, type, and version are required")
         # The signature base joins these with newlines, so a newline inside one
@@ -152,13 +197,31 @@ class WebhookEnvelope:
         # body) split -- the fields stop being unambiguously recoverable from
         # what was signed. Refused here rather than escaped, because no real
         # event id or type contains a control character.
-        for name, value in (("id", self.id), ("type", self.type), ("version", self.version)):
+        signed_or_forwarded = (
+            ("id", self.id),
+            ("type", self.type),
+            ("version", self.version),
+            ("correlation_id", self.correlation_id),
+            ("causation_id", self.causation_id),
+            ("deduplication_id", self.deduplication_id),
+        )
+        for name, value in signed_or_forwarded:
+            if value is None:
+                continue
+            if value == "":
+                raise ValueError(f"webhook {name} must not be empty")
             for character in value:
                 codepoint = ord(character)
                 if codepoint < 0x20 or codepoint == 0x7F:
                     raise ValueError(f"webhook {name} contains a control character")
         if self.timestamp.tzinfo is None:
             raise ValueError("webhook timestamp must include a timezone")
+        try:
+            content_type = self.content_type.encode("latin-1")
+        except (AttributeError, UnicodeEncodeError) as error:
+            raise ValueError("webhook content_type must be a Latin-1 header value") from error
+        if any(byte < 0x20 or byte == 0x7F for byte in content_type):
+            raise ValueError("webhook content_type must be a Latin-1 header value")
         if len(self.relay_path) > 32 or any(
             not _RELAY_ID.fullmatch(item) for item in self.relay_path
         ):
@@ -193,16 +256,14 @@ class WebhookLimits:
     max_event_id_bytes: int = 256
 
     def __post_init__(self) -> None:
-        if (
-            min(
-                self.max_body_bytes,
-                self.max_headers,
-                self.max_header_bytes,
-                self.max_event_id_bytes,
-            )
-            <= 0
+        for name, value in (
+            ("max_body_bytes", self.max_body_bytes),
+            ("max_headers", self.max_headers),
+            ("max_header_bytes", self.max_header_bytes),
+            ("max_event_id_bytes", self.max_event_id_bytes),
         ):
-            raise ValueError("webhook limits must be positive")
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"webhook limit {name} must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +280,7 @@ class WebhookContext:
     it is None and the handler must open its own.
 
     Args:
-        source: The registered source name; also the deduplication namespace.
+        source: The registered source name exposed to the handler.
         request: The live request, for headers the envelope does not carry.
         session: The claim's transaction on a durable source, else None.
     """
@@ -282,6 +343,8 @@ class HMACWebhookSigner:
         for candidate_id, secret in keys.items():
             if not isinstance(candidate_id, str) or not candidate_id:
                 raise ValueError("webhook signing key ids must be non-empty strings")
+            if any(ord(character) < 0x20 or ord(character) == 0x7F for character in candidate_id):
+                raise ValueError("webhook signing key id contains a control character")
             if not isinstance(secret, bytes):
                 raise TypeError(f"webhook signing key {candidate_id!r} must be bytes")
             if len(secret) < 32:
@@ -298,7 +361,11 @@ class HMACWebhookSigner:
         return self._key_id
 
     def headers(
-        self, envelope: WebhookEnvelope, *, key_id: str | None = None
+        self,
+        envelope: WebhookEnvelope,
+        *,
+        key_id: str | None = None,
+        signature_profile: str = "wreath-v2-hmac-sha256",
     ) -> tuple[tuple[bytes, bytes], ...]:
         """The signed header set for `envelope`. Does not include `Content-Type`.
 
@@ -310,27 +377,50 @@ class HMACWebhookSigner:
 
         Args:
             key_id: Sign with this key instead of the default, e.g. redelivering an old row.
+            signature_profile: Reproduce the profile recorded with an outbox row.
 
         Returns:
             Raw `(name, value)` byte pairs, ready to pass to the HTTP client.
 
         Raises:
-            ValueError: `key_id` names a key this signer does not hold.
+            ValueError: The key is unavailable or the profile cannot safely sign the envelope.
         """
         selected_key = self._key_id if key_id is None else key_id
         key = self._keys.get(selected_key)
         if key is None:
             raise ValueError("recorded webhook signing key is unavailable")
         timestamp = _format_timestamp(envelope.timestamp)
-        signature = hmac.new(
-            key,
-            _signature_base(
+        if signature_profile == "wreath-v2-hmac-sha256":
+            signature_base = _signature_base(
+                timestamp,
+                envelope.id,
+                envelope.type,
+                envelope.body,
+                version=envelope.version,
+                correlation_id=envelope.correlation_id,
+                causation_id=envelope.causation_id,
+                relay_path=envelope.relay_path,
+            )
+            prefix = "v2="
+        elif _signature_profile_supported(
+            signature_profile,
+            envelope.version,
+            envelope.correlation_id,
+            envelope.causation_id,
+        ):
+            signature_base = _legacy_signature_base(
                 timestamp,
                 envelope.id,
                 envelope.type,
                 envelope.body,
                 envelope.relay_path,
-            ),
+            )
+            prefix = "v1="
+        else:
+            raise ValueError("stored webhook signature profile is unsupported for this envelope")
+        signature = hmac.new(
+            key,
+            signature_base,
             hashlib.sha256,
         ).hexdigest()
         headers: list[tuple[bytes, bytes]] = [
@@ -339,7 +429,7 @@ class HMACWebhookSigner:
             (_HEADER_VERSION, envelope.version.encode("utf-8")),
             (_HEADER_TIMESTAMP, timestamp),
             (_HEADER_KEY_ID, selected_key.encode("utf-8")),
-            (_HEADER_SIGNATURE, f"v1={signature}".encode("ascii")),
+            (_HEADER_SIGNATURE, f"{prefix}{signature}".encode("ascii")),
         ]
         if envelope.correlation_id is not None:
             headers.append((_HEADER_CORRELATION, envelope.correlation_id.encode("utf-8")))
@@ -374,6 +464,13 @@ class WebhookVerifier(Protocol):
 class _NormalizedWebhookVerifier:
     """One public verifier entry point; profiles implement normalized checks."""
 
+    __slots__ = ("_max_age",)
+    _max_age: float
+
+    @property
+    def max_age(self) -> float:
+        return self._max_age
+
     def verify(
         self,
         *,
@@ -381,7 +478,12 @@ class _NormalizedWebhookVerifier:
         headers: Mapping[bytes, bytes],
         now: datetime | None = None,
     ) -> WebhookEnvelope:
-        normalized = {name.lower(): value for name, value in headers.items()}
+        normalized: dict[bytes, bytes] = {}
+        for name, value in headers.items():
+            lowered = name.lower()
+            if lowered in normalized:
+                raise ValueError(f"duplicate webhook header {lowered.decode('latin-1')}")
+            normalized[lowered] = value
         return self._verify_normalized(body=body, headers=normalized, now=now)
 
     def _verify_normalized(
@@ -416,7 +518,7 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
         ValueError: `keys` is empty or holds an empty secret, or `max_age` is non-positive.
     """
 
-    __slots__ = ("_keys", "max_age")
+    __slots__ = ("_keys",)
 
     def __init__(self, keys: Mapping[str, bytes], *, max_age: float = 300.0) -> None:
         if not keys:
@@ -425,6 +527,8 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
         for key_id, secret in keys.items():
             if not isinstance(key_id, str) or not key_id:
                 raise ValueError("webhook verification key ids must be non-empty strings")
+            if any(ord(character) < 0x20 or ord(character) == 0x7F for character in key_id):
+                raise ValueError("webhook verification key id contains a control character")
             if not isinstance(secret, bytes):
                 raise TypeError(f"webhook verification key {key_id!r} must be bytes")
             if len(secret) < 32:
@@ -432,10 +536,15 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
                     f"webhook verification key {key_id!r} must contain at least 32 bytes"
                 )
             copied[key_id] = secret
-        if max_age <= 0 or not isfinite(max_age):
+        if (
+            isinstance(max_age, bool)
+            or not isinstance(max_age, int | float)
+            or max_age <= 0
+            or not isfinite(max_age)
+        ):
             raise ValueError("webhook max_age must be positive and finite")
         self._keys = copied
-        self.max_age = max_age
+        self._max_age = max_age
 
     def _verify_normalized(
         self,
@@ -451,6 +560,8 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
         key_id_data = _required_header(headers, _HEADER_KEY_ID)
         supplied = _required_header(headers, _HEADER_SIGNATURE)
         relay_path = _parse_relay_path(headers.get(_HEADER_RELAY_PATH))
+        correlation_id = _optional_text(headers, _HEADER_CORRELATION)
+        causation_id = _optional_text(headers, _HEADER_CAUSATION)
         event_id_text = event_id.decode("utf-8")
         event_type_text = event_type.decode("utf-8")
         version_text = version.decode("utf-8")
@@ -461,7 +572,11 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
             ("id", event_id_text),
             ("type", event_type_text),
             ("version", version_text),
+            ("correlation_id", correlation_id),
+            ("causation_id", causation_id),
         ):
+            if value is None:
+                continue
             for character in value:
                 codepoint = ord(character)
                 if codepoint < 0x20 or codepoint == 0x7F:
@@ -475,19 +590,39 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
             raise ValueError("unknown webhook key id")
         timestamp = _parse_timestamp(timestamp_data)
         current = datetime.now(UTC) if now is None else now.astimezone(UTC)
-        if abs((current - timestamp).total_seconds()) > self.max_age:
+        if abs((current - timestamp).total_seconds()) > self._max_age:
             raise ValueError("webhook timestamp is outside the accepted window")
-        expected = b"v1=" + hmac.new(
-            key,
-            _signature_base(
+        if supplied.startswith(b"v2="):
+            signature_base = _signature_base(
+                timestamp_data,
+                event_id_text,
+                event_type_text,
+                body,
+                version=version_text,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+                relay_path=relay_path,
+            )
+            prefix = b"v2="
+        elif (
+            supplied.startswith(b"v1=")
+            and version_text == "1"
+            and correlation_id is None
+            and causation_id is None
+        ):
+            signature_base = _legacy_signature_base(
                 timestamp_data,
                 event_id_text,
                 event_type_text,
                 body,
                 relay_path,
-            ),
-            hashlib.sha256,
-        ).hexdigest().encode("ascii")
+            )
+            prefix = b"v1="
+        else:
+            raise ValueError("invalid webhook signature")
+        expected = prefix + hmac.new(key, signature_base, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
         if not hmac.compare_digest(expected, supplied):
             raise ValueError("invalid webhook signature")
         content_type = headers.get(b"content-type", b"application/json").decode("latin-1")
@@ -498,8 +633,8 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
             timestamp=timestamp,
             content_type=content_type,
             body=body,
-            correlation_id=_optional_text(headers, _HEADER_CORRELATION),
-            causation_id=_optional_text(headers, _HEADER_CAUSATION),
+            correlation_id=correlation_id,
+            causation_id=causation_id,
             relay_path=relay_path,
         )
 
@@ -563,7 +698,7 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
     header set carries only id, timestamp, and signature.
     """
 
-    __slots__ = ("_secrets", "max_age")
+    __slots__ = ("_secrets",)
 
     def __init__(
         self, secrets: bytes | str | tuple[bytes | str, ...], *, max_age: float = 300.0
@@ -571,8 +706,12 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
         supplied = secrets if isinstance(secrets, tuple) else (secrets,)
         if not supplied:
             raise ValueError("at least one non-empty Standard Webhooks secret is required")
+        if len(supplied) > 32:
+            raise ValueError("Standard Webhooks accepts at most 32 webhook secrets")
         decoded: list[bytes] = []
         for secret in supplied:
+            if not isinstance(secret, bytes | str):
+                raise TypeError("Standard Webhooks webhook secret must be bytes or str")
             if isinstance(secret, str):
                 token = secret.removeprefix("whsec_")
                 try:
@@ -584,10 +723,15 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
             if not value:
                 raise ValueError("Standard Webhooks secret cannot be empty")
             decoded.append(value)
-        if max_age <= 0 or not isfinite(max_age):
+        if (
+            isinstance(max_age, bool)
+            or not isinstance(max_age, int | float)
+            or max_age <= 0
+            or not isfinite(max_age)
+        ):
             raise ValueError("webhook max_age must be positive and finite")
         self._secrets = tuple(decoded)
-        self.max_age = max_age
+        self._max_age = max_age
 
     def _verify_normalized(
         self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
@@ -595,7 +739,7 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
         event_id_data = _required_header(headers, b"webhook-id")
         timestamp_data = _required_header(headers, b"webhook-timestamp")
         signatures = _required_header(headers, b"webhook-signature").split()
-        timestamp = _unix_timestamp(timestamp_data, now, self.max_age)
+        timestamp = _unix_timestamp(timestamp_data, now, self._max_age)
         signed = event_id_data + b"." + timestamp_data + b"." + body
         supplied: list[bytes] = []
         for item in signatures:
@@ -626,7 +770,7 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
 class StripeWebhookVerifier(_NormalizedWebhookVerifier):
     """Verify Stripe's `Stripe-Signature` `t=...,v1=...` profile."""
 
-    __slots__ = ("_secrets", "max_age")
+    __slots__ = ("_secrets",)
 
     def __init__(
         self,
@@ -635,15 +779,27 @@ class StripeWebhookVerifier(_NormalizedWebhookVerifier):
         max_age: float = 300.0,
     ) -> None:
         supplied = secrets if isinstance(secrets, tuple) else (secrets,)
-        if not supplied or any(not secret for secret in supplied):
+        if not supplied:
             raise ValueError("at least one non-empty Stripe webhook secret is required")
-        if max_age <= 0 or not isfinite(max_age):
+        if len(supplied) > 32:
+            raise ValueError("Stripe accepts at most 32 webhook secrets")
+        for secret in supplied:
+            if not isinstance(secret, bytes | str):
+                raise TypeError("Stripe webhook secret must be bytes or str")
+            if not secret:
+                raise ValueError("at least one non-empty Stripe webhook secret is required")
+        if (
+            isinstance(max_age, bool)
+            or not isinstance(max_age, int | float)
+            or max_age <= 0
+            or not isfinite(max_age)
+        ):
             raise ValueError("webhook max_age must be positive and finite")
         self._secrets = tuple(
             secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
             for secret in supplied
         )
-        self.max_age = max_age
+        self._max_age = max_age
 
     def _verify_normalized(
         self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
@@ -658,7 +814,7 @@ class StripeWebhookVerifier(_NormalizedWebhookVerifier):
         signatures = parts.get(b"v1")
         if timestamps is None or len(timestamps) != 1 or not signatures:
             raise ValueError("Stripe-Signature needs one t and at least one v1")
-        timestamp = _unix_timestamp(timestamps[0], now, self.max_age)
+        timestamp = _unix_timestamp(timestamps[0], now, self._max_age)
         signed = timestamps[0] + b"." + body
         expected = (
             hmac.new(secret, signed, hashlib.sha256).hexdigest().encode("ascii")
@@ -680,20 +836,28 @@ class StripeWebhookVerifier(_NormalizedWebhookVerifier):
 class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
     """Verify GitHub's SHA-256 webhook signature and delivery identity.
 
-    GitHub signs no timestamp, so freshness comes from the replay ledger keyed by
-    `X-GitHub-Delivery`. `max_age` is therefore the retention time for that
-    ledger rather than a signature check.
+    GitHub signs no timestamp or delivery id, so freshness comes from the replay
+    ledger keyed by a digest of the authenticated body. `X-GitHub-Delivery`
+    remains the event id exposed to handlers. `max_age` is therefore the
+    retention time for that ledger rather than a signature check.
     """
 
-    __slots__ = ("_secret", "max_age")
+    __slots__ = ("_secret",)
 
     def __init__(self, secret: bytes | str, *, replay_ttl: float = 86_400.0) -> None:
+        if not isinstance(secret, bytes | str):
+            raise TypeError("GitHub webhook secret must be bytes or str")
         if not secret:
             raise ValueError("GitHub webhook secret cannot be empty")
-        if replay_ttl <= 0 or not isfinite(replay_ttl):
+        if (
+            isinstance(replay_ttl, bool)
+            or not isinstance(replay_ttl, int | float)
+            or replay_ttl <= 0
+            or not isfinite(replay_ttl)
+        ):
             raise ValueError("GitHub webhook replay_ttl must be positive and finite")
         self._secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
-        self.max_age = replay_ttl
+        self._max_age = replay_ttl
 
     def _verify_normalized(
         self, *, body: bytes, headers: Mapping[bytes, bytes], now: datetime | None = None
@@ -717,6 +881,7 @@ class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
             timestamp,
             headers.get(b"content-type", b"application/json").decode("latin-1"),
             body,
+            deduplication_id=f"github-sha256:{hashlib.sha256(body).hexdigest()}",
         )
 
 
@@ -742,28 +907,40 @@ def _signature_base(
     event_id: str,
     event_type: str,
     body: bytes,
+    *,
+    version: str = "1",
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
     relay_path: tuple[str, ...] = (),
 ) -> bytes:
-    if relay_path:
-        return b"\n".join(
-            (
-                b"wreath-v1-relay",
-                timestamp,
-                event_id.encode("utf-8"),
-                event_type.encode("utf-8"),
-                ",".join(relay_path).encode("ascii"),
-                body,
-            )
-        )
     return b"\n".join(
         (
-            b"wreath-v1",
+            b"wreath-v2",
             timestamp,
             event_id.encode("utf-8"),
             event_type.encode("utf-8"),
+            version.encode("utf-8"),
+            b"" if correlation_id is None else correlation_id.encode("utf-8"),
+            b"" if causation_id is None else causation_id.encode("utf-8"),
+            ",".join(relay_path).encode("ascii"),
             body,
         )
     )
+
+
+def _legacy_signature_base(
+    timestamp: bytes,
+    event_id: str,
+    event_type: str,
+    body: bytes,
+    relay_path: tuple[str, ...],
+) -> bytes:
+    profile = b"wreath-v1-relay" if relay_path else b"wreath-v1"
+    fields = [profile, timestamp, event_id.encode("utf-8"), event_type.encode("utf-8")]
+    if relay_path:
+        fields.append(",".join(relay_path).encode("ascii"))
+    fields.append(body)
+    return b"\n".join(fields)
 
 
 def _parse_relay_path(value: bytes | None) -> tuple[str, ...]:
@@ -819,21 +996,37 @@ class LocalReplayStore:
         ValueError: Either bound is non-positive.
     """
 
-    __slots__ = ("_last_now", "_lock", "_table", "max_entries", "ttl")
+    __slots__ = ("_last_now", "_lock", "_max_entries", "_table", "_ttl")
 
     def __init__(self, *, max_entries: int, ttl: float) -> None:
-        if max_entries <= 0 or ttl <= 0 or not isfinite(ttl):
-            raise ValueError("replay store bounds must be positive and finite")
-        self.max_entries = max_entries
-        self.ttl = ttl
+        if type(max_entries) is not int or max_entries <= 0:
+            raise ValueError("replay store max_entries must be a positive integer")
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int | float)
+            or ttl <= 0
+            or not isfinite(ttl)
+        ):
+            raise ValueError("replay store ttl must be positive and finite")
+        self._max_entries = max_entries
+        self._ttl = ttl
         self._last_now = time.monotonic()
         self._table = CapabilityMap(
             max_entries=max_entries,
             ttl=ttl,
             clock=time.monotonic,
             overflow="refuse",
+            expire_at_deadline=False,
         )
         self._lock = asyncio.Lock()
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl
 
     @property
     def size(self) -> int:
@@ -994,13 +1187,20 @@ class PostgresWebhookInbox:
         session_factory: Opens the session owned by `claim_and_enqueue`.
         lease_owner: Stable worker identity recorded by an atomic claim.
         lease_seconds: Positive claim lease used by `claim_and_enqueue`.
+        retention_seconds: How long terminal rows remain replay evidence.
 
     Raises:
         TypeError: `session_factory` is not callable.
         ValueError: `table` is not a plain SQL identifier, or atomic configuration is invalid.
     """
 
-    __slots__ = ("_lease_owner", "_lease_seconds", "_session_factory", "table")
+    __slots__ = (
+        "_lease_owner",
+        "_lease_seconds",
+        "_retention_seconds",
+        "_session_factory",
+        "_table",
+    )
 
     def __init__(
         self,
@@ -1009,7 +1209,15 @@ class PostgresWebhookInbox:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
         lease_owner: str | None = None,
         lease_seconds: float | None = None,
+        retention_seconds: float = _DEFAULT_RETENTION_SECONDS,
     ) -> None:
+        if (
+            isinstance(retention_seconds, bool)
+            or not isinstance(retention_seconds, int | float)
+            or retention_seconds <= 0
+            or not isfinite(retention_seconds)
+        ):
+            raise ValueError("webhook inbox retention_seconds must be positive and finite")
         if session_factory is None:
             if lease_owner is not None or lease_seconds is not None:
                 raise ValueError(
@@ -1034,7 +1242,16 @@ class PostgresWebhookInbox:
             self._session_factory = session_factory
             self._lease_owner = lease_owner
             self._lease_seconds = float(lease_seconds)
-        self.table = validate_unquoted_identifier(table, "webhook inbox table")
+        self._retention_seconds = float(retention_seconds)
+        self._table = validate_unquoted_identifier(table, "webhook inbox table")
+
+    @property
+    def retention_seconds(self) -> float:
+        return self._retention_seconds
+
+    @property
+    def table(self) -> str:
+        return self._table
 
     @property
     def transactional(self) -> bool:
@@ -1087,7 +1304,13 @@ class PostgresWebhookInbox:
 
     def component(self) -> Any:
         """The inbox's claim on the wreath schema."""
-        return _schema_component("webhook-inbox", self.table, self.statements())
+        statements = self.statements()
+        return _schema_component(
+            "webhook-inbox",
+            self.table,
+            statements[:1],
+            statements[1:],
+        )
 
     def schema_sql(self) -> str:
         """The inbox DDL, semicolon-joined. A derivation of `component()`."""
@@ -1127,9 +1350,18 @@ class PostgresWebhookInbox:
             ValueError: `lease_seconds` is not positive.
             RuntimeError: The row vanished mid-transaction, which should not be reachable.
         """
-        if lease_seconds <= 0 or not isfinite(lease_seconds):
-            raise ValueError("webhook inbox lease_seconds must be positive and finite")
-        payload_hash = hashlib.sha256(envelope.body).digest()
+        if not _valid_lease(lease_owner, lease_seconds):
+            raise ValueError(
+                "webhook inbox lease configuration is invalid; lease_seconds must be "
+                "positive and finite"
+            )
+        message_id = envelope.deduplication_id or envelope.id
+        identity = hashlib.sha256()
+        identity.update(b"wreath-webhook-inbox-v2\0")
+        identity.update(envelope.type.encode("utf-8"))
+        identity.update(b"\0")
+        identity.update(envelope.body)
+        payload_hash = identity.digest()
         sql = (
             f"INSERT INTO {self.table} AS i "
             "(source, message_id, payload_version, payload_hash, state, "
@@ -1148,7 +1380,7 @@ class PostgresWebhookInbox:
         row = await session.raw(
             sql,
             source,
-            envelope.id,
+            message_id,
             envelope.version,
             payload_hash,
             lease_owner,
@@ -1162,7 +1394,7 @@ class PostgresWebhookInbox:
             f"FROM {self.table} "
             "WHERE source=$1 AND message_id=$2",
             source,
-            envelope.id,
+            message_id,
             envelope.version,
             payload_hash,
         ).fetchrow()
@@ -1209,6 +1441,8 @@ class PostgresWebhookInbox:
             raise TypeError("atomic webhook inbox enqueue must be callable")
         if isinstance(result_status, bool) or not isinstance(result_status, int):
             raise TypeError("atomic webhook inbox result_status must be an integer")
+        if not 100 <= result_status <= 599:
+            raise ValueError("atomic webhook inbox result_status must be an HTTP status")
 
         async with session_factory() as session:
             async with session.begin():
@@ -1225,7 +1459,7 @@ class PostgresWebhookInbox:
                 await self.complete(
                     session,
                     source=source,
-                    message_id=envelope.id,
+                    message_id=envelope.deduplication_id or envelope.id,
                     fencing_token=claim.fencing_token,
                     result_status=result_status,
                 )
@@ -1284,8 +1518,8 @@ class PostgresWebhookInbox:
         Raises:
             ValueError: `limit` is not positive.
         """
-        if limit <= 0:
-            raise ValueError("webhook inbox purge limit must be positive")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("webhook inbox purge limit must be a positive integer")
         deleted = await session.raw(
             f"WITH expired AS (SELECT ctid FROM {self.table} "
             "WHERE retention_until < clock_timestamp() "
@@ -1322,15 +1556,21 @@ class PostgresWebhookInbox:
         Raises:
             RuntimeError: The lease was taken over, or the row is no longer processing.
         """
+        if isinstance(result_status, bool) or not isinstance(result_status, int):
+            raise TypeError("webhook inbox result_status must be an HTTP status integer")
+        if not 100 <= result_status <= 599:
+            raise ValueError("webhook inbox result_status must be an HTTP status")
         updated = await session.raw(
             f"UPDATE {self.table} SET state='completed', completed_at=clock_timestamp(), "
-            "result_status=$4, lease_expires_at=clock_timestamp() "
+            "result_status=$4, lease_expires_at=clock_timestamp(), "
+            "retention_until=clock_timestamp()+$5::float8*interval '1 second' "
             "WHERE source=$1 AND message_id=$2 AND fencing_token=$3 "
-            "AND state='processing' RETURNING 1",
+            "AND state='processing' AND lease_expires_at >= clock_timestamp() RETURNING 1",
             source,
             message_id,
             fencing_token,
             result_status,
+            self.retention_seconds,
         ).fetchval()
         if updated is None:
             raise RuntimeError("stale webhook inbox fencing token")
@@ -1366,15 +1606,37 @@ class PostgresWebhookOutbox:
 
     Args:
         table: Table name. Must be a plain SQL identifier; it is interpolated, not bound.
+        retention_seconds: How long terminal rows remain available for audit and purging.
 
     Raises:
         ValueError: `table` is not a plain SQL identifier.
     """
 
-    __slots__ = ("table",)
+    __slots__ = ("_retention_seconds", "_table")
 
-    def __init__(self, table: str = "wreath_webhook_outbox") -> None:
-        self.table = validate_unquoted_identifier(table, "webhook outbox table")
+    def __init__(
+        self,
+        table: str = "wreath_webhook_outbox",
+        *,
+        retention_seconds: float = _DEFAULT_RETENTION_SECONDS,
+    ) -> None:
+        if (
+            isinstance(retention_seconds, bool)
+            or not isinstance(retention_seconds, int | float)
+            or retention_seconds <= 0
+            or not isfinite(retention_seconds)
+        ):
+            raise ValueError("webhook outbox retention_seconds must be positive and finite")
+        self._retention_seconds = float(retention_seconds)
+        self._table = validate_unquoted_identifier(table, "webhook outbox table")
+
+    @property
+    def retention_seconds(self) -> float:
+        return self._retention_seconds
+
+    @property
+    def table(self) -> str:
+        return self._table
 
     def statements(self) -> tuple[str, ...]:
         """DDL creating the outbox table and its two indexes. Idempotent.
@@ -1430,17 +1692,21 @@ class PostgresWebhookOutbox:
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS relay_path text NOT NULL DEFAULT ''",
             f"CREATE INDEX IF NOT EXISTS {table}_ready_idx ON {table} "
             "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait')",
-            # Retention has always been read by both purges and never had an
-            # index under it, so every purge was a sequential scan and a sort.
-            # The chunked pass refuses to walk an unindexed key, which is how
-            # this surfaced.
-            f"CREATE INDEX IF NOT EXISTS {table}_retention_idx ON {table} "
-            "(retention_until) WHERE retention_until IS NOT NULL",
+            f"CREATE INDEX IF NOT EXISTS {table}_recovery_idx ON {table} "
+            "(lease_expires_at, created_at) WHERE state IN ('leased','sending')",
+            f"CREATE INDEX IF NOT EXISTS {table}_retention_walk_idx ON {table} "
+            "(retention_until, delivery_id) WHERE retention_until IS NOT NULL",
         )
 
     def component(self) -> Any:
         """The outbox's claim on the wreath schema."""
-        return _schema_component("webhook-outbox", self.table, self.statements())
+        statements = self.statements()
+        return _schema_component(
+            "webhook-outbox",
+            self.table,
+            statements[:3],
+            statements[3:],
+        )
 
     def schema_sql(self) -> str:
         """The outbox DDL, semicolon-joined. A derivation of `component()`."""
@@ -1491,7 +1757,7 @@ class PostgresWebhookOutbox:
             envelope.version,
             envelope.body,
             envelope.content_type,
-            "wreath-v1-hmac-sha256",
+            "wreath-v2-hmac-sha256",
             key_id,
             envelope.id,
             envelope.ordering_key,
@@ -1553,8 +1819,8 @@ class PostgresWebhookOutbox:
         Raises:
             ValueError: `limit` is not positive.
         """
-        if limit <= 0:
-            raise ValueError("webhook outbox purge limit must be positive")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("webhook outbox purge limit must be a positive integer")
         deleted = await session.raw(
             f"WITH expired AS (SELECT ctid FROM {self.table} "
             "WHERE retention_until < clock_timestamp() "
@@ -1597,8 +1863,11 @@ class PostgresWebhookOutbox:
         Raises:
             ValueError: `lease_seconds` is not positive.
         """
-        if lease_seconds <= 0 or not isfinite(lease_seconds):
-            raise ValueError("webhook outbox lease_seconds must be positive and finite")
+        if not _valid_lease(lease_owner, lease_seconds):
+            raise ValueError(
+                "webhook outbox lease configuration is invalid; lease_seconds must be "
+                "positive and finite"
+            )
         table = self.table
         sql = claim_sql(
             table,
@@ -1622,7 +1891,7 @@ class PostgresWebhookOutbox:
                 "o.delivery_id,o.event_id,o.destination,o.event_type,"
                 "o.event_timestamp,o.payload_version,o.payload_bytes,o.content_type,"
                 "o.key_id,o.attempts,o.fencing_token,o.ordering_key,"
-                "o.correlation_id,o.causation_id,o.relay_path"
+                "o.correlation_id,o.causation_id,o.relay_path,o.signature_profile"
             ),
         )
         row = await session.raw(sql, lease_owner, lease_seconds).fetchrow()
@@ -1667,12 +1936,18 @@ class PostgresWebhookOutbox:
             ValueError: `lease_seconds` is not positive.
             RuntimeError: The fencing token is stale, or the row is no longer sending.
         """
-        if lease_seconds <= 0 or not isfinite(lease_seconds):
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int | float)
+            or lease_seconds <= 0
+            or not isfinite(lease_seconds)
+        ):
             raise ValueError("webhook outbox lease_seconds must be positive and finite")
         renewed = await session.raw(
             f"UPDATE {self.table} SET lease_expires_at=clock_timestamp()+"
             "$3::float8*interval '1 second' WHERE delivery_id=$1 "
-            "AND fencing_token=$2 AND state='sending' RETURNING 1",
+            "AND fencing_token=$2 AND state='sending' "
+            "AND lease_expires_at >= clock_timestamp() RETURNING 1",
             delivery.delivery_id,
             delivery.fencing_token,
             lease_seconds,
@@ -1699,8 +1974,9 @@ class PostgresWebhookOutbox:
             session,
             delivery,
             "state='delivered',completed_at=clock_timestamp(),"
-            "last_response_status=$3,lease_owner=NULL,lease_expires_at=NULL",
-            (status,),
+            "last_response_status=$3,lease_owner=NULL,lease_expires_at=NULL,"
+            "retention_until=clock_timestamp()+$4::float8*interval '1 second'",
+            (status, self.retention_seconds),
         )
 
     async def mark_retry(
@@ -1728,7 +2004,12 @@ class PostgresWebhookOutbox:
             ValueError: `delay` is negative.
             RuntimeError: The fencing token is stale, or the row is not leased or sending.
         """
-        if delay < 0 or not isfinite(delay):
+        if (
+            isinstance(delay, bool)
+            or not isinstance(delay, int | float)
+            or delay < 0
+            or not isfinite(delay)
+        ):
             raise ValueError("webhook retry delay must be non-negative and finite")
         await self._transition(
             session,
@@ -1763,8 +2044,9 @@ class PostgresWebhookOutbox:
             session,
             delivery,
             "state='unknown',completed_at=clock_timestamp(),last_failure_code=$3,"
-            "lease_owner=NULL,lease_expires_at=NULL",
-            (_bounded_failure(failure),),
+            "lease_owner=NULL,lease_expires_at=NULL,"
+            "retention_until=clock_timestamp()+$4::float8*interval '1 second'",
+            (_bounded_failure(failure), self.retention_seconds),
         )
 
     async def mark_failed(
@@ -1793,8 +2075,9 @@ class PostgresWebhookOutbox:
             delivery,
             "state='failed',completed_at=clock_timestamp(),"
             "last_response_status=$3,last_failure_code=$4,"
-            "lease_owner=NULL,lease_expires_at=NULL",
-            (status, _bounded_failure(failure)),
+            "lease_owner=NULL,lease_expires_at=NULL,"
+            "retention_until=clock_timestamp()+$5::float8*interval '1 second'",
+            (status, _bounded_failure(failure), self.retention_seconds),
         )
 
     async def _transition(
@@ -1807,7 +2090,8 @@ class PostgresWebhookOutbox:
         updated = await session.raw(
             f"UPDATE {self.table} SET {assignment} "
             "WHERE delivery_id=$1 AND fencing_token=$2 "
-            "AND state IN ('leased','sending') RETURNING 1",
+            "AND state IN ('leased','sending') "
+            "AND lease_expires_at >= clock_timestamp() RETURNING 1",
             delivery.delivery_id,
             delivery.fencing_token,
             *values,
@@ -1850,6 +2134,7 @@ class OutboxDelivery:
     correlation_id: str | None = None
     causation_id: str | None = None
     relay_path: tuple[str, ...] = ()
+    signature_profile: str = "wreath-v2-hmac-sha256"
 
 
 def _outbox_delivery(row: Any) -> OutboxDelivery:
@@ -1869,6 +2154,9 @@ def _outbox_delivery(row: Any) -> OutboxDelivery:
         correlation_id=_row_value(row, "correlation_id", 12),
         causation_id=_row_value(row, "causation_id", 13),
         relay_path=_parse_stored_relay_path(_optional_row_value(row, "relay_path", 14, "")),
+        signature_profile=str(
+            _optional_row_value(row, "signature_profile", 15, "wreath-v2-hmac-sha256")
+        ),
     )
 
 
@@ -1947,6 +2235,7 @@ class WebhookSource:
         "_limits",
         "_name",
         "_replay",
+        "_replay_namespace",
         "_session_factory",
         "_verifier",
     )
@@ -1964,16 +2253,33 @@ class WebhookSource:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]] | None,
         lease_owner: str,
         lease_seconds: float,
+        replay_namespace: str | None = None,
     ) -> None:
+        if not name:
+            raise ValueError("webhook source name must be non-empty")
+        max_age = verifier.max_age
+        if (
+            isinstance(max_age, bool)
+            or not isinstance(max_age, int | float)
+            or max_age <= 0
+            or not isfinite(max_age)
+        ):
+            raise ValueError("webhook verifier max_age must be positive and finite")
         if (inbox is None) != (session_factory is None):
             raise ValueError("durable webhook sources require inbox and session_factory")
-        if inbox is not None and (
-            not lease_owner or lease_seconds <= 0 or not isfinite(lease_seconds)
-        ):
+        if inbox is not None and not _valid_lease(lease_owner, lease_seconds):
             raise ValueError("durable webhook source lease configuration is invalid")
+        if (
+            isinstance(inbox, PostgresWebhookInbox)
+            and inbox.retention_seconds < max_age
+        ):
+            raise ValueError("webhook inbox retention must cover the verifier replay window")
         self._name = name
+        self._replay_namespace = name if replay_namespace is None else replay_namespace
         self._verifier = verifier
-        self._replay = replay or LocalReplayStore(max_entries=10_000, ttl=verifier.max_age)
+        if replay is not None and replay.ttl < max_age:
+            raise ValueError("webhook replay store ttl must cover the verifier replay window")
+        self._replay = replay or LocalReplayStore(max_entries=10_000, ttl=max_age)
         self._limits = limits
         self._inbox = inbox
         self._session_factory = session_factory
@@ -2048,16 +2354,6 @@ class WebhookSource:
         if registered is None:
             return Response(status=400)
         payload_validator, handler = registered
-        try:
-            decoded = loads(body)
-        except ValueError:
-            # The MAC checked out, so this body is the one the sender meant to
-            # send -- it just is not JSON. That is the sender's mistake, not
-            # ours, and a 500 would tell them to retry something that cannot
-            # start working. `loads` raises ValueError for malformed JSON and
-            # for bytes that are not UTF-8 alike; both mean the same thing here.
-            return Response(status=400)
-        payload = payload_validator(decoded, ("body",))
         if self._inbox is not None:
             if self._session_factory is None:
                 raise RuntimeError("a webhook inbox requires a session factory")
@@ -2065,7 +2361,7 @@ class WebhookSource:
                 async with session.begin():
                     claim = await self._inbox.claim(
                         session,
-                        source=self._name,
+                        source=self._replay_namespace,
                         envelope=envelope,
                         lease_owner=self._lease_owner,
                         lease_seconds=self._lease_seconds,
@@ -2074,17 +2370,36 @@ class WebhookSource:
                         return Response(status=claim.result_status or 204)
                     if claim.outcome in {"active", "failed", "conflict"}:
                         return Response(status=409)
+                    try:
+                        decoded = loads(body)
+                    except ValueError:
+                        await self._inbox.complete(
+                            session,
+                            source=self._replay_namespace,
+                            message_id=envelope.deduplication_id or envelope.id,
+                            fencing_token=claim.fencing_token,
+                            result_status=400,
+                        )
+                        return Response(status=400)
+                    payload = payload_validator(decoded, ("body",))
                     await handler(WebhookContext(self._name, envelope, request, session), payload)
                     await self._inbox.complete(
                         session,
-                        source=self._name,
-                        message_id=envelope.id,
+                        source=self._replay_namespace,
+                        message_id=envelope.deduplication_id or envelope.id,
                         fencing_token=claim.fencing_token,
                         result_status=204,
                     )
             return Response(status=204)
-        if not await self._replay.claim(self._name, envelope.id):
+        replay_id = envelope.deduplication_id or envelope.id
+        if not await self._replay.claim(self._replay_namespace, replay_id):
             return Response(status=409)
+        try:
+            decoded = loads(body)
+        except ValueError:
+            await self._replay.complete(self._replay_namespace, replay_id, "failed")
+            return Response(status=400)
+        payload = payload_validator(decoded, ("body",))
         try:
             await handler(WebhookContext(self._name, envelope, request), payload)
         except Exception:  # records the outcome and re-raises
@@ -2092,9 +2407,9 @@ class WebhookSource:
             # receiver's own code failed, every way it can fail means the same
             # thing to the replay claim, and nothing is swallowed -- the caller
             # still sees the original exception with its traceback intact.
-            await self._replay.complete(self._name, envelope.id, "failed")
+            await self._replay.complete(self._replay_namespace, replay_id, "failed")
             raise
-        await self._replay.complete(self._name, envelope.id, "completed")
+        await self._replay.complete(self._replay_namespace, replay_id, "completed")
         return Response(status=204)
 
 
@@ -2147,6 +2462,8 @@ class WebhookDestination:
         relay_id: str,
         max_relay_hops: int,
     ) -> None:
+        if not name:
+            raise ValueError("webhook destination name must be non-empty")
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("webhook destination path must be origin-relative")
         if not _RELAY_ID.fullmatch(relay_id):
@@ -2221,9 +2538,14 @@ class WebhookDestination:
         envelope: WebhookEnvelope,
         *,
         key_id: str | None = None,
+        signature_profile: str = "wreath-v2-hmac-sha256",
     ) -> WebhookDeliveryResult:
         headers = (
-            *self._signer.headers(envelope, key_id=key_id),
+            *self._signer.headers(
+                envelope,
+                key_id=key_id,
+                signature_profile=signature_profile,
+            ),
             (b"content-type", envelope.content_type.encode("latin-1")),
         )
         try:
@@ -2516,18 +2838,29 @@ class WebhookDispatcher:
         retry_cap: float = 3600.0,
         retry_statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504}),
     ) -> None:
-        if not worker_id:
-            raise ValueError("webhook dispatcher worker_id cannot be empty")
+        if not isinstance(worker_id, str) or not worker_id:
+            raise ValueError(
+                "webhook dispatcher worker_id cannot be empty; expected a non-empty string"
+            )
         if (
-            lease_seconds <= 0
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int | float)
+            or lease_seconds <= 0
             or not isfinite(lease_seconds)
             or type(max_attempts) is not int
             or max_attempts <= 0
+            or isinstance(retry_delay, bool)
+            or not isinstance(retry_delay, int | float)
             or retry_delay < 0
             or not isfinite(retry_delay)
+            or isinstance(retry_cap, bool)
+            or not isinstance(retry_cap, int | float)
             or not isfinite(retry_cap)
         ):
-            raise ValueError("webhook dispatcher limits are invalid")
+            raise ValueError(
+                "webhook dispatcher limits are invalid: lease_seconds must be a positive "
+                "finite number and retry bounds must be valid"
+            )
         if retry_cap < retry_delay:
             raise ValueError(
                 "webhook dispatcher retry_cap cannot be below retry_delay; a cap "
@@ -2540,7 +2873,7 @@ class WebhookDispatcher:
         self._max_attempts = max_attempts
         self._retry_delay = retry_delay
         self._retry_cap = retry_cap
-        self._retry_statuses = retry_statuses
+        self._retry_statuses = frozenset(retry_statuses)
         self._running = False
         self._in_flight = 0
         self._last_error: str | None = None
@@ -2630,7 +2963,12 @@ class WebhookDispatcher:
             ValueError: `idle_delay` is not positive.
             Exception: Whatever a delivery or the database raised, after recording it.
         """
-        if idle_delay <= 0 or not isfinite(idle_delay):
+        if (
+            isinstance(idle_delay, bool)
+            or not isinstance(idle_delay, int | float)
+            or idle_delay <= 0
+            or not isfinite(idle_delay)
+        ):
             raise ValueError("webhook dispatcher idle_delay must be positive and finite")
         self._running = True
         self._last_error = None
@@ -2694,6 +3032,22 @@ class WebhookDispatcher:
         )
         if delivery is None:
             return None
+        if not _signature_profile_supported(
+            delivery.signature_profile,
+            delivery.version,
+            delivery.correlation_id,
+            delivery.causation_id,
+        ):
+            result = WebhookDeliveryResult(
+                "failed", delivery.event_id, failure="UnsupportedSignatureProfile"
+            )
+            await self._outbox.mark_failed(
+                session,
+                delivery,
+                status=None,
+                failure=result.failure,
+            )
+            return result
         destination = self._destinations.get(delivery.destination)
         if destination is None:
             result = WebhookDeliveryResult(
@@ -2727,7 +3081,11 @@ class WebhookDispatcher:
             )
         self._in_flight += 1
         try:
-            result = await destination._send_envelope(envelope, key_id=delivery.key_id)
+            result = await destination._send_envelope(
+                envelope,
+                key_id=delivery.key_id,
+                signature_profile=delivery.signature_profile,
+            )
         finally:
             self._in_flight -= 1
             if renewal is not None:
@@ -2867,7 +3225,7 @@ class WebhookHub:
         `csrf_exempt` -- unaware of the path.
 
         Args:
-            name: Unique per hub. Also the deduplication namespace for this sender's ids.
+            name: Unique per hub. Combined with the hub name for replay isolation.
             path: Route path for the receiver, registered on the application now.
             verifier: Holds the sender's keys and the replay window.
             replay: In-process replay store; one sized to the verifier's window is made if None.
@@ -2895,6 +3253,7 @@ class WebhookHub:
             session_factory=session_factory,
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
+            replay_namespace=f"{len(self._name.encode('utf-8'))}:{self._name}{name}",
         )
         self._sources[name] = source
         self._source_paths.add(path)

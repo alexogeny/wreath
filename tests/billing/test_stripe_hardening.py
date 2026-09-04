@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import traceback
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -185,6 +185,76 @@ def test_managed_payments_accepts_the_current_ga_api_version() -> None:
     backend = stripe(Client(ClientResponse(200, (), b"{}", "1.1")), managed_payments=True)
 
     assert backend.capabilities.merchant == "provider"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        1,
+        "https://app.example:0",
+        "https://app.example\r\n",
+        "https://app.example/path",
+        "https://app.example?tenant=other",
+        "https://app.example/\u0085hidden",
+    ],
+)
+def test_stripe_refuses_ambiguous_allowed_return_origins(origin: object) -> None:
+    with pytest.raises(ValueError, match="allowed return origin"):
+        StripeBilling(
+            client=Client(ClientResponse(200, (), b"{}", "1.1")),
+            api_key=Secret("rk_test_example"),
+            api_version="2026-08-26.dahlia",
+            allowed_return_origins=cast(tuple[str, ...], (origin,)),
+        )
+
+
+@pytest.mark.parametrize(
+    "api_key", ["rk_test_bad\r\nheader", "rk test bad", "rk_test_bad\x7fheader"]
+)
+def test_stripe_refuses_api_keys_that_cannot_form_one_bearer_credential(api_key: str) -> None:
+    with pytest.raises(ValueError, match="api_key"):
+        StripeBilling(
+            client=Client(ClientResponse(200, (), b"{}", "1.1")),
+            api_key=Secret(api_key),
+            api_version="2026-08-26.dahlia",
+            allowed_return_origins=("https://app.example",),
+        )
+
+
+@pytest.mark.parametrize("api_key", ["secret", "pk_test_publishable"])
+def test_stripe_refuses_non_secret_api_key_forms(api_key: str) -> None:
+    with pytest.raises(ValueError, match="restricted or secret API key"):
+        StripeBilling(
+            client=Client(ClientResponse(200, (), b"{}", "1.1")),
+            api_key=Secret(api_key),
+            api_version="2026-08-26.dahlia",
+            allowed_return_origins=("https://app.example",),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "return_url",
+    [
+        "https://app.example/settings#attacker",
+        "https://app.example/settings\r\n",
+        "https://app.example/settings/\u0085attacker",
+    ],
+)
+async def test_stripe_refuses_ambiguous_return_urls_before_io(return_url: str) -> None:
+    client = Client(ClientResponse(200, (), b"{}", "1.1"))
+    request = CheckoutRequest(
+        subject="organization:acme",
+        items=(CheckoutItem("price_pro"),),
+        mode="subscription",
+        success_url=return_url,
+        cancel_url="https://app.example/cancel",
+        reference="01JAMBIGUOUSRETURN",
+    )
+
+    with pytest.raises(ValueError, match="success_url"):
+        await stripe(client).create_checkout(request, idempotency_key=request.reference)
+    assert client.options == {}
 
 
 def test_managed_payments_posture_keeps_external_eligibility_visible() -> None:

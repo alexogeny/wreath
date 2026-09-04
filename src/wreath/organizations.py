@@ -99,6 +99,18 @@ def _invitation_digest(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
 
 
+def _role_set(roles: Iterable[str]) -> frozenset[str]:
+    if isinstance(roles, (str, bytes)):
+        raise TypeError("roles must be a collection of strings, not a string")
+    try:
+        values = tuple(roles)
+    except TypeError as error:
+        raise TypeError("roles must be a collection of strings") from error
+    if any(not isinstance(role, str) for role in values):
+        raise TypeError("roles must be a collection of strings")
+    return frozenset(values)
+
+
 __all__ = [
     "Invitation",
     "InMemoryOrganizationStore",
@@ -166,6 +178,9 @@ class Membership:
     organization: str
     user_id: str
     roles: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roles", _role_set(self.roles))
 
     def qualified_roles(self) -> frozenset[str]:
         """This membership's roles, namespaced by organisation."""
@@ -245,7 +260,7 @@ class Invitation:
         accepted_by: the user id that accepted, or `None`
     """
 
-    token: str
+    token: str = field(repr=False)
     organization: str
     email: str
     roles: frozenset[str] = frozenset()
@@ -253,6 +268,7 @@ class Invitation:
     accepted_by: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "roles", _role_set(self.roles))
         if self.expires_at is not None and not isfinite(self.expires_at):
             raise ValueError("invitation expires_at must be finite or None")
 
@@ -326,7 +342,7 @@ class InMemoryOrganizationStore:
         roles: Iterable[str],
         organizations: Iterable[Organization] = (),
     ) -> None:
-        self._roles = frozenset(str(role) for role in roles)
+        self._roles = _role_set(roles)
         if not self._roles:
             raise ValueError(
                 "InMemoryOrganizationStore requires a non-empty role vocabulary; "
@@ -396,7 +412,7 @@ class InMemoryOrganizationStore:
         """Place `user_id` in `org_id` with `roles`, replacing any prior roles."""
         if org_id not in self._organizations:
             await self.create(Organization(id=org_id))
-        wanted = frozenset(str(role) for role in roles)
+        wanted = _role_set(roles)
         self._check_roles(wanted)
         self._memberships.setdefault(user_id, {})[org_id] = wanted
         return Membership(organization=org_id, user_id=user_id, roles=wanted)
@@ -419,7 +435,7 @@ class InMemoryOrganizationStore:
         now: float | None = None,
     ) -> Invitation:
         """Offer membership to an email address that may belong to nobody yet."""
-        wanted = frozenset(str(role) for role in roles)
+        wanted = _role_set(roles)
         self._check_roles(wanted)
         moment = time.time() if now is None else now
         if not isfinite(moment):
@@ -537,7 +553,7 @@ class PostgresOrganizationStore:
         table: str = "wreath_organization",
         prefix: str | None = None,
     ) -> None:
-        self._roles = frozenset(str(role) for role in roles)
+        self._roles = _role_set(roles)
         if not self._roles:
             raise ValueError(
                 "PostgresOrganizationStore requires a non-empty role vocabulary; "
@@ -807,7 +823,7 @@ class PostgresOrganizationStore:
     ) -> Membership:
         from ._json import dumps
 
-        wanted = frozenset(str(role) for role in roles)
+        wanted = _role_set(roles)
         self._check_roles(wanted)
         encoded = dumps(sorted(wanted)).decode("utf-8")
         row = await self._statements.statement("add_member").fetchrow(org_id, user_id, encoded)
@@ -830,7 +846,7 @@ class PostgresOrganizationStore:
     ) -> Invitation:
         from ._json import dumps
 
-        wanted = frozenset(str(role) for role in roles)
+        wanted = _role_set(roles)
         self._check_roles(wanted)
         token = secrets.token_urlsafe(32)
         args: tuple[Any, ...] = (

@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from ._jobcore import validate_identifier
@@ -111,6 +112,25 @@ class TenantNotBound(TenancyError):
     """A tenant-scoped registry was reached with no tenant resolved."""
 
 
+def _freeze_metadata(value: Any, active: set[int]) -> Any:
+    if not isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        return value
+    marker = id(value)
+    if marker in active:
+        raise TenancyError("tenant metadata must not contain cycles")
+    active.add(marker)
+    try:
+        if isinstance(value, Mapping):
+            return MappingProxyType(
+                {key: _freeze_metadata(item, active) for key, item in value.items()}
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(_freeze_metadata(item, active) for item in value)
+        return frozenset(_freeze_metadata(item, active) for item in value)
+    finally:
+        active.remove(marker)
+
+
 class TenantStatus(StrEnum):
     """Where a tenant is in its life.
 
@@ -160,6 +180,7 @@ class Tenant:
                 validate_identifier(self.role, "tenant role")
             except ValueError as error:
                 raise TenancyError(str(error)) from error
+        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata, set()))
 
     def require_bindable(self) -> None:
         """Raise unless this tenant may serve a request right now.
@@ -209,7 +230,11 @@ class InMemoryTenantDirectory:
     __slots__ = ("_by_key",)
 
     def __init__(self, tenants: Iterable[Tenant] = ()) -> None:
-        self._by_key: dict[str, Tenant] = {tenant.key: tenant for tenant in tenants}
+        self._by_key: dict[str, Tenant] = {}
+        for tenant in tenants:
+            if tenant.key in self._by_key:
+                raise TenancyError(f"duplicate tenant key {tenant.key!r} in directory")
+            self._by_key[tenant.key] = tenant
 
     def resolve(self, key: str) -> Tenant:
         tenant = self._by_key.get(key)
@@ -225,6 +250,15 @@ class InMemoryTenantDirectory:
         return tuple(self._by_key.values())
 
     def add(self, tenant: Tenant) -> None:
+        previous = self._by_key.get(tenant.key)
+        if previous is not None and (previous.schema, previous.role) != (
+            tenant.schema,
+            tenant.role,
+        ):
+            raise TenancyError(
+                f"updating tenant {tenant.key!r} cannot change its schema or role; "
+                "provision a new tenant key for different database placement"
+            )
         self._by_key[tenant.key] = tenant
 
 
@@ -303,8 +337,14 @@ class TenantHostLabel:
     _cut: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_dotted", f".{self.suffix.lower()}")
-        object.__setattr__(self, "_cut", -len(self.suffix) - 1)
+        if not isinstance(self.suffix, str) or not self.suffix:
+            raise TenancyError(
+                "TenantHostLabel suffix must be a non-empty DNS suffix such as 'example.com'"
+            )
+        suffix = self.suffix.lower()
+        object.__setattr__(self, "suffix", suffix)
+        object.__setattr__(self, "_dotted", f".{suffix}")
+        object.__setattr__(self, "_cut", -len(suffix) - 1)
 
     def name_for(self, request: Any) -> str | None:
         host = _single_selector(request, "host")
@@ -396,7 +436,7 @@ class Tenancy:
                 "that was never multi-tenant on its apex starts resolving 'www' as a "
                 "customer."
             )
-        if isinstance(source, TenantHeader) and not source.trusted:
+        if isinstance(source, TenantHeader) and source.trusted is not True:
             raise TenancyError(
                 "TenantHeader requires trusted=True after a trusted gateway has "
                 "authenticated the caller and replaced the header; use "
@@ -671,6 +711,8 @@ class TenancyMiddleware:
     _TOKEN_KEY = "_wreath_tenant_token"
 
     def __init__(self, tenancy: Tenancy, *, optional: bool = False) -> None:
+        if optional.__class__ is not bool:
+            raise TenancyError("TenancyMiddleware optional must be true or false")
         self._tenancy = tenancy
         #: Whether a request that names no tenant may proceed unbound. Off by
         #: default: an unbound request against a tenant application is one that
@@ -821,6 +863,8 @@ async def deprovision_tenant(
     `privacy.erase`: an irreversible act recomputes what it is about to destroy
     and refuses when that does not match what the caller expected.
     """
+    if force.__class__ is not bool:
+        raise TenancyError("deprovision_tenant force must be true or false")
     if not force:
         rows = await connection.fetch(
             "SELECT tablename FROM pg_tables WHERE schemaname = $1::text LIMIT 1", tenant.schema

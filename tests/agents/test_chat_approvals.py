@@ -289,6 +289,9 @@ async def test_link_binding_refuses_each_missing_or_conflicting_server_side_fact
     cases[1].principal = human(cases[1].identity)
     cases[2].principal = None
     cases[3].principal = SimpleNamespace(identity=Identity("user-8"))
+    wrong_type = context()
+    wrong_type.principal = human(Identity("user-7", type="Service"))
+    cases.append(wrong_type)
     for current in cases:
         with pytest.raises(LookupError, match="linked identity|does not match"):
             await approvals.issue(
@@ -381,6 +384,68 @@ async def test_render_without_resource_does_not_invent_one() -> None:
         )
     ).for_provider("slack")
     assert rendered["text"] == "Approve deploy?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["slack", "teams", "discord"])
+async def test_approval_rendering_neutralizes_untrusted_mentions(provider: str) -> None:
+    _, _, approvals = flow([100.0])
+
+    rendered = (
+        await approvals.issue(
+            context(provider),
+            approval_id="approval_7",
+            action="deploy <@U123>",
+            resource="@everyone <at>admin</at> [production](https://evil.invalid)",
+            ttl=30,
+        )
+    ).for_provider(provider)
+
+    if provider == "slack":
+        assert "<@U123>" not in rendered["text"]
+        assert "&lt;@U123&gt;" in rendered["text"]
+        assert "[production](" in rendered["text"]
+        assert rendered["mrkdwn"] is False
+        assert rendered["blocks"][0]["text"]["type"] == "plain_text"
+        assert rendered["blocks"][0]["text"]["text"] == rendered["text"]
+    elif provider == "teams":
+        text = rendered["body"][0]["text"]
+        assert "<at>" not in text
+        assert "&lt;at&gt;" in text
+        assert "[production](" not in text
+        assert r"\[production\]\(" in text
+    else:
+        assert rendered["allowed_mentions"] == {"parse": []}
+        assert "<@U123>" in rendered["text"]
+        assert "[production](" not in rendered["text"]
+        assert r"\[production\]\(" in rendered["text"]
+
+
+@pytest.mark.asyncio
+async def test_issue_refuses_ambiguous_or_overlong_approval_display_before_store_use() -> None:
+    store = RecordingStore()
+    approvals = ChatApprovalFlow(ChatOps(name="display"), store)
+
+    for action, resource in (
+        ("deploy\nApprove delete?", None),
+        ("deploy", "production\rhidden"),
+        ("deploy", ""),
+        ("x" * 513, None),
+        ("deploy", "x" * 1_401),
+        ("x" * 512, "x" * 1_400),
+        ("<" * 500, "&" * 1_000),
+        ("é" * 250, "é" * 700),
+    ):
+        with pytest.raises(ValueError, match="action|resource|display"):
+            await approvals.issue(
+                context(),
+                approval_id="approval_7",
+                action=action,
+                resource=resource,
+                ttl=30,
+            )
+
+    assert store.calls == []
 
 
 class RecordingStore:

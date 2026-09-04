@@ -10,12 +10,28 @@ tries several backends in order (bearer first, then session).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 
 from ..request import Request
 from .backends import AuthenticationBackend
 from .models import Identity
 
 __all__ = ["CompositeBackend", "SessionIdentityBackend"]
+
+
+def _grants(value: object) -> frozenset[str] | None:
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        return frozenset(value.split())
+    if not isinstance(value, list | tuple | set | frozenset):
+        return None
+    normalized: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        normalized.add(item)
+    return frozenset(normalized)
 
 
 class SessionIdentityBackend:
@@ -41,9 +57,9 @@ class SessionIdentityBackend:
 
         Reads `request.state.session[session_key]` — `"principal"` by default —
         and requires it to be a mapping carrying a non-empty string `sub`. That
-        subject becomes `Identity.id`; `type` defaults to `"User"`; `roles` and
-        `permissions` are taken from the principal and stringified into
-        frozensets; and the whole principal mapping is copied onto
+        subject becomes `Identity.id`; `type` defaults to `"User"`; string
+        `roles` and `permissions` are whitespace-delimited, while collection
+        forms must contain only strings; and the whole principal mapping is copied onto
         `Identity.claims`, which is what carries `second_factor_at` to the
         step-up checks.
 
@@ -78,18 +94,19 @@ class SessionIdentityBackend:
         if isinstance(expires, (int, float)) and not isinstance(expires, bool):
             import time
 
+            if isinstance(expires, float) and not isfinite(expires):
+                return None
             if expires <= time.time():
                 return None
-        roles = principal.get("roles") or ()
-        # Permissions as well as roles: a bearer identity carries both, and an
-        # SSO identity that dropped them made `@authorize(permissions=...)`
-        # refuse the same person a token would have admitted.
-        granted = principal.get("permissions") or ()
+        roles = _grants(principal.get("roles"))
+        granted = _grants(principal.get("permissions"))
+        if roles is None or granted is None:
+            return None
         return Identity(
             id=subject,
             type=str(principal.get("type", "User")),
-            roles=frozenset(str(role) for role in roles),
-            permissions=frozenset(str(item) for item in granted),
+            roles=roles,
+            permissions=granted,
             claims=dict(principal),
             namespace=str(principal.get("iss") or ""),
         )

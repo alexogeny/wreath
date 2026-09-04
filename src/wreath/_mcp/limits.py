@@ -112,13 +112,21 @@ class MCPLimits:
             "max_result_bytes",
         ):
             value = getattr(self, field_name)
+            if type(value) is not int:
+                raise TypeError(f"MCPLimits.{field_name} must be an integer")
             if value < 1:
                 raise ValueError(f"MCPLimits.{field_name} must be at least 1")
+        for field_name in ("stream_keepalive_seconds", "client_request_seconds"):
+            value = getattr(self, field_name)
+            if type(value) not in (int, float):
+                raise TypeError(f"MCPLimits.{field_name} must be an int or float")
         if self.stream_keepalive_seconds <= 0 or not isfinite(self.stream_keepalive_seconds):
             raise ValueError("MCPLimits.stream_keepalive_seconds must be positive and finite")
         if self.client_request_seconds <= 0 or not isfinite(self.client_request_seconds):
             raise ValueError("MCPLimits.client_request_seconds must be positive and finite")
         idle = self.session_idle_seconds
+        if idle is not None and type(idle) not in (int, float):
+            raise TypeError("MCPLimits.session_idle_seconds must be an int or float, or None")
         if idle is not None and (idle <= 0 or not isfinite(idle)):
             raise ValueError(
                 "MCPLimits.session_idle_seconds must be positive and finite, or None to "
@@ -163,10 +171,16 @@ class ToolRateLimit:
     burst: int | None = None
 
     def __post_init__(self) -> None:
+        if type(self.limit) is not int:
+            raise TypeError("ToolRateLimit.limit must be an integer")
         if self.limit < 1:
             raise ValueError("ToolRateLimit.limit must be at least 1")
+        if type(self.window) not in (int, float):
+            raise TypeError("ToolRateLimit.window must be an int or float")
         if self.window <= 0 or not isfinite(self.window):
             raise ValueError("ToolRateLimit.window must be positive and finite")
+        if self.burst is not None and type(self.burst) is not int:
+            raise TypeError("ToolRateLimit.burst must be an integer or None")
         if self.burst is not None and self.burst < 1:
             raise ValueError("ToolRateLimit.burst must be at least 1")
 

@@ -25,7 +25,7 @@ from .._b64 import b64url_decode, b64url_encode
 from .._codecs import parse_qs
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
-from .._userkit import hash_password
+from .._userkit import MAX_PASSWORD_BYTES, hash_password
 from ..authorization import authorize
 from ..cache import BoundedCache
 from ..policy.security import _normalize_host
@@ -53,13 +53,11 @@ UNUSABLE_PASSWORD = "!scim-provisioned"
 MAX_PAGE_SIZE = 200
 DEFAULT_PAGE_SIZE = 100
 
-#: How many of an organisation's members a *filtered* list may examine. A filter
-#: is evaluated against each member's SCIM representation, and building one
-#: reads that user from the user store, so an unbounded organisation is an
-#: unbounded fan-out one request long. Over the ceiling the endpoint refuses
-#: with the `tooMany` of section 3.12 rather than answering from a prefix --
-#: a truncated page reads as "these are all the matches" and is how a directory
-#: decides to recreate everyone it could not see.
+#: How many members, roles, or role assignments one materializing request may
+#: examine. User filters read every candidate account, while group resources
+#: expand membership lists; either becomes an unbounded fan-out without this
+#: ceiling. Over it the endpoint refuses with the `tooMany` of section 3.12
+#: rather than answering from a prefix, which would falsely claim completeness.
 MAX_FILTER_SCAN = 1000
 
 # Client filter text is bounded to 2 KiB by the parser, and these router-owned
@@ -68,6 +66,9 @@ MAX_FILTER_SCAN = 1000
 # lookup key. Invalid filters are deliberately not cached, so they still take
 # the parser's exact refusal path on every request.
 _FILTER_CACHE_SIZE = 64
+_MAX_QUERY_BYTES = 8192
+_MAX_QUERY_FIELDS = 16
+_ORGANIZATION_STATE_SLOT = "_wreath_scim_organization"
 _SEARCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:SearchRequest"
 _CURSOR_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
@@ -93,6 +94,23 @@ def _refused(error: PatchError) -> ScimResponse:
     return _error(409 if error.scim_type == "uniqueness" else 400, error.detail, error.scim_type)
 
 
+def _individual_query_refusal(
+    request: Any,
+    query_of: Callable[[Any], Mapping[str, str]],
+) -> ScimResponse | None:
+    if not request.query_string:
+        return None
+    try:
+        query_of(request)
+    except PatchError as error:
+        return _error(400, error.detail, error.scim_type)
+    return _error(
+        400,
+        "filtering, sorting, and pagination apply to SCIM collections, not one resource",
+        "invalidValue",
+    )
+
+
 def _entity_safe(organization: str) -> str:
     """`organization` if it can be spelled inside a Cedar entity reference.
 
@@ -108,6 +126,16 @@ def _entity_safe(organization: str) -> str:
             f"an organization id used by scim_router must not contain a quote or "
             f"a backslash (got {organization!r}); it is spelled into the Cedar "
             'entity reference Organization::"<id>"'
+        )
+    if ":" in organization:
+        raise ValueError(
+            f"an organization id used by scim_router must not contain ':' "
+            f"(got {organization!r}); roles use the '<organization>:<role>' namespace"
+        )
+    if any(ord(char) <= 0x1F or 0x7F <= ord(char) <= 0x9F for char in organization):
+        raise ValueError(
+            f"an organization id used by scim_router must not contain controls "
+            f"(got {organization!r}); use a printable identifier"
         )
     return organization
 
@@ -181,11 +209,16 @@ def _scim_data_helpers(
     def org_of(request: Any) -> str:
         """Which organisation this request provisions into.
 
-        Re-checked per request rather than only at build time, because a
-        callable reads it from the request -- a path parameter, a subdomain --
-        and that value reaches a Cedar entity reference.
+        Resolved once for this request because the same value gates the Cedar
+        decision and selects the data tenant. Calling a stateful resolver twice
+        could authorize one organization and then write another.
         """
-        return _entity_safe(str(resolve(request)))
+        state = request.state
+        organization = state.get(_ORGANIZATION_STATE_SLOT)
+        if organization is None:
+            organization = _entity_safe(str(resolve(request)))
+            setattr(state, _ORGANIZATION_STATE_SLOT, organization)
+        return organization
 
     def cedar_resource(request: Any) -> str:
         return f'Organization::"{org_of(request)}"'
@@ -341,6 +374,7 @@ def _scim_write_helpers(
         wanted_active = target.get("active", current.get("active"))
         if not isinstance(wanted_active, bool):
             raise PatchError("invalidValue", "active must be true or false")
+        reactivated = False
         if wanted_active != bool(current.get("active")):
             if adopting and record.hashed_password != UNUSABLE_PASSWORD:
                 raise PatchError(
@@ -367,11 +401,24 @@ def _scim_write_helpers(
                     "de-provision it from this organization alone",
                 )
             updated = _replace(updated, is_active=wanted_active)
+            reactivated = wanted_active
         if password is not None:
             if not isinstance(password, str) or not password:
                 raise PatchError("invalidValue", "password must be a non-empty string")
+            try:
+                password_bytes = len(password.encode("utf-8"))
+            except UnicodeEncodeError:
+                raise PatchError(
+                    "invalidValue",
+                    "password must contain valid Unicode without unpaired surrogates",
+                ) from None
+            if password_bytes > MAX_PASSWORD_BYTES:
+                raise PatchError(
+                    "invalidValue",
+                    f"password must contain at most {MAX_PASSWORD_BYTES} UTF-8 bytes",
+                )
             updated = _replace(updated, hashed_password=await hashed(password))
-        must_revoke = _session_revocation_required(current, target)
+        must_revoke = reactivated or _session_revocation_required(current, target)
         revoker = revoke_sessions if must_revoke else None
         if must_revoke:
             if revoker is None:
@@ -389,7 +436,13 @@ def _scim_write_helpers(
                 await revoked
         return stored
 
-    async def commit_group(org: str, role: str, target: Mapping[str, Any]) -> None:
+    async def commit_group(
+        org: str,
+        role: str,
+        target: Mapping[str, Any],
+        *,
+        max_assignments: int,
+    ) -> None:
         """Reconcile a group document's membership against the store."""
         wanted: list[str] = []
         # `target["members"]` is a list of mappings by construction: it comes
@@ -411,6 +464,18 @@ def _scim_write_helpers(
                     "they cannot be given a role in it; provision the user first",
                 )
         wanted_ids = set(wanted)
+        next_assignments = (
+            sum(len(roles) for roles in held.values())
+            - sum(role in roles for roles in held.values())
+            + len(wanted_ids)
+        )
+        if next_assignments > max_assignments:
+            raise PatchError(
+                "tooMany",
+                f"this group write would create {next_assignments} role assignments; "
+                f"this provider materializes at most {max_assignments}, so raise "
+                "scim_router(max_filter_scan=...) or narrow the organization",
+            )
         for user_id, roles in held.items():
             should_hold = user_id in wanted_ids
             if should_hold == (role in roles):
@@ -425,8 +490,9 @@ def _scim_write_helpers(
 
 
 def _session_revocation_required(current: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
-    disabled = bool(current.get("active")) and target.get("active") is False
-    return disabled or target.get("password") is not None
+    current_active = current.get("active")
+    deactivated = current_active is True and target.get("active", current_active) is False
+    return deactivated or target.get("password") is not None
 
 
 def _scim_query_helpers(
@@ -434,16 +500,58 @@ def _scim_query_helpers(
     page_size: int,
     max_page_size: int,
 ) -> dict[str, Any]:
+    def validate_names(query: Mapping[str, Any]) -> None:
+        unsupported = {"attributes", "excludedattributes"}.intersection(query)
+        if unsupported:
+            raise PatchError(
+                "invalidValue",
+                "this SCIM provider does not implement response projection; omit "
+                + ", ".join(sorted(unsupported)),
+            )
+        allowed = {"filter", "sortby", "sortorder", "startindex", "count", "cursor"}
+        unknown = set(query).difference(allowed)
+        if unknown:
+            raise PatchError(
+                "invalidSyntax",
+                "SCIM search contains unknown member(s): " + ", ".join(sorted(unknown)),
+            )
+        if "sortorder" in query and "sortby" not in query:
+            raise PatchError("invalidValue", "sortOrder requires sortBy in the same request")
+
     def query_of(request: Any) -> dict[str, str]:
+        if len(request.query_string) > _MAX_QUERY_BYTES:
+            raise PatchError(
+                "invalidSyntax",
+                f"SCIM query may contain at most {_MAX_QUERY_BYTES} bytes",
+            )
+        try:
+            pairs = parse_qs(request.query_string, _MAX_QUERY_FIELDS)
+        except ValueError:
+            raise PatchError(
+                "invalidSyntax",
+                f"SCIM query may contain at most {_MAX_QUERY_FIELDS} fields",
+            ) from None
         values: dict[str, str] = {}
-        for key, value in parse_qs(request.query_string):
-            values.setdefault(key.lower(), value)
+        for key, value in pairs:
+            name = key.lower()
+            if name in values:
+                raise PatchError(
+                    "invalidSyntax",
+                    f"SCIM query contains {key!r} more than once ignoring case",
+                )
+            values[name] = value
+        validate_names(values)
         return values
 
     async def search_query_of(request: Any) -> dict[str, str]:
         body = await _json(request)
         if not isinstance(body, Mapping):
             raise PatchError("invalidSyntax", "SCIM search body must be a JSON object")
+        if len(body) > _MAX_QUERY_FIELDS:
+            raise PatchError(
+                "invalidSyntax",
+                f"SCIM search body may contain at most {_MAX_QUERY_FIELDS} members",
+            )
         normalized: dict[str, Any] = {}
         for raw_name, value in body.items():
             if not isinstance(raw_name, str):
@@ -461,20 +569,7 @@ def _scim_query_helpers(
                 "invalidSyntax",
                 f"SCIM search schemas must be exactly [{_SEARCH_SCHEMA!r}]",
             )
-        unsupported = {"attributes", "excludedattributes"}.intersection(normalized)
-        if unsupported:
-            raise PatchError(
-                "invalidValue",
-                "this SCIM provider does not implement response projection; omit "
-                + ", ".join(sorted(unsupported)),
-            )
-        allowed = {"filter", "sortby", "sortorder", "startindex", "count", "cursor"}
-        unknown = set(normalized).difference(allowed)
-        if unknown:
-            raise PatchError(
-                "invalidSyntax",
-                "SCIM search contains unknown member(s): " + ", ".join(sorted(unknown)),
-            )
+        validate_names(normalized)
         query: dict[str, str] = {}
         for name, value in normalized.items():
             if name in {"startindex", "count"}:
@@ -724,7 +819,7 @@ def _scim_selection_helper(
     ) -> ScimResponse:
         """Filter, page and envelope a list of already-built representations."""
         expression = query.get("filter")
-        if expression:
+        if expression is not None:
             cache = user_filter_cache if shape is resources.USER else group_filter_cache
             node = _parsed_filter(cache, expression, shape.queryable)
             documents = select(node, documents)
@@ -1049,6 +1144,14 @@ def _mount_scim_users(context: _ScimBuildContext) -> None:
                 f"evaluates a filter over at most {limit}; narrow the request or "
                 "raise scim_router(max_filter_scan=...)",
             )
+        assignments = sum(len(roles) for roles in held.values())
+        if assignments > limit:
+            raise PatchError(
+                "tooMany",
+                f"this organization has {assignments} role assignments and this "
+                f"provider materializes at most {limit} for a filtered or sorted "
+                "user list; narrow the request or raise scim_router(max_filter_scan=...)",
+            )
         ordered = sorted(held)
         if not ordered:
             return []
@@ -1068,7 +1171,7 @@ def _mount_scim_users(context: _ScimBuildContext) -> None:
         org = org_of(request)
         base = base_of(request)
         try:
-            if query.get("filter") or query.get("sortby"):
+            if "filter" in query or "sortby" in query:
                 return selected(
                     await user_documents(org, base, max_filter_scan),
                     query,
@@ -1105,6 +1208,14 @@ def _mount_scim_users(context: _ScimBuildContext) -> None:
                 start, count = paging(query)
                 position = start - 1
                 page = ordered[position : position + count]
+            assignments = sum(len(held[user_id]) for user_id in page)
+            if assignments > max_filter_scan:
+                raise PatchError(
+                    "tooMany",
+                    f"this user page has {assignments} role assignments and this "
+                    f"provider materializes at most {max_filter_scan}; request a "
+                    "smaller page or raise scim_router(max_filter_scan=...)",
+                )
             records = await users.get_many_by_id(page) if page else []
             if len(records) != len(page):
                 raise RuntimeError(
@@ -1150,7 +1261,11 @@ def _mount_scim_users(context: _ScimBuildContext) -> None:
     @router.get("/Users")
     @authorize(action=read_action, resource=cedar_resource)
     async def scim_list_users(request: Any) -> Response:
-        return await search_users(request, query_of(request))
+        try:
+            query = query_of(request)
+        except PatchError as error:
+            return _error(400, error.detail, error.scim_type)
+        return await search_users(request, query)
 
     @router.post("/Users/.search")
     @authorize(action=read_action, resource=cedar_resource)
@@ -1175,7 +1290,7 @@ def _mount_scim_user_crud(context: _ScimBuildContext) -> None:
         _hashed,
         commit_user,
         _commit_group,
-        _query_of,
+        query_of,
         _search_query_of,
         _sort_documents,
         _paging,
@@ -1196,7 +1311,7 @@ def _mount_scim_user_crud(context: _ScimBuildContext) -> None:
         write_action,
         _page_size,
         _max_page_size,
-        _max_filter_scan,
+        max_filter_scan,
         _cursor_timeout,
     ) = (
         values["org_of"],
@@ -1234,14 +1349,29 @@ def _mount_scim_user_crud(context: _ScimBuildContext) -> None:
         values["cursor_timeout"],
     )
 
+    def role_limit(held: frozenset[str]) -> ScimResponse | None:
+        if len(held) <= max_filter_scan:
+            return None
+        return _error(
+            400,
+            f"this user has {len(held)} role assignments and this provider "
+            f"materializes at most {max_filter_scan}; raise "
+            "scim_router(max_filter_scan=...) or narrow the role vocabulary",
+            "tooMany",
+        )
+
     @router.get("/Users/{id}")
     @authorize(action=read_action, resource=cedar_resource)
     async def scim_get_user(request: Any) -> Response:
+        if (refusal := _individual_query_refusal(request, query_of)) is not None:
+            return refusal
         org = org_of(request)
         found = await user_and_roles(org, request.path_params["id"])
         if found is None:
             return _error(404, "no such user in this organization")
         record, held = found
+        if (refusal := role_limit(held)) is not None:
+            return refusal
         return ScimResponse(resources.user_document(record, roles=held, base=base_of(request)))
 
     @router.post("/Users")
@@ -1298,6 +1428,8 @@ def _mount_scim_user_crud(context: _ScimBuildContext) -> None:
         if found is None:
             return _error(404, "no such user in this organization")
         record, held = found
+        if (refusal := role_limit(held)) is not None:
+            return refusal
         body = await _json(request)
         if body is None:
             return _error(400, "request body is not valid JSON", "invalidSyntax")
@@ -1370,7 +1502,7 @@ def _mount_scim_groups(context: _ScimBuildContext) -> None:
         write_action,
         _page_size,
         _max_page_size,
-        _max_filter_scan,
+        max_filter_scan,
         _cursor_timeout,
     ) = (
         values["org_of"],
@@ -1408,22 +1540,45 @@ def _mount_scim_groups(context: _ScimBuildContext) -> None:
         values["cursor_timeout"],
     )
 
-    async def group_documents(org: str, base: str) -> list[dict[str, Any]]:
+    async def group_inventory(
+        org: str,
+    ) -> tuple[dict[str, frozenset[str]], list[str]]:
         held = await membership_map(org)
+        role_names = sorted(organizations.roles())
+        assignments = sum(len(roles) for roles in held.values())
+        if (
+            len(held) > max_filter_scan
+            or len(role_names) > max_filter_scan
+            or assignments > max_filter_scan
+        ):
+            raise PatchError(
+                "tooMany",
+                f"this organization has {len(held)} members, {len(role_names)} roles, "
+                f"and {assignments} role assignments; this provider materializes at most "
+                f"{max_filter_scan} of each for a group request, so raise "
+                "scim_router(max_filter_scan=...) or narrow the organization",
+            )
+        return held, role_names
+
+    async def group_documents(org: str, base: str) -> list[dict[str, Any]]:
+        held, role_names = await group_inventory(org)
         return [
             resources.group_document(
                 role,
                 sorted(user_id for user_id, roles in held.items() if role in roles),
                 base=base,
             )
-            for role in sorted(organizations.roles())
+            for role in role_names
         ]
 
     async def search_groups(request: Any, query: Mapping[str, str]) -> Response:
         org = org_of(request)
         try:
             return selected(
-                await group_documents(org, base_of(request)), query, resources.GROUP, org
+                await group_documents(org, base_of(request)),
+                query,
+                resources.GROUP,
+                org,
             )
         except FilterError as error:
             return _error(400, error.detail, "invalidFilter")
@@ -1433,7 +1588,11 @@ def _mount_scim_groups(context: _ScimBuildContext) -> None:
     @router.get("/Groups")
     @authorize(action=read_action, resource=cedar_resource)
     async def scim_list_groups(request: Any) -> Response:
-        return await search_groups(request, query_of(request))
+        try:
+            query = query_of(request)
+        except PatchError as error:
+            return _error(400, error.detail, error.scim_type)
+        return await search_groups(request, query)
 
     @router.post("/Groups/.search")
     @authorize(action=read_action, resource=cedar_resource)
@@ -1447,11 +1606,16 @@ def _mount_scim_groups(context: _ScimBuildContext) -> None:
     @router.get("/Groups/{id}")
     @authorize(action=read_action, resource=cedar_resource)
     async def scim_get_group(request: Any) -> Response:
+        if (refusal := _individual_query_refusal(request, query_of)) is not None:
+            return refusal
         org = org_of(request)
         role = request.path_params["id"]
         if role not in organizations.roles():
             return _error(404, "no such group in this organization")
-        held = await membership_map(org)
+        try:
+            held, _role_names = await group_inventory(org)
+        except PatchError as error:
+            return _error(400, error.detail, error.scim_type)
         return ScimResponse(
             resources.group_document(
                 role,
@@ -1466,25 +1630,40 @@ def _mount_scim_groups(context: _ScimBuildContext) -> None:
         role = request.path_params["id"]
         if role not in organizations.roles():
             return _error(404, "no such group in this organization")
-        held = await membership_map(org)
-        current = resources.group_document(
-            role,
-            sorted(user_id for user_id, roles in held.items() if role in roles),
-            base=base,
-        )
-        body = await _json(request)
-        if body is None:
-            return _error(400, "request body is not valid JSON", "invalidSyntax")
         try:
-            target = (
-                apply_patch(current, body, shape=resources.GROUP)
-                if patching
-                else replace_document(current, body, shape=resources.GROUP)
+            held, _role_names = await group_inventory(org)
+            current = resources.group_document(
+                role,
+                sorted(user_id for user_id, roles in held.items() if role in roles),
+                base=base,
             )
-            await commit_group(org, role, target)
+            body = await _json(request)
+            if body is None:
+                return _error(400, "request body is not valid JSON", "invalidSyntax")
+            target = (
+                apply_patch(
+                    current,
+                    body,
+                    shape=resources.GROUP,
+                    max_elements=max_filter_scan,
+                )
+                if patching
+                else replace_document(
+                    current,
+                    body,
+                    shape=resources.GROUP,
+                    max_elements=max_filter_scan,
+                )
+            )
+            await commit_group(
+                org,
+                role,
+                target,
+                max_assignments=max_filter_scan,
+            )
         except PatchError as error:
             return _error(400, error.detail, error.scim_type)
-        refreshed = await membership_map(org)
+        refreshed, _role_names = await group_inventory(org)
         return ScimResponse(
             resources.group_document(
                 role,
@@ -1631,10 +1810,10 @@ def scim_router(
         write_action: the Cedar action name the write routes ask about.
         page_size: `count` when a client sends none.
         max_page_size: the largest `count` honoured.
-        max_filter_scan: how many members a *filtered* list may examine before
-            refusing with `tooMany`. A filter is evaluated per member and
-            building the representations reads their accounts in one batch, so
-            this bounds the work one request can ask for.
+        max_filter_scan: how many members, roles, or role assignments a request
+            that materializes them may examine before refusing with `tooMany`.
+            User filters read candidate accounts in one batch; group resources
+            expand role membership, so this bounds both forms of work.
         cursor_secret: key authenticating opaque cursors. A single-process
             deployment may omit it; every worker in a fleet must share one.
         cursor_timeout: seconds a cursor remains valid between page requests.
@@ -1647,6 +1826,20 @@ def scim_router(
             an empty action name, an inconsistent page size, or an organisation
             id that cannot be spelled inside a Cedar entity reference.
     """
+    for name, value in (
+        ("page_size", page_size),
+        ("max_page_size", max_page_size),
+        ("max_filter_scan", max_filter_scan),
+        ("cursor_timeout", cursor_timeout),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"scim_router {name} must be an integer")
+    if cursor_secret is not None and not isinstance(cursor_secret, bytes | str):
+        raise ValueError("scim_router cursor_secret must be bytes, str, or None")
+    if revoke_sessions is not None and not callable(revoke_sessions):
+        raise ValueError("scim_router revoke_sessions must be callable or None")
+    if not isinstance(organization, str) and not callable(organization):
+        raise ValueError("scim_router organization must be a string or callable")
     if cursor_timeout <= 0:
         raise ValueError("scim_router cursor_timeout must be positive")
     supplied_cursor_secret = (

@@ -7,9 +7,10 @@ from typing import Any, Literal
 
 from ..objects import ObjectStat, ObjectStore
 from ..provenance import Provenance
-from .identity import principal_scope_id
+from .identity import principal_partition
 
 ArtifactTrust = Literal["system", "user", "model", "tool", "external"]
+_MAX_KEY_PART_BYTES = 1024
 
 
 class ArtifactLimitExceeded(ValueError):
@@ -22,7 +23,14 @@ def _digest_parts(*parts: str) -> str:
     for part in parts:
         if not isinstance(part, str) or not part:
             raise ValueError("artifact key parts must be non-empty strings")
-        encoded = part.encode()
+        if len(part) > _MAX_KEY_PART_BYTES:
+            raise ValueError("artifact key parts must contain at most 1024 UTF-8 bytes")
+        try:
+            encoded = part.encode()
+        except UnicodeEncodeError:
+            raise ValueError("artifact key parts must be valid UTF-8") from None
+        if len(encoded) > _MAX_KEY_PART_BYTES:
+            raise ValueError("artifact key parts must contain at most 1024 UTF-8 bytes")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
@@ -59,15 +67,17 @@ class AgentArtifactManager:
         self._max_bytes = max_bytes
         self._max_artifacts = max_artifacts
 
-    def _scope(self, context: Any) -> tuple[str, str, str]:
+    def _scope(self, context: Any) -> tuple[str, str, str, str]:
         tenant = context.tenant
         conversation = context.conversation
-        resolved_principal = principal_scope_id(context.principal, label="artifact")
+        resolved_principal, partition_id = principal_partition(
+            context.principal, label="artifact"
+        )
         if not isinstance(tenant, str) or not tenant:
             raise ValueError("artifact tenant must be a non-empty string")
         if not isinstance(conversation, str) or not conversation:
             raise ValueError("artifact conversation must be a non-empty string")
-        return tenant, resolved_principal, conversation
+        return tenant, resolved_principal, partition_id, conversation
 
     def _check_ordinal(self, ordinal: int) -> None:
         if type(ordinal) is not int:
@@ -81,20 +91,32 @@ class AgentArtifactManager:
     def _check_metadata(media_type: str, trust: str) -> None:
         if not isinstance(media_type, str) or not media_type:
             raise ValueError("artifact media_type must be a non-empty string")
+        if len(media_type) > 1024 or any(
+            ord(character) < 32 or ord(character) == 127 for character in media_type
+        ):
+            raise ValueError(
+                "artifact media_type must contain at most 1024 characters and no controls"
+            )
         if trust not in {"system", "user", "model", "tool", "external"}:
             raise ValueError(f"unsupported artifact trust label {trust!r}")
 
-    def key(self, context: Any, artifact_id: str, *, ordinal: int) -> str:
+    def _resolved_key(
+        self, context: Any, artifact_id: str, *, ordinal: int
+    ) -> tuple[str, tuple[str, str, str]]:
         self._check_ordinal(ordinal)
         if not isinstance(artifact_id, str) or not artifact_id:
             raise ValueError("artifact_id must be a non-empty string")
-        tenant, principal_id, conversation = self._scope(context)
-        identity = _digest_parts(tenant, principal_id, conversation, artifact_id, str(ordinal))
-        return f"agents/artifacts/{identity[:2]}/{identity}"
+        tenant, resolved_principal, partition_id, conversation = self._scope(context)
+        identity = _digest_parts(tenant, partition_id, conversation, artifact_id, str(ordinal))
+        key = f"agents/artifacts/{identity[:2]}/{identity}"
+        return key, (tenant, resolved_principal, conversation)
+
+    def key(self, context: Any, artifact_id: str, *, ordinal: int) -> str:
+        return self._resolved_key(context, artifact_id, ordinal=ordinal)[0]
 
     def _artifact(
         self,
-        context: Any,
+        scope: tuple[str, str, str],
         *,
         artifact_id: str,
         ordinal: int,
@@ -103,7 +125,7 @@ class AgentArtifactManager:
         trust: ArtifactTrust,
         stat: ObjectStat,
     ) -> AgentArtifact:
-        tenant, principal_id, conversation = self._scope(context)
+        tenant, principal_id, conversation = scope
         provenance = Provenance(
             digest,
             name=artifact_id,
@@ -134,7 +156,7 @@ class AgentArtifactManager:
         trust: ArtifactTrust = "model",
     ) -> AgentArtifact:
         self._check_metadata(media_type, trust)
-        key = self.key(context, artifact_id, ordinal=ordinal)
+        key, scope = self._resolved_key(context, artifact_id, ordinal=ordinal)
         if not isinstance(body, bytes | bytearray | memoryview):
             raise TypeError("artifact body must be bytes, bytearray, or memoryview")
         body_size = body.nbytes if isinstance(body, memoryview) else len(body)
@@ -146,7 +168,7 @@ class AgentArtifactManager:
         digest = hashlib.sha256(stable_body).digest()
         stat = await self._store.write(key, stable_body, content_type=media_type)
         return self._artifact(
-            context,
+            scope,
             artifact_id=artifact_id,
             ordinal=ordinal,
             digest=digest,
@@ -166,7 +188,7 @@ class AgentArtifactManager:
         trust: ArtifactTrust = "model",
     ) -> AgentArtifact:
         self._check_metadata(media_type, trust)
-        key = self.key(context, artifact_id, ordinal=ordinal)
+        key, scope = self._resolved_key(context, artifact_id, ordinal=ordinal)
         digest = hashlib.sha256()
         total = 0
 
@@ -186,7 +208,7 @@ class AgentArtifactManager:
 
         stat = await self._store.write_stream(key, bounded(), content_type=media_type)
         return self._artifact(
-            context,
+            scope,
             artifact_id=artifact_id,
             ordinal=ordinal,
             digest=digest.digest(),

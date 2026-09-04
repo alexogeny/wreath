@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -81,9 +82,85 @@ def test_a_records_stream_is_one_per_audited_row():
     assert change.subject == "public.photos:41"
 
 
+def test_composite_primary_key_boundaries_cannot_name_the_same_stream():
+    first = Change(
+        table="public.photos",
+        key="a:b:c",
+        operation="update",
+        actor="user:1",
+        fields={},
+        key_parts=("a:b", "c"),
+    )
+    second = Change(
+        table="public.photos",
+        key="a:b:c",
+        operation="update",
+        actor="user:1",
+        fields={},
+        key_parts=("a", "b:c"),
+    )
+
+    assert first.subject != second.subject
+
+
+def test_a_scalar_orm_key_matches_the_public_textual_history_key():
+    integer = Change(
+        table="public.photos",
+        key="1",
+        operation="update",
+        actor="user:1",
+        fields={},
+        key_parts=(1,),
+    )
+    history_key = Change(
+        table="public.photos",
+        key="1",
+        operation="update",
+        actor="user:1",
+        fields={},
+    )
+
+    assert integer.subject == history_key.subject
+
+
+def test_tenant_search_path_tables_use_the_bound_schema_in_the_audit_stream():
+    from wreath.orm import SessionError
+    from wreath.orm.session import Session, TenantContext
+
+    spec = SimpleNamespace(sql_namespace="tenant_search_path", qualified_name="photos")
+    first = object.__new__(Session)
+    first._tenant = TenantContext(schema="tenant_a")
+    second = object.__new__(Session)
+    second._tenant = TenantContext(schema="tenant_b")
+
+    assert first._audit_table_name(spec) == "tenant_a.photos"
+    assert second._audit_table_name(spec) == "tenant_b.photos"
+
+    public = SimpleNamespace(sql_namespace="public", qualified_name="public.photos")
+    assert first._audit_table_name(public) == "public.photos"
+
+    unbound = object.__new__(Session)
+    unbound._tenant = None
+    with pytest.raises(SessionError, match="bound tenant context"):
+        unbound._audit_table_name(spec)
+
+
 def test_the_append_only_ddl_qualifies_the_table_with_its_schema():
     statements = append_only_statements("audit_records", schema="wreath")
     assert all('"wreath".audit_records' in statement for statement in statements)
+
+
+@pytest.mark.parametrize(
+    ("table", "schema"),
+    [
+        ("audit; DROP TABLE users", "wreath"),
+        ('audit"; DROP TABLE users; --', "wreath"),
+        ("audit_records", 'wreath"; DROP SCHEMA public; --'),
+    ],
+)
+def test_append_only_ddl_refuses_names_that_can_change_its_sql(table, schema):
+    with pytest.raises(ValueError, match="identifier|character"):
+        append_only_statements(table, schema=schema)
 
 
 def test_an_unqualified_trail_emits_unqualified_ddl():
@@ -235,6 +312,29 @@ def test_a_batched_record_carries_the_same_payload_a_single_one_does():
     assert args[4] == json.dumps({"caption": "after", "exif_gps": REDACTED}, sort_keys=True)
 
 
+def test_a_change_snapshots_the_fields_it_records():
+    import asyncio
+
+    fields = {"caption": "before", "nested": {"visible": True}}
+    change = Change(
+        table="public.photos",
+        key="41",
+        operation="update",
+        actor="user:41",
+        fields=fields,
+    )
+
+    fields["caption"] = "after"
+    fields["nested"]["visible"] = False
+
+    trail, connection = _trail()
+    asyncio.run(trail.record_many([change], connection=connection))
+    assert json.loads(cast(str, connection.executed[0][1][4])) == {
+        "caption": "before",
+        "nested": {"visible": True},
+    }
+
+
 def test_a_value_json_cannot_render_becomes_a_string_rather_than_a_failure():
     import asyncio
     import uuid
@@ -256,4 +356,4 @@ def test_a_value_json_cannot_render_becomes_a_string_rather_than_a_failure():
         )
     )
     _, args = connection.executed[0]
-    assert json.loads(args[4]) == {"id": str(identifier)}
+    assert json.loads(cast(str, args[4])) == {"id": str(identifier)}

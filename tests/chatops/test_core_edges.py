@@ -8,6 +8,7 @@ import pytest
 
 import wreath.chat._core as chat_core
 from wreath import logging as log
+from wreath._auth.models import qualified_identity_key
 from wreath.auth import Identity
 from wreath.authorization import AuthorizationDecision
 from wreath.binding import ValidationError as BindingValidationError
@@ -618,7 +619,39 @@ async def test_rate_limit_key_prefers_identity_then_channel_actor(
         name="deploy",
         context=context(identity=identity, actor=actor),
     )
-    assert rate_limit.keys == [f"chat:test:tenant-1:{expected_actor}:deploy"]
+    actor_key = (
+        expected_actor
+        if identity is None
+        else qualified_identity_key("User", "", expected_actor)
+    )
+    assert rate_limit.keys == [
+        qualified_identity_key("chat:deploy", "test:tenant-1", actor_key)
+    ]
+
+
+async def test_rate_limit_keys_distinguish_identity_types() -> None:
+    class RateLimit:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        async def admit_key(self, key: str) -> None:
+            self.keys.append(key)
+
+    rate_limit = RateLimit()
+    chat = ChatOps(name="ops", rate_limit=rate_limit)
+
+    @chat.command("deploy")
+    async def deploy() -> None:
+        pass
+
+    for identity_type in ("User", "Service"):
+        await chat._dispatch(
+            kind="command",
+            name="deploy",
+            context=context(identity=Identity("member-7", type=identity_type)),
+        )
+
+    assert len(set(rate_limit.keys)) == 2
 
 
 async def test_chat_admission_holds_and_releases_a_successful_permit() -> None:
@@ -654,6 +687,20 @@ async def test_chat_admission_refuses_when_every_permit_is_held() -> None:
     assert refused.value.problem.detail == "Chat is busy"
     assert ran is False
     admission.release()
+
+
+@pytest.mark.parametrize(
+    "window",
+    [True, "60", 0, float("nan"), float("inf"), float("-inf")],
+)
+def test_chat_declarations_refuse_invalid_second_factor_windows(window: Any) -> None:
+    chat = ChatOps(name="ops")
+
+    with pytest.raises(ValueError, match="positive finite duration"):
+
+        @chat.command("deploy", second_factor=window)
+        async def deploy() -> None:
+            pass
 
 
 async def test_second_factor_requires_identity_and_enforces_maximum_age() -> None:

@@ -15,13 +15,16 @@ app.configure_http_policy(HttpPolicy(
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
-from .._webpolicy import append_vary, find_response_header
+from .._http import _is_http_token
+from .._webpolicy import append_vary, find_response_header, normalize_origin
 from ..request import Request
 from ..response import Response
 
 _DEFAULT_METHODS = ("GET", "HEAD", "POST", "OPTIONS")
+_DUPLICATE = object()
+_REFUSED = "_wreath_cors_refused"
 
 
 def _normalize_origin(value: str) -> str:
@@ -31,6 +34,51 @@ def _normalize_origin(value: str) -> str:
     not, but an origin has no rest.
     """
     return value.lower()
+
+
+def _normalize_allowed_origin(value: str, *, allow_credentials: bool) -> str:
+    if not isinstance(value, str):
+        raise TypeError("allow_origins entries must be str")
+    if value == "*":
+        return value
+    if value.lower() == "null":
+        if allow_credentials:
+            raise ValueError("invalid CORS origin with credentials: 'null'")
+        return "null"
+    if "\\" in value:
+        raise ValueError(
+            f"invalid CORS origin {value!r}: use an ASCII browser origin"
+        )
+    try:
+        return normalize_origin(value, label="CORS").decode("ascii")
+    except (UnicodeError, ValueError) as error:
+        raise ValueError(
+            f"invalid CORS origin {value!r}: use an ASCII browser origin"
+        ) from error
+
+
+def _http_tokens(values: Iterable[str], *, label: str) -> tuple[str, ...]:
+    compiled = tuple(values)
+    if any(not isinstance(value, str) or not _is_http_token(value) for value in compiled):
+        raise ValueError(f"{label} entries must each be one HTTP token")
+    return compiled
+
+
+def _request_header(request: Request, name: str) -> str | object | None:
+    single = getattr(request, "_single_header", None)
+    if single is None:
+        return request.header(name)
+    try:
+        value = single(name.encode("ascii"))
+    except ValueError:
+        return _DUPLICATE
+    return None if value is None else value.decode("latin-1")
+
+
+def _mark_refused(request: Request) -> None:
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.__setattr__(_REFUSED, True)
 
 
 class CorsPolicy:
@@ -74,6 +122,7 @@ class CorsPolicy:
 
     __slots__ = (
         "_allow_all_origins",
+        "_allow_headers",
         "_allow_methods",
         "_allow_credentials",
         "_allow_origins",
@@ -91,7 +140,17 @@ class CorsPolicy:
         expose_headers: Iterable[str] = (),
         max_age: int = 600,
     ) -> None:
-        origins = tuple(_normalize_origin(item) for item in allow_origins)
+        if type(allow_credentials) is not bool:
+            raise TypeError("allow_credentials must be bool")
+        if type(max_age) is not int or max_age < 0:
+            raise TypeError("max_age must be a non-negative int")
+        methods = _http_tokens(allow_methods, label="allow_methods")
+        allowed_headers = _http_tokens(allow_headers, label="allow_headers")
+        exposed_headers = _http_tokens(expose_headers, label="expose_headers")
+        origins = tuple(
+            _normalize_allowed_origin(item, allow_credentials=allow_credentials)
+            for item in allow_origins
+        )
         if "*" in origins and allow_credentials:
             # Reflecting an arbitrary origin *with* credentials lets any site
             # read authenticated responses from this one. Browsers refuse the
@@ -107,25 +166,26 @@ class CorsPolicy:
         self._allow_all_origins = "*" in origins
         self._allow_origins = frozenset(origins)
         self._allow_credentials = allow_credentials
+        self._allow_headers = frozenset(header.lower() for header in allowed_headers)
 
         preflight: list[tuple[bytes, bytes]] = [
-            (b"access-control-allow-methods", ", ".join(allow_methods).encode("latin-1")),
+            (b"access-control-allow-methods", ", ".join(methods).encode("ascii")),
             (b"access-control-max-age", str(max_age).encode("ascii")),
         ]
-        headers = ", ".join(allow_headers)
+        headers = ", ".join(allowed_headers)
         if headers:
-            preflight.append((b"access-control-allow-headers", headers.encode("latin-1")))
+            preflight.append((b"access-control-allow-headers", headers.encode("ascii")))
         simple: list[tuple[bytes, bytes]] = []
-        exposed = ", ".join(expose_headers)
+        exposed = ", ".join(exposed_headers)
         if exposed:
-            simple.append((b"access-control-expose-headers", exposed.encode("latin-1")))
+            simple.append((b"access-control-expose-headers", exposed.encode("ascii")))
         if allow_credentials:
             credentials = (b"access-control-allow-credentials", b"true")
             preflight.append(credentials)
             simple.append(credentials)
         self._preflight_headers = tuple(preflight)
         self._simple_headers = tuple(simple)
-        self._allow_methods = frozenset(method.upper() for method in allow_methods)
+        self._allow_methods = frozenset(method.upper() for method in methods)
 
     def describe(self):
         """The cross-origin headers this policy negotiates.
@@ -194,19 +254,50 @@ class CorsPolicy:
         # compare one string. `method` is a direct attribute on the context.
         if request.method != "OPTIONS":
             return None
-        origin = request.header("origin")
-        requested = request.header("access-control-request-method")
+        origin = _request_header(request, "origin")
+        requested = _request_header(request, "access-control-request-method")
+        if origin is _DUPLICATE or requested is _DUPLICATE:
+            _mark_refused(request)
+            return Response(
+                b"duplicate CORS header", status=400, media_type=b"text/plain"
+            )
         if origin is None or requested is None:
             return None  # not a CORS preflight; fall through to the route
+        origin = cast(str, origin)
+        requested = cast(str, requested)
+        requested_headers = _request_header(request, "access-control-request-headers")
+        if requested_headers is _DUPLICATE:
+            _mark_refused(request)
+            return Response(
+                b"duplicate CORS header", status=400, media_type=b"text/plain"
+            )
+        if requested_headers is not None:
+            requested_headers = cast(str, requested_headers)
+            names = tuple(part.strip() for part in requested_headers.split(","))
+            if (
+                any(not _is_http_token(name) for name in names)
+                or (
+                    "*" not in self._allow_headers
+                    and any(name.lower() not in self._allow_headers for name in names)
+                )
+            ):
+                _mark_refused(request)
+                refusal = Response(
+                    b"disallowed header", status=403, media_type=b"text/plain"
+                )
+                refusal.headers.append((b"vary", b"origin"))
+                return refusal
         if requested.upper() not in self._allow_methods:
             # The preflight *asks* whether a method is allowed. Echoing the
             # configured list regardless answered a question the client did not
             # put, and told it nothing about the one it did.
+            _mark_refused(request)
             refusal = Response(b"disallowed method", status=403, media_type=b"text/plain")
             refusal.headers.append((b"vary", b"origin"))
             return refusal
         allowed = self._origin_header(origin)
         if allowed is None:
+            _mark_refused(request)
             refusal = Response(b"disallowed origin", status=403, media_type=b"text/plain")
             # The refusal is origin-dependent too, so a shared cache must not
             # replay it to an origin that would have been allowed.
@@ -247,9 +338,18 @@ class CorsPolicy:
         all" is the uncommon case; keying on it meant the responses most likely
         to be cached were exactly the ones that never gained `origin`.
         """
-        origin = request.header("origin")
+        state = getattr(request, "state", None)
+        if state is not None and state.get(_REFUSED):
+            return
+        origin = _request_header(request, "origin")
+        if origin is _DUPLICATE:
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                append_vary(headers, b"origin")
+            return
         if origin is None:
             return
+        origin = cast(str, origin)
         allowed = self._origin_header(origin)
         headers = getattr(response, "headers", None)
         if allowed is None:

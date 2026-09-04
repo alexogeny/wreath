@@ -161,9 +161,60 @@ def test_self_referential_fragment_is_refused() -> None:
     assert caught.value.code == "fragment_cycle"
 
 
+def test_an_acyclic_fragment_dag_does_not_multiply_execution_work() -> None:
+    from wreath._graphql.execute import _flatten
+
+    depth = 12
+    definitions = []
+    for index in range(depth):
+        body = "id" if index == depth - 1 else f"...F{index + 1} ...F{index + 1}"
+        definitions.append(f"fragment F{index} on User {{ {body} }}")
+    document = parse("{ users { ...F0 } } " + " ".join(definitions))
+    root = document.operation().selection_set.selections[0]
+
+    fields = _flatten(root.selection_set.selections, document, "User")
+
+    assert [field.name for field in fields] == ["id"]
+
+
 def test_limits_must_be_positive() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         Limits(max_depth=0)
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "12", None])
+def test_limits_must_be_integers(value) -> None:
+    with pytest.raises(ValueError, match="max_depth must be positive integer"):
+        Limits(max_depth=value)
+
+
+def test_limits_cannot_be_weakened_after_the_parser_or_cache_retains_them() -> None:
+    limits = Limits(max_complexity=1)
+
+    with pytest.raises(AttributeError, match="immutable"):
+        limits.max_complexity = 10_000
+    with pytest.raises(AttributeError, match="immutable"):
+        del limits.max_complexity
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "100", None])
+def test_page_size_must_be_a_positive_integer(registry: Registry, value: Any) -> None:
+    with pytest.raises(ValueError, match="max_page_size must be a positive integer"):
+        GraphQL(registry, models=[User], max_page_size=value)
+
+
+def test_parsed_documents_cannot_be_mutated_through_cached_containers() -> None:
+    source = "{ users(filter: {roles: [user]}) { ...Fields } } fragment Fields on User { id }"
+    document = parse(source)
+    root = document.operation().selection_set.selections[0]
+    literal = root.arguments[0].value
+
+    with pytest.raises(TypeError):
+        document.fragments["Fields"] = document.fragments["Fields"]
+    with pytest.raises(TypeError):
+        literal["roles"] = ["admin"]
+    with pytest.raises(TypeError):
+        literal["roles"][0] = "admin"
 
 
 def test_measured_depth_and_complexity_are_reported() -> None:
@@ -1393,6 +1444,22 @@ def test_on_denied_must_be_a_known_mode(registry: Registry) -> None:
         GraphQL(registry, models=[User], on_denied="explode")
 
 
+@pytest.mark.parametrize("value", [1, 0, "false", None])
+def test_introspection_requires_an_exact_boolean(registry: Registry, value: Any) -> None:
+    with pytest.raises(ValueError, match="introspection must be a boolean"):
+        GraphQL(registry, models=[User], introspection=value)
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", "false", None])
+def test_public_router_opt_in_requires_an_exact_boolean(
+    registry: Registry, value: Any
+) -> None:
+    api = GraphQL(registry, models=[User])
+
+    with pytest.raises(ValueError, match="public must be a boolean"):
+        api.router(public=value)
+
+
 def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(registry: Registry) -> None:
     api = GraphQL(registry, models=[User])
     api.router(public=True)  # freezes
@@ -1414,6 +1481,129 @@ def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(registry: Regis
         @api.mutation("lateMutation", returns="User")
         async def late_mutation(info):
             return None
+
+
+def test_validated_schema_mappings_cannot_invalidate_cached_security_facts(
+    registry: Registry,
+) -> None:
+    api = GraphQL(registry, models=[User, Post])
+    api.validate()
+
+    with pytest.raises(TypeError):
+        api.schema.roots["users"] = api.schema.roots["users"]
+    with pytest.raises(TypeError):
+        api.schema.types["User"].fields["id"] = api.schema.types["User"].fields["id"]
+
+
+@pytest.mark.asyncio
+async def test_a_truthy_non_boolean_authorization_verdict_is_denied(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    database.connection.script("users", [user_row(1)])
+
+    class MalformedAuthorizer(_RequirementOnly):
+        async def authorize(self, request: Any, requirement: Any) -> Any:
+            self._requirement(requirement)
+
+            class Decision:
+                allowed = "false"
+                reason = {"private": "authorizer diagnostics"}
+
+            return Decision()
+
+    api = GraphQL(registry, models=[User], authorizer=MalformedAuthorizer())
+    body = await api.run("{ users { id } }", Session(registry, "read"))
+
+    assert body["data"] is None
+    assert body["errors"][0]["message"] == "not authorized to read Query.users"
+
+
+@pytest.mark.asyncio
+async def test_truthy_non_boolean_batch_authorization_verdicts_are_denied(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    database.connection.script("users", [user_row(1)])
+
+    class MalformedBatchAuthorizer(_RequirementOnly):
+        async def authorize(self, request: Any, requirement: Any) -> Any:
+            raise AssertionError("the batch authorization path should be used")
+
+        async def _authorize_many(
+            self,
+            request: Any,
+            requirements: tuple[PolicyRequirement, ...],
+            *,
+            stop_on_denied: bool,
+        ) -> tuple[Any, ...]:
+            class Decision:
+                allowed = "false"
+
+            return tuple(Decision() for _ in requirements)
+
+    api = GraphQL(registry, models=[User], authorizer=MalformedBatchAuthorizer())
+    body = await api._run(
+        "{ users { id } }",
+        Session(registry, "read"),
+        operation_name=None,
+        variables=None,
+        request=None,
+        json_output=True,
+    )
+
+    assert b'"data":null' in body
+    assert b"not authorized to read Query.users" in body
+
+
+@pytest.mark.asyncio
+async def test_custom_list_roots_refuse_results_past_the_page_bound(registry: Registry) -> None:
+    api = GraphQL(registry, models=[User], max_page_size=2)
+
+    @api.query("numbers", returns="Int", is_list=True)
+    async def numbers(info: Any) -> Any:
+        return range(10)
+
+    body = await api.run("{ numbers }", Session(registry, "read"))
+
+    assert body["data"] is None
+    assert body["errors"] == [
+        {"message": "list resolver Query.numbers returned more than 2 values"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_resolvers_stop_after_one_value_past_the_expected_bound(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    database.connection.script("users", [user_row(1)])
+    pulled = 0
+
+    class Values:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal pulled
+            pulled += 1
+            if pulled > 2:
+                raise AssertionError("the executor read past its knowable bound")
+            return pulled
+
+    api = GraphQL(registry, models=[User])
+
+    @api.field("User", "computed", returns="Int")
+    async def computed(users: list[Any], info: Any) -> Any:
+        return Values()
+
+    body = await api.run("{ users { computed } }", Session(registry, "read"))
+
+    assert pulled == 2
+    assert body["data"] is None
+    assert body["errors"] == [
+        {
+            "message": "batch resolver User.computed returned more than 1 values",
+            "path": ["users", "computed"],
+        }
+    ]
 
 
 def test_the_sdl_shows_resolvers_custom_roots_and_mutations(registry: Registry) -> None:

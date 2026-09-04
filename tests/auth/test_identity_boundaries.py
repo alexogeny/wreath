@@ -209,6 +209,734 @@ async def test_oauth_state_uses_constant_time_comparison_for_malformed_length(
     assert comparisons == [("short", "x" * 32)]
 
 
+def test_oidc_refuses_explicit_port_zero() -> None:
+    from wreath._auth.oidc import OidcProvider, _require_same_origin
+
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        OidcProvider(
+            "idp",
+            issuer="https://idp.example:0",
+            audience="client",
+            http_client=object(),
+        )
+    with pytest.raises(ValueError, match="pinned issuer origin"):
+        _require_same_origin("https://idp.example:0", "https://idp.example/resource")
+    with pytest.raises(ValueError, match="pinned issuer origin"):
+        _require_same_origin("https://idp.example:0", "https://idp.example:0/resource")
+
+
+def test_oauth_server_refuses_explicit_port_zero() -> None:
+    from wreath.oauth import AuthorizationServer, ClientRegistration
+
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        AuthorizationServer(issuer="https://issuer.example:0", secret=b"s" * 32)
+    with pytest.raises(ValueError, match="absolute URI"):
+        ClientRegistration("client", redirect_uris=("https://client.example:0/callback",))
+
+
+def test_oauth_issuers_refuse_invalid_dns_labels() -> None:
+    from wreath._auth.oidc import OidcProvider
+    from wreath.oauth import AuthorizationServer
+
+    issuer = f"https://{'a' * 64}.example"
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        OidcProvider("idp", issuer=issuer, audience="client", http_client=object())
+    with pytest.raises(ValueError, match="absolute HTTPS URL"):
+        AuthorizationServer(issuer=issuer)
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "https://attacker.example/after-login",
+        "//attacker.example/after-login",
+        "/\\attacker",
+        "/after\tlogin",
+        "/after\x7flogin",
+        "/after\x80login",
+        None,
+    ),
+)
+def test_oauth_login_refuses_cross_origin_post_login_redirects(target: object) -> None:
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        def get(self, path):
+            def register(endpoint):
+                return endpoint
+
+            return register
+
+    with pytest.raises(ValueError, match="origin-relative"):
+        register_oauth2_login(
+            App(),
+            "idp",
+            provider=cast(Any, object()),
+            client_id="client",
+            client_secret="secret",
+            redirect_uri="https://app.example/callback",
+            post_login_redirect=cast(Any, target),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (b'{"access_token":""}', "access_token"),
+        (b'{"access_token":7}', "access_token"),
+        (b'{"access_token":"token","expires_in":1e999}', "expires_in"),
+        (b'{"access_token":"token","expires_in":true}', "expires_in"),
+        (b'{"access_token":"token","expires_in":-1}', "expires_in"),
+        (b'{"access_token":"token","expires_in":"3600"}', "expires_in"),
+    ],
+)
+async def test_client_credentials_refuses_malformed_token_responses(
+    body: bytes, message: str
+) -> None:
+    from wreath._auth.oauth2 import ClientCredentials
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200, body=body)
+
+    credentials = ClientCredentials(
+        http_client=Client(),
+        token_path="/oauth/token",
+        client_id="client",
+        client_secret="secret",
+    )
+    with pytest.raises(RuntimeError, match=message):
+        await credentials.token()
+
+
+@pytest.mark.asyncio
+async def test_client_credentials_accepts_a_well_formed_token_response() -> None:
+    from wreath._auth.oauth2 import ClientCredentials
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                status=200,
+                body=b'{"access_token":"token","expires_in":3600}',
+            )
+
+    credentials = ClientCredentials(
+        http_client=Client(),
+        token_path="/oauth/token",
+        client_id="client",
+        client_secret="secret",
+    )
+    assert await credentials.token() == "token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"not-json", b"[]", b"null"])
+async def test_client_credentials_refuses_a_non_object_token_document(body: bytes) -> None:
+    from wreath._auth.oauth2 import ClientCredentials
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200, body=body)
+
+    credentials = ClientCredentials(
+        http_client=Client(),
+        token_path="/oauth/token",
+        client_id="client",
+        client_secret="secret",
+    )
+    with pytest.raises(RuntimeError, match="token response must be a JSON object"):
+        await credentials.token()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"not-json", b"[]", b"null"])
+async def test_oauth_callback_refuses_a_non_object_token_document(body: bytes) -> None:
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200, body=body)
+
+    provider = SimpleNamespace(
+        authorization_endpoint="https://issuer.example/authorize",
+        token_endpoint="https://issuer.example/token",
+        issuer="https://issuer.example",
+        _client=Client(),
+    )
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, provider),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+    )
+    session = {
+        "_oidc_state_idp": "state",
+        "_oidc_verifier_idp": "verifier",
+        "_oidc_nonce_idp": "nonce",
+    }
+    response = await app.routes["/auth/callback"](
+        SimpleNamespace(
+            query_string=b"code=code&state=state",
+            state=SimpleNamespace(session=session),
+        )
+    )
+    assert response.status == 502
+    assert response.body == b'{"error":"token_exchange_failed"}'
+
+
+@pytest.mark.parametrize("code_ttl", [0, -1, 601, True])
+def test_oauth_authorization_code_lifetime_stays_within_the_protocol_limit(
+    code_ttl: float,
+) -> None:
+    from wreath.oauth import AuthorizationServer
+
+    with pytest.raises(ValueError, match="code_ttl.*positive.*600"):
+        AuthorizationServer(issuer="https://issuer.example", code_ttl=code_ttl)
+
+
+@pytest.mark.parametrize("limit", (float("inf"), float("nan"), True, 1.5))
+def test_oauth_pending_grant_limit_cannot_be_disabled(limit) -> None:
+    from wreath.oauth import AuthorizationServer
+
+    with pytest.raises(ValueError, match="positive integer"):
+        AuthorizationServer(
+            issuer="https://issuer.example",
+            max_pending_grants=limit,
+        )
+
+
+def test_oauth_authorization_details_do_not_alias_grant_or_token_inputs() -> None:
+    import hashlib
+    from dataclasses import dataclass
+
+    from wreath.oauth import AuthorizationServer, ClientRegistration
+
+    @dataclass
+    class Payment:
+        amounts: list[int]
+
+    client = ClientRegistration(
+        "client",
+        redirect_uris=("https://client.example/callback",),
+        authorization_detail_types=("payment",),
+    )
+    server = AuthorizationServer(
+        issuer="https://issuer.example",
+        clients=(client,),
+        authorization_detail_types={"payment": Payment},
+    )
+    verifier = "v" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    details = [{"type": "payment", "amounts": [1]}]
+    code = server.issue_code(
+        client_id="client",
+        subject="ada",
+        challenge=challenge.rstrip(b"=").decode(),
+        redirect_uri="https://client.example/callback",
+        authorization_details=details,
+    )
+    details[0]["amounts"].append(2)
+    issued = server.redeem(
+        code,
+        verifier=verifier,
+        client_id="client",
+        redirect_uri="https://client.example/callback",
+    )
+    assert issued.authorization_details[0]["amounts"] == [1]
+    issued.authorization_details[0]["amounts"].append(3)
+    rotated = server.rotate(issued.refresh_token, client_id="client")
+    assert rotated.authorization_details[0]["amounts"] == [1]
+
+
+def test_oauth_client_registration_does_not_alias_mutable_grant_inputs() -> None:
+    from wreath.oauth import (
+        AuthorizationServer,
+        ClientRegistration,
+        OAuthRefusal,
+    )
+
+    redirects = ["https://client.example/callback"]
+    scopes = ["read"]
+    client = ClientRegistration(
+        "client",
+        redirect_uris=cast(Any, redirects),
+        scopes=cast(Any, scopes),
+    )
+    server = AuthorizationServer(issuer="https://issuer.example", clients=(client,))
+    redirects.append("https://attacker.example/callback")
+    scopes.append("admin")
+    with pytest.raises(OAuthRefusal, match="redirect_uri"):
+        server.authorize(
+            client_id="client",
+            redirect_uri="https://attacker.example/callback",
+        )
+    with pytest.raises(OAuthRefusal, match="scope"):
+        server.issue_code(
+            client_id="client",
+            subject="ada",
+            challenge="a" * 43,
+            redirect_uri="https://client.example/callback",
+            scope=("admin",),
+        )
+
+
+def test_oauth_client_registration_snapshots_authorization_detail_types() -> None:
+    from dataclasses import dataclass
+
+    from wreath.oauth import AuthorizationServer, ClientRegistration, OAuthRefusal
+
+    @dataclass
+    class Payment:
+        amount: int
+
+    allowed: list[str] = []
+    client = ClientRegistration(
+        "client",
+        redirect_uris=("https://client.example/callback",),
+        authorization_detail_types=cast(Any, allowed),
+    )
+    server = AuthorizationServer(
+        issuer="https://issuer.example",
+        clients=(client,),
+        authorization_detail_types={"payment": Payment},
+    )
+    allowed.append("payment")
+    with pytest.raises(OAuthRefusal, match="not registered"):
+        server.issue_code(
+            client_id="client",
+            subject="ada",
+            challenge="a" * 43,
+            redirect_uri="https://client.example/callback",
+            authorization_details=[{"type": "payment", "amount": 1}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_oauth_login_registration_snapshots_requested_scopes() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    provider = SimpleNamespace(
+        authorization_endpoint="https://issuer.example/authorize",
+        token_endpoint="https://issuer.example/token",
+        issuer="https://issuer.example",
+    )
+    scopes = ["openid"]
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, provider),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+        scopes=cast(Any, scopes),
+    )
+    scopes.append("admin")
+    response = await app.routes["/auth/login"](
+        SimpleNamespace(state=SimpleNamespace(session={}))
+    )
+    location = dict(response.headers)[b"location"].decode()
+    assert parse_qs(urlsplit(location).query)["scope"] == ["openid"]
+
+
+def test_oidc_provider_cannot_mutate_its_pinned_trust_origin() -> None:
+    from wreath._auth.oidc import OidcProvider
+
+    provider = OidcProvider(
+        "idp",
+        issuer="https://issuer.example",
+        audience="client",
+        http_client=object(),
+    )
+    provider.authorization_endpoint = "https://issuer.example/authorize"
+    with pytest.raises(ValueError, match="pinned issuer origin"):
+        provider.authorization_endpoint = "https://attacker.example/authorize"
+    with pytest.raises(ValueError, match="pinned issuer origin"):
+        provider.token_endpoint = cast(Any, object())
+    assert provider.authorization_endpoint == "https://issuer.example/authorize"
+    with pytest.raises(AttributeError, match="issuer.*cannot be changed"):
+        provider.issuer = "https://attacker.example"
+    assert provider.issuer == "https://issuer.example"
+
+
+@pytest.mark.asyncio
+async def test_failed_oidc_rediscovery_does_not_publish_partial_configuration() -> None:
+    from wreath._auth.oidc import OidcProvider
+
+    document = {
+        "issuer": "https://issuer.example",
+        "jwks_uri": "https://issuer.example/new-jwks",
+        "token_endpoint": "https://attacker.example/token",
+        "authorization_endpoint": "https://issuer.example/new-authorize",
+    }
+
+    class Client:
+        async def get(self, _path):
+            return SimpleNamespace(status=200, body=json.dumps(document).encode())
+
+    provider = OidcProvider(
+        "idp",
+        issuer="https://issuer.example",
+        audience="client",
+        http_client=Client(),
+    )
+    provider.jwks_uri = "https://issuer.example/old-jwks"
+    provider.token_endpoint = "https://issuer.example/old-token"
+    provider.authorization_endpoint = "https://issuer.example/old-authorize"
+    old_cache = object()
+    cast(Any, provider)._cache = old_cache
+    with pytest.raises(ValueError, match="pinned issuer origin"):
+        await provider.discover()
+    assert provider.jwks_uri == "https://issuer.example/old-jwks"
+    assert provider.token_endpoint == "https://issuer.example/old-token"
+    assert provider.authorization_endpoint == "https://issuer.example/old-authorize"
+    assert cast(Any, provider)._cache is old_cache
+
+
+@pytest.mark.asyncio
+async def test_oauth_callback_bounds_query_field_amplification() -> None:
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    class Client:
+        calls = 0
+
+        async def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(status=500, body=b"")
+
+    client = Client()
+    provider = SimpleNamespace(
+        authorization_endpoint="https://issuer.example/authorize",
+        token_endpoint="https://issuer.example/token",
+        issuer="https://issuer.example",
+        _client=client,
+    )
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, provider),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+    )
+    fields = [f"ignored{index}=x" for index in range(16)]
+    fields.extend(("code=code", "state=state"))
+    response = await app.routes["/auth/callback"](
+        SimpleNamespace(
+            query_string="&".join(fields).encode(),
+            state=SimpleNamespace(
+                session={
+                    "_oidc_state_idp": "state",
+                    "_oidc_verifier_idp": "verifier",
+                    "_oidc_nonce_idp": "nonce",
+                }
+            ),
+        )
+    )
+    assert response.status == 400
+    assert response.body == b'{"error":"invalid_state"}'
+    assert client.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_wrong_oauth_state_cannot_cancel_the_pending_login() -> None:
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    provider = SimpleNamespace(
+        authorization_endpoint="https://issuer.example/authorize",
+        token_endpoint="https://issuer.example/token",
+        issuer="https://issuer.example",
+    )
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, provider),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+    )
+    session = {
+        "_oidc_state_idp": "unpredictable-state",
+        "_oidc_verifier_idp": "verifier",
+        "_oidc_nonce_idp": "nonce",
+    }
+    expected = dict(session)
+    response = await app.routes["/auth/callback"](
+        SimpleNamespace(
+            query_string=b"code=attacker&state=guessed",
+            state=SimpleNamespace(session=session),
+        )
+    )
+    assert response.status == 400
+    assert session == expected
+
+
+@pytest.mark.asyncio
+async def test_oauth_login_preserves_authorization_endpoint_query_parameters() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    provider = SimpleNamespace(
+        authorization_endpoint="https://issuer.example/authorize?tenant=acme",
+        token_endpoint="https://issuer.example/token",
+        issuer="https://issuer.example",
+    )
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, provider),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+    )
+    response = await app.routes["/auth/login"](
+        SimpleNamespace(state=SimpleNamespace(session={}))
+    )
+    query = parse_qs(urlsplit(dict(response.headers)[b"location"].decode()).query)
+    assert query["tenant"] == ["acme"]
+    assert query["response_type"] == ["code"]
+
+
+def test_oauth_server_snapshots_mutable_hmac_key_material() -> None:
+    from wreath.oauth import AuthorizationServer
+
+    material = bytearray(b"s" * 32)
+    server = AuthorizationServer(
+        issuer="https://issuer.example",
+        secret=cast(Any, material),
+    )
+    material[:] = b"a" * 32
+    assert server.secret == b"s" * 32
+    assert isinstance(server.secret, bytes)
+
+
+def test_oauth_server_refuses_non_text_non_bytes_hmac_key_material() -> None:
+    from wreath.oauth import AuthorizationServer
+
+    with pytest.raises(TypeError, match="secret must be bytes or text"):
+        AuthorizationServer(
+            issuer="https://issuer.example",
+            secret=cast(Any, object()),
+        )
+
+
+def test_oauth_client_registration_repr_redacts_the_client_secret() -> None:
+    from wreath.oauth import ClientRegistration
+
+    secret = "repr-leak-sentinel-" + "s" * 32
+    client = ClientRegistration(
+        "client",
+        confidential=True,
+        client_secret=secret,
+    )
+    other = ClientRegistration(
+        "client",
+        confidential=True,
+        client_secret="a" * 32,
+    )
+    assert secret not in repr(client)
+    assert "client_secret" not in repr(client)
+    assert client != other
+
+
+def test_oauth_credential_reprs_do_not_expose_key_or_bearer_material() -> None:
+    import wreath.oauth as oauth
+    from wreath.oauth import AuthorizationServer, Es256Signer, IssuedToken
+
+    signer = Es256Signer(123_456_789)
+    assert "123456789" not in repr(signer)
+    assert "private=" not in repr(signer)
+
+    issued = IssuedToken(
+        "access-token-repr-sentinel",
+        "ada",
+        "api",
+        (),
+        1_000,
+        refresh_token="refresh-token-repr-sentinel",
+    )
+    assert "access-token-repr-sentinel" not in repr(issued)
+    assert "refresh-token-repr-sentinel" not in repr(issued)
+
+    refresh = AuthorizationServer(issuer="https://issuer.example").issue_refresh(
+        subject="ada"
+    )
+    assert refresh.token not in repr(refresh)
+    code = oauth._Code(
+        client_id="client",
+        subject="ada",
+        scope=(),
+        challenge="challenge",
+        redirect_uri="https://client.example/callback",
+        tenant="",
+        issued_at=1_000,
+        authorization_details=(),
+        issued_token="issued-token-repr-sentinel",
+    )
+    assert "issued-token-repr-sentinel" not in repr(code)
+
+
+def test_oauth_url_refusals_do_not_echo_embedded_credentials() -> None:
+    from wreath._auth.oidc import OidcProvider, _require_same_origin
+    from wreath.oauth import ClientRegistration
+
+    secret = "url-password-repr-sentinel"
+    with pytest.raises(ValueError) as oidc_refusal:
+        _require_same_origin(
+            "https://issuer.example",
+            f"https://user:{secret}@issuer.example/token",
+        )
+    assert secret not in str(oidc_refusal.value)
+    with pytest.raises(ValueError) as oauth_refusal:
+        ClientRegistration(
+            "client",
+            redirect_uris=(f"https://user:{secret}@client.example/callback",),
+        )
+    assert secret not in str(oauth_refusal.value)
+    client = SimpleNamespace(origin=f"https://user:{secret}@issuer.example")
+    with pytest.raises(ValueError) as client_refusal:
+        OidcProvider(
+            "idp",
+            issuer="https://issuer.example",
+            audience="client",
+            http_client=client,
+        )
+    assert secret not in str(client_refusal.value)
+
+
+@pytest.mark.parametrize("client_secret", [32, [115] * 32])
+def test_oauth_client_secret_refuses_bytes_constructor_coercions(
+    client_secret: object,
+) -> None:
+    from wreath.oauth import ClientRegistration
+
+    with pytest.raises(ValueError, match="client secret must be bytes or text"):
+        ClientRegistration(
+            "client",
+            confidential=True,
+            client_secret=cast(Any, client_secret),
+        )
+
+
+@pytest.mark.parametrize("verifier", ["é" * 43, b"a" * 43])
+def test_oauth_pkce_verifier_refuses_malformed_text_without_crashing(
+    verifier: object,
+) -> None:
+    from wreath.oauth import (
+        AuthorizationServer,
+        ClientRegistration,
+        OAuthRefusal,
+    )
+
+    client = ClientRegistration(
+        "client",
+        redirect_uris=("https://client.example/callback",),
+    )
+    server = AuthorizationServer(issuer="https://issuer.example", clients=(client,))
+    code = server.issue_code(
+        client_id="client",
+        subject="ada",
+        challenge="a" * 43,
+        redirect_uri="https://client.example/callback",
+    )
+    with pytest.raises(OAuthRefusal, match="code_verifier") as refusal:
+        server.redeem(
+            code,
+            verifier=cast(Any, verifier),
+            client_id="client",
+            redirect_uri="https://client.example/callback",
+        )
+    assert refusal.value.reason == "pkce-mismatch"
+
+
+def test_oauth_pkce_verifier_is_bounded_before_hashing() -> None:
+    from wreath.oauth import (
+        AuthorizationServer,
+        ClientRegistration,
+        OAuthRefusal,
+    )
+
+    client = ClientRegistration(
+        "client",
+        redirect_uris=("https://client.example/callback",),
+    )
+    server = AuthorizationServer(issuer="https://issuer.example", clients=(client,))
+    code = server.issue_code(
+        client_id="client",
+        subject="ada",
+        challenge="a" * 43,
+        redirect_uri="https://client.example/callback",
+    )
+    with pytest.raises(OAuthRefusal, match="at most 128") as refusal:
+        server.redeem(
+            code,
+            verifier="a" * 129,
+            client_id="client",
+            redirect_uri="https://client.example/callback",
+        )
+    assert refusal.value.reason == "pkce-mismatch"
+
+
 def test_saml_state_mismatch_is_constant_time_and_single_attempt(monkeypatch) -> None:
     import hmac
 
@@ -658,9 +1386,20 @@ def test_jwt_issuer_namespaces_equal_subjects_for_authorization() -> None:
 
 
 @pytest.mark.asyncio
-async def test_oauth_session_bridge_preserves_the_verified_issuer() -> None:
+async def test_oauth_session_bridge_preserves_the_verified_issuer(monkeypatch) -> None:
+    import hmac
+
     from wreath._auth.models import Identity
     from wreath._auth.oauth2 import register_oauth2_login
+
+    comparisons = []
+    original = hmac.compare_digest
+
+    def compared(left, right):
+        comparisons.append((left, right))
+        return original(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", compared)
 
     class App:
         routes = {}
@@ -712,6 +1451,62 @@ async def test_oauth_session_bridge_preserves_the_verified_issuer() -> None:
     )
     await app.routes["/auth/callback"](request)
     assert session["principal"]["iss"] == "https://issuer.example"
+    assert comparisons == [("state", "state"), ("nonce", "nonce")]
+
+
+@pytest.mark.asyncio
+async def test_oauth_callback_refuses_a_non_text_id_token_nonce() -> None:
+    from wreath._auth.models import Identity
+    from wreath._auth.oauth2 import register_oauth2_login
+
+    class App:
+        routes = {}
+
+        def get(self, path):
+            def register(endpoint):
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200, body=b'{"id_token":"token"}')
+
+    class Provider:
+        issuer = "https://issuer.example"
+        token_endpoint = "https://issuer.example/token"
+        _client = Client()
+
+        def bearer_verifier(self, *, audience):
+            async def verify(_token):
+                return Identity(id="same", claims={"nonce": None})
+
+            return verify
+
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=cast(Any, Provider()),
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/callback",
+    )
+    response = await app.routes["/auth/callback"](
+        SimpleNamespace(
+            query_string=b"code=code&state=state",
+            state=SimpleNamespace(
+                session={
+                    "_oidc_state_idp": "state",
+                    "_oidc_verifier_idp": "verifier",
+                    "_oidc_nonce_idp": "nonce",
+                }
+            ),
+        )
+    )
+    assert response.status == 401
+    assert response.body == b'{"error":"nonce_mismatch"}'
 
 
 def test_dpop_access_token_binding_is_not_optional_caller_wiring() -> None:
@@ -1220,11 +2015,6 @@ def test_cedar_skips_the_second_evaluation_when_no_delegation_field_is_read() ->
             return False
 
     assert not CedarAuthorizer(engine=cast(Any, Engine()))._delegation_visible
-
-    class NoContextIntrospection:
-        pass
-
-    assert not CedarAuthorizer(engine=cast(Any, NoContextIntrospection()))._delegation_visible
 
 
 def test_permission_manifest_tag_changes_with_authorization_facts() -> None:
@@ -2078,6 +2868,39 @@ async def test_oidc_bearer_verifier_accepts_an_explicit_access_token_class(monke
     assert await provider.bearer_verifier()(token) is identity
 
 
+@pytest.mark.asyncio
+async def test_oidc_login_verifier_requires_every_mandatory_id_token_claim(
+    monkeypatch,
+) -> None:
+    import wreath._auth.oidc as oidc
+    from wreath._auth.models import Identity
+
+    class Cache:
+        async def resolve(self, kid):
+            return object()
+
+    provider = oidc.OidcProvider(
+        "idp",
+        issuer="https://idp.example",
+        audience="api",
+        http_client=object(),
+        required=("iat",),
+    )
+    cast(Any, provider)._cache = Cache()
+    seen = []
+
+    def verify(*args, **kwargs):
+        seen.append(kwargs["required"])
+        return Identity(id="ada", claims={"aud": "client"})
+
+    monkeypatch.setattr(oidc, "verify_jwt", verify)
+    token = f"{_segment({'alg': 'RS256', 'kid': 'k', 'typ': 'JWT'})}.e30.signature"
+
+    assert await provider.bearer_verifier(audience="client")(token) is not None
+    assert await provider.bearer_verifier()(token) is None
+    assert seen == [("iat", "exp", "sub"), ("iat",)]
+
+
 @pytest.mark.parametrize(
     ("token_type", "claims", "login_token", "allowed"),
     (
@@ -2085,9 +2908,16 @@ async def test_oidc_bearer_verifier_accepts_an_explicit_access_token_class(monke
         ("at+jwt", {"token_use": "id"}, False, False),
         ("JWT", {"token_use": "access"}, False, True),
         ("JWT", {"token_use": "id"}, False, False),
+        ("JWT", {"token_type": "access"}, False, True),
         ("other+jwt", {"token_use": "access"}, False, False),
         ("JWT", {}, True, True),
         (None, {"token_use": "id"}, True, True),
+        ("JWT", {"token_use": "id", "token_type": "id"}, True, True),
+        ("JWT", {"token_use": None}, True, False),
+        ("JWT", {"token_type": None}, True, False),
+        ("JWT", {"token_use": "id", "token_type": "access"}, True, False),
+        ("JWT", {"token_use": "refresh"}, True, False),
+        ("JWT", {"token_use": True}, True, False),
         ("at+jwt", {}, True, False),
         ("JWT", {"token_use": "access"}, True, False),
         ("other+jwt", {"token_use": "id"}, True, False),

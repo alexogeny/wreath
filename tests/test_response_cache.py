@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +22,10 @@ class _Req:
         self.method = method
         self.path = path
         self.query_string = query
+        self.scheme = "http"
+        self.headers: list[tuple[bytes, bytes]] = []
+        self.scope: dict[str, Any] = {}
+        self.state: Any = SimpleNamespace()
 
 
 class _QueryReq(_Req):
@@ -78,6 +83,24 @@ async def test_default_key_distinguishes_raw_targets_a_proxy_forwards_differentl
 
     assert default_cache_key(canonical) != default_cache_key(encoded)
     assert cache_key_for(("view",))(canonical) != cache_key_for(("view",))(encoded)
+
+
+async def test_default_key_uses_server_authority_when_host_is_absent() -> None:
+    first = _Req(path="/profile")
+    first.scheme = "https"
+    first.headers = []
+    first.scope = {"server": ("one.example", 443)}
+    second = _Req(path="/profile")
+    second.scheme = "https"
+    second.headers = []
+    second.scope = {"server": ("two.example", 443)}
+    other_port = _Req(path="/profile")
+    other_port.scheme = "https"
+    other_port.headers = []
+    other_port.scope = {"server": ("one.example", 8443)}
+
+    assert default_cache_key(first) != default_cache_key(second)
+    assert default_cache_key(first) != default_cache_key(other_port)
 
 
 async def test_second_call_is_served_from_cache() -> None:
@@ -348,7 +371,7 @@ async def test_ttl_expiry_reruns_handler() -> None:
         return Response(b"x")
 
     await handler(_Req())
-    clock.now = 11
+    clock.now = 11.0
     await handler(_Req())
     assert calls == 2
 
@@ -524,7 +547,7 @@ async def test_dict_return_is_cached() -> None:
 class _Identified(_Req):
     def __init__(self, who: str, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.identity = who
+        self.identity: Any = who
 
 
 async def test_an_identified_caller_bypasses_a_publicly_keyed_cache() -> None:
@@ -582,13 +605,114 @@ async def test_a_custom_key_carrying_the_principal_caches_per_caller() -> None:
     assert calls == 2  # ... and bo is a different key
 
 
+async def test_a_custom_private_key_caches_anonymous_callers() -> None:
+    calls = 0
+
+    @cached(ttl=100, key=lambda request: request.path)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(b"anonymous")
+
+    assert (await handler(_Req(path="/profile"))).body == b"anonymous"
+    assert (await handler(_Req(path="/profile"))).body == b"anonymous"
+    assert calls == 1
+
+
+async def test_anonymous_private_key_cannot_collide_with_a_principal_frame() -> None:
+    calls = 0
+
+    @cached(ttl=100, key=lambda request: request.path)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        identity = getattr(request, "identity", None)
+        return Response(b"anonymous" if identity is None else b"principal")
+
+    principal = _Identified("unused", path="/profile")
+    principal.identity = SimpleNamespace(namespace="", type="NoneType", id="None")
+
+    assert (await handler(_Req(path="/profile"))).body == b"anonymous"
+    assert (await handler(principal)).body == b"principal"
+    assert calls == 2
+
+
+async def test_a_custom_key_keeps_the_principal_namespace_and_type() -> None:
+    from wreath.auth import Identity
+
+    calls = 0
+
+    def per_caller(request):
+        return f"{request.identity.id}:{request.path}"
+
+    @cached(ttl=100, key=per_caller)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        identity = request.identity
+        return Response(f"{identity.namespace}:{identity.type}".encode())
+
+    first = _Identified("unused")
+    first.identity = Identity("same", type="User", namespace="issuer-a")
+    other_namespace = _Identified("unused")
+    other_namespace.identity = Identity("same", type="User", namespace="issuer-b")
+    other_type = _Identified("unused")
+    other_type.identity = Identity("same", type="Service", namespace="issuer-a")
+
+    assert (await handler(first)).body == b"issuer-a:User"
+    assert (await handler(other_namespace)).body == b"issuer-b:User"
+    assert (await handler(other_type)).body == b"issuer-a:Service"
+    assert calls == 3
+
+
+async def test_a_custom_key_is_isolated_by_scheme_and_authority() -> None:
+    calls = 0
+
+    class Request(_Req):
+        def __init__(self, scheme: str, host: str) -> None:
+            super().__init__(path="/profile")
+            self.scheme = scheme
+            self.headers = [(b"host", host.encode())]
+
+    @cached(ttl=100, key=lambda request: "same")
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(f"{request.scheme}://{request.headers[0][1].decode()}".encode())
+
+    assert (await handler(Request("https", "one.example"))).body == b"https://one.example"
+    assert (await handler(Request("https", "two.example"))).body == b"https://two.example"
+    assert (await handler(Request("http", "one.example"))).body == b"http://one.example"
+    assert calls == 3
+
+
+async def test_custom_private_invalidation_is_scoped_to_the_principal() -> None:
+    calls: list[str] = []
+
+    @cached(ttl=100, key=lambda request: request.path)
+    async def handler(request):
+        calls.append(request.identity)
+        return Response(request.identity.encode())
+
+    ada = _Identified("ada", path="/profile")
+    bo = _Identified("bo", path="/profile")
+    await handler(ada)
+    await handler(bo)
+
+    handler.invalidate(ada)
+
+    assert (await handler(ada)).body == b"ada"
+    assert (await handler(bo)).body == b"bo"
+    assert calls == ["ada", "bo", "ada"]
+
+
 async def test_a_key_marked_public_is_treated_as_shared_even_though_it_is_custom() -> None:
     calls = 0
 
     def public_key(request):
         return request.path
 
-    public_key._wreath_public = True
+    vars(public_key)["_wreath_public"] = True
 
     @cached(ttl=100, key=public_key)
     async def handler(request):
@@ -600,6 +724,54 @@ async def test_a_key_marked_public_is_treated_as_shared_even_though_it_is_custom
     await handler(_Identified("bo"))
     assert calls == 2  # both bypassed, neither cached
     assert handler.cache_store.stats.hits == 0
+
+
+async def test_a_key_marked_public_shares_anonymous_entries_across_authorities() -> None:
+    calls = 0
+
+    class Request(_Req):
+        def __init__(self, host: str) -> None:
+            super().__init__(path="/asset")
+            self.headers = [(b"host", host.encode())]
+
+    def public_key(request):
+        return request.path
+
+    vars(public_key)["_wreath_public"] = True
+
+    @cached(ttl=100, key=public_key)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(b"shared")
+
+    assert (await handler(Request("one.example"))).body == b"shared"
+    assert (await handler(Request("two.example"))).body == b"shared"
+    assert calls == 1
+
+
+async def test_tenantless_public_key_cannot_collide_with_a_tenant_frame() -> None:
+    calls = 0
+
+    def public_key(request):
+        tenant = getattr(getattr(request, "state", None), "tenant", None)
+        return "k" if tenant is not None else "1:x:k"
+
+    vars(public_key)["_wreath_public"] = True
+
+    @cached(ttl=100, key=public_key)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        tenant = getattr(getattr(request, "state", None), "tenant", None)
+        return Response(b"tenant" if tenant is not None else b"public")
+
+    tenant = _Req()
+    tenant.state = SimpleNamespace(tenant="x")
+
+    assert (await handler(tenant)).body == b"tenant"
+    assert (await handler(_Req())).body == b"public"
+    assert calls == 2
 
 
 async def test_key_and_query_params_together_are_refused() -> None:
