@@ -109,14 +109,16 @@ class ResolverRegistry:
 
 def order_fields(
     selected: list[Any],
-    resolvers: dict[str, ResolverSpec],
+    resolvers: dict[str, Any],
     *,
     type_name: str,
+    schema_fields: bool = False,
 ) -> list[Any]:
     """Order one level's fields so every `requires` runs first.
 
     `selected` is the level's AST fields; `resolvers` maps a field name to
-    its spec. Returns the same fields, reordered. A dependency the client did
+    its spec, or a schema field when `schema_fields` is true.
+    Returns the same fields, reordered. A dependency the client did
     not select is *not* injected -- it is resolved as a hidden prerequisite by
     the executor instead, so asking for a computed field never silently widens
     the response.
@@ -128,22 +130,26 @@ def order_fields(
         by_name.setdefault(item.name, item)
 
     ordered: list[Any] = []
-    placed: set[str] = set()
+    placed: dict[str, bool] = {}
     visiting: list[str] = []
 
     def visit(name: str) -> None:
-        if name in placed:
+        complete = placed.get(name)
+        if complete is True:
             return
-        if name in visiting:
+        if complete is False:
             cycle = " -> ".join((*visiting[visiting.index(name) :], name))
             raise ResolverError(f"resolver dependency cycle on {type_name}: {cycle}")
         spec = resolvers.get(name)
+        if schema_fields and spec is not None:
+            spec = spec.resolver
         if spec is not None:
+            placed[name] = False
             visiting.append(name)
             for dependency in spec.requires:
                 visit(dependency)
             visiting.pop()
-        placed.add(name)
+        placed[name] = True
         selection = by_name.get(name)
         if selection is not None:
             ordered.append(selection)

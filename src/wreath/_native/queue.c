@@ -179,13 +179,20 @@ queue_exceptions_ready(void)
     return 0;
 }
 
-/* Append with the ring already locked. Returns 1 when stored, 0 when the item
- * was refused, and steals nothing -- the caller owns `item` throughout. */
+/* Append with the ring already locked. Returns 1 when stored, 0 when refused,
+ * -1 on allocation failure, and steals nothing. */
 static int
 queue_push_locked(WreathQueue *self, PyObject *item, PyObject **evicted)
 {
     size_t index;
     *evicted = NULL;
+    if (self->items == NULL) {
+        self->items = PyMem_Calloc(self->capacity, sizeof(PyObject *));
+        if (self->items == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
     if (self->count == self->capacity) {
         if (!self->drop_oldest) {
             return 0;
@@ -263,8 +270,12 @@ queue_offer(WreathQueue *self, PyObject *item)
         PyErr_SetString(PyExc_RuntimeError, "queue is closed");
         return NULL;
     }
-    self->offered++;
     stored = queue_push_locked(self, item, &evicted);
+    if (stored < 0) {
+        PyMutex_Unlock(&self->mutex);
+        return NULL;
+    }
+    self->offered++;
     if (!stored || evicted != NULL) {
         self->dropped++;
     }
@@ -306,8 +317,12 @@ queue_put_nowait(WreathQueue *self, PyObject *item)
         PyErr_SetString(queue_full, "queue is full");
         return NULL;
     }
-    self->offered++;
     stored = queue_push_locked(self, item, &evicted);
+    if (stored < 0) {
+        PyMutex_Unlock(&self->mutex);
+        return NULL;
+    }
+    self->offered++;
     if (evicted != NULL) {
         self->dropped++;
     }
@@ -591,12 +606,6 @@ queue_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UNUSED(kwa
         return NULL;
     }
     self->capacity = 1;
-    self->items = PyMem_Calloc(1, sizeof(PyObject *));
-    if (self->items == NULL) {
-        Py_DECREF(self);
-        PyErr_NoMemory();
-        return NULL;
-    }
     return (PyObject *)self;
 }
 
@@ -607,7 +616,6 @@ queue_init(WreathQueue *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t capacity = 4096;
     int drop_oldest = 0;
     int lifo = 0;
-    PyObject **items;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|n$pp:Queue", keywords, &capacity,
                                      &drop_oldest, &lifo)) {
@@ -617,8 +625,7 @@ queue_init(WreathQueue *self, PyObject *args, PyObject *kwargs)
         PyErr_SetString(PyExc_ValueError, "capacity must be positive");
         return -1;
     }
-    items = PyMem_Calloc((size_t)capacity, sizeof(PyObject *));
-    if (items == NULL) {
+    if ((size_t)capacity > (size_t)PY_SSIZE_T_MAX / sizeof(PyObject *)) {
         PyErr_NoMemory();
         return -1;
     }
@@ -626,7 +633,7 @@ queue_init(WreathQueue *self, PyObject *args, PyObject *kwargs)
      * carrying items across a capacity change would silently truncate. */
     (void)queue_tp_clear(self);
     PyMem_Free(self->items);
-    self->items = items;
+    self->items = NULL;
     self->capacity = (size_t)capacity;
     self->head = 0;
     self->count = 0;
@@ -974,6 +981,13 @@ heap_offer(WreathHeap *self, PyObject *const *args, Py_ssize_t nargs, PyObject *
         PyErr_SetString(PyExc_RuntimeError, "queue is closed");
         return NULL;
     }
+    if (self->entries == NULL) {
+        self->entries = PyMem_Calloc(self->capacity, sizeof(WreathHeapEntry));
+        if (self->entries == NULL) {
+            PyMutex_Unlock(&self->mutex);
+            return PyErr_NoMemory();
+        }
+    }
     self->offered++;
     if (self->count == self->capacity) {
         self->dropped++;
@@ -1299,12 +1313,6 @@ heap_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UNUSED(kwar
         return NULL;
     }
     self->capacity = 1;
-    self->entries = PyMem_Calloc(1, sizeof(WreathHeapEntry));
-    if (self->entries == NULL) {
-        Py_DECREF(self);
-        PyErr_NoMemory();
-        return NULL;
-    }
     return (PyObject *)self;
 }
 
@@ -1314,7 +1322,6 @@ heap_init(WreathHeap *self, PyObject *args, PyObject *kwargs)
     static char *keywords[] = {"capacity", "drop_lowest", NULL};
     Py_ssize_t capacity = 4096;
     int drop_lowest = 0;
-    WreathHeapEntry *entries;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|n$p:PriorityQueue", keywords,
                                      &capacity, &drop_lowest)) {
@@ -1324,14 +1331,13 @@ heap_init(WreathHeap *self, PyObject *args, PyObject *kwargs)
         PyErr_SetString(PyExc_ValueError, "capacity must be positive");
         return -1;
     }
-    entries = PyMem_Calloc((size_t)capacity, sizeof(WreathHeapEntry));
-    if (entries == NULL) {
+    if ((size_t)capacity > (size_t)PY_SSIZE_T_MAX / sizeof(WreathHeapEntry)) {
         PyErr_NoMemory();
         return -1;
     }
     (void)heap_tp_clear(self);
     PyMem_Free(self->entries);
-    self->entries = entries;
+    self->entries = NULL;
     self->capacity = (size_t)capacity;
     self->count = 0;
     self->sequence = 0;

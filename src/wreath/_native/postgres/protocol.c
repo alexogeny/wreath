@@ -418,6 +418,7 @@ typedef struct {
     Py_ssize_t operations_count;
     int head_direct;              /* no Python-consumed control for this head */
     WreathPgSlab *current;
+    Py_ssize_t unread_bytes;
     Py_ssize_t slab_allocations;
     Py_ssize_t chained_messages;
     Py_ssize_t direct_data_rows;
@@ -607,6 +608,7 @@ buffered_clear(WreathPgBufferedProtocol *self)
     Py_CLEAR(self->closed_future);
     Py_CLEAR(self->done_future);
     Py_CLEAR(self->slabs);
+    self->unread_bytes = 0;
     Py_CLEAR(self->spares);
     Py_CLEAR(self->retired);
     self->retired_scan = 0;
@@ -813,13 +815,7 @@ buffered_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 static Py_ssize_t
 available_bytes(WreathPgBufferedProtocol *self)
 {
-    Py_ssize_t total = 0;
-    Py_ssize_t count = PyList_GET_SIZE(self->slabs);
-    for (Py_ssize_t i = 0; i < count; i++) {
-        WreathPgSlab *slab = (WreathPgSlab *)PyList_GET_ITEM(self->slabs, i);
-        total += slab->write_position - slab->read_position;
-    }
-    return total;
+    return self->unread_bytes;
 }
 
 static int
@@ -906,6 +902,7 @@ consume_bytes(WreathPgBufferedProtocol *self, Py_ssize_t length)
         available = slab->write_position - slab->read_position;
         if (length < available) {
             slab->read_position += length;
+            self->unread_bytes -= length;
             return 0;
         }
         length -= available;
@@ -913,6 +910,9 @@ consume_bytes(WreathPgBufferedProtocol *self, Py_ssize_t length)
         if (Py_REFCNT(slab) == 1 && PyList_GET_SIZE(self->spares) < 4) {
             slab->read_position = 0;
             slab->write_position = 0;
+            /* Reset changes unread storage even if the spare append fails. */
+            self->unread_bytes -= available;
+            available = 0;
             if (PyList_Append(self->spares, (PyObject *)slab) < 0) return -1;
         } else if (Py_REFCNT(slab) > 1) {
             if (PyList_Append(self->retired, (PyObject *)slab) < 0) return -1;
@@ -921,6 +921,7 @@ consume_bytes(WreathPgBufferedProtocol *self, Py_ssize_t length)
            currently-unparsed bytes, so this list is a handful of entries; it is
            not a queue that grows with traffic. */
         if (PySequence_DelItem(self->slabs, 0) < 0) return -1;
+        self->unread_bytes -= available;
     }
     return 0;
 }
@@ -1478,6 +1479,7 @@ buffered_buffer_updated(WreathPgBufferedProtocol *self, PyObject *count_object)
         return NULL;
     }
     self->current->write_position += count;
+    self->unread_bytes += count;
     if (parse_messages(self) < 0) return NULL;
     Py_RETURN_NONE;
 }
@@ -1546,6 +1548,7 @@ stream_commit_read(PyObject *protocol, Py_ssize_t nbytes)
         return -1;
     }
     self->current->write_position += nbytes;
+    self->unread_bytes += nbytes;
     if (nbytes == 0) return 0;  /* abandoned offer: nothing to parse */
     return parse_messages(self);
 }
@@ -1581,6 +1584,7 @@ stream_feed_external(PyObject *protocol, const char *data, Py_ssize_t size)
         memcpy(self->current->data + self->current->write_position,
                data, (size_t)chunk);
         self->current->write_position += chunk;
+        self->unread_bytes += chunk;
         data += chunk;
         size -= chunk;
         if (parse_messages(self) < 0) return -1;
@@ -1948,7 +1952,8 @@ buffered_stats(WreathPgBufferedProtocol *self, PyObject *unused)
 {
     (void)unused;
     return Py_BuildValue(
-        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
+        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n}",
+        "unread_bytes", self->unread_bytes,
         "slab_allocations", self->slab_allocations,
         "active_slabs", PyList_GET_SIZE(self->slabs),
         "idle_slabs", PyList_GET_SIZE(self->spares),

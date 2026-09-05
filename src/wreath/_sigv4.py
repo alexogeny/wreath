@@ -96,6 +96,22 @@ def signing_key(secret: str, date_stamp: str, region: str, service: str) -> byte
     return _hmac(k_service, "aws4_request")
 
 
+class _SigningKeyCache:
+    __slots__ = ("_entry",)
+
+    def __init__(self) -> None:
+        self._entry: tuple[tuple[str, str, str, str], bytes] | None = None
+
+    def get(self, secret: str, date_stamp: str, region: str, service: str) -> bytes:
+        scope = (secret, date_stamp, region, service)
+        entry = self._entry
+        if entry is not None and entry[0] == scope:
+            return entry[1]
+        key = signing_key(secret, date_stamp, region, service)
+        self._entry = (scope, key)
+        return key
+
+
 def _canonical_headers(headers: dict[str, str]) -> tuple[str, str]:
     return _core.sigv4_headers(headers)
 
@@ -138,6 +154,7 @@ def sign(
     payload_hash: str | None = None,
     session_token: str | None = None,
     _prevalidated: bool = False,
+    _key_cache: _SigningKeyCache | None = None,
 ) -> dict[str, str]:
     """Return the headers to add for a header-auth SigV4 request (`Authorization` etc.)."""
     if not _prevalidated:
@@ -170,7 +187,9 @@ def sign(
     scope = _scope(date_stamp, region, service)
     signing_value = string_to_sign(amz_date, scope, canonical)
     signature = hmac.new(
-        signing_key(secret_key, date_stamp, region, service),
+        signing_key(secret_key, date_stamp, region, service)
+        if _key_cache is None
+        else _key_cache.get(secret_key, date_stamp, region, service),
         signing_value.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
@@ -203,6 +222,7 @@ def presign(
     session_token: str | None = None,
     payload_hash: str = UNSIGNED_PAYLOAD,
     scheme: str = "https",
+    _key_cache: _SigningKeyCache | None = None,
 ) -> str:
     """Return a fully-formed SigV4 presigned URL (auth in the query string, no network)."""
     if type(expires) is not int or not 1 <= expires <= _MAX_PRESIGN_SECONDS:
@@ -235,7 +255,9 @@ def presign(
     canonical, _ = canonical_request(method, path, params, headers, payload_hash)
     signing_value = string_to_sign(amz_date, scope, canonical)
     signature = hmac.new(
-        signing_key(secret_key, date_stamp, region, service),
+        signing_key(secret_key, date_stamp, region, service)
+        if _key_cache is None
+        else _key_cache.get(secret_key, date_stamp, region, service),
         signing_value.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

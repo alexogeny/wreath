@@ -353,13 +353,22 @@ def refuse_parameter_arity(sql: str, args: tuple[Any, ...]) -> None:
     if 0 in referenced:
         raise PostgresError("there is no parameter $0")
     declared = len(args)
-    unreferenced = sorted(set(range(1, declared + 1)) - referenced)
-    if unreferenced:
-        raise PostgresError(f"could not determine data type of parameter ${unreferenced[0]}")
-    if referenced and max(referenced) > declared:
+    maximum = max(referenced, default=0)
+    missing = 0
+    if len(referenced) == maximum:
+        if declared > maximum:
+            missing = maximum + 1
+    else:
+        for index in range(1, declared + 1):
+            if index not in referenced:
+                missing = index
+                break
+    if missing:
+        raise PostgresError(f"could not determine data type of parameter ${missing}")
+    if maximum > declared:
         raise PostgresError(
             f"bind message supplies {declared} parameters, "
-            f"but prepared statement requires {max(referenced)}"
+            f"but prepared statement requires {maximum}"
         )
 
 

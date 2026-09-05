@@ -1473,7 +1473,8 @@ start_request(WreathH3Stream *s)
     PyObject *path_str = wreath_h3_request_capi->decode_request_path(
         pp, path_len, &bad_path);
     if (path_str == NULL && bad_path) goto message_err;
-    PyObject *raw_path = PyBytes_FromStringAndSize(pp, path_len);
+    PyObject *raw_path = q < 0 ? Py_NewRef(path)
+                               : PyBytes_FromStringAndSize(pp, path_len);
     PyObject *query = q >= 0 ? PyBytes_FromStringAndSize(pp + q + 1, pl - q - 1)
                              : PyBytes_FromStringAndSize("", 0);
     PyObject *method_str = method

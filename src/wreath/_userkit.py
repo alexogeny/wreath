@@ -14,17 +14,12 @@ giving single-use semantics without server-side token storage.
 from __future__ import annotations
 
 import asyncio
-import email.policy
 import hashlib
 import hmac
 import os
-import smtplib
-import ssl
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
-from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -779,6 +774,10 @@ class SmtpEmailSender:
         signature becomes an invalid one, which is why this returns bytes and
         the sender hands those bytes straight to `sendmail`.
         """
+        from email import policy
+        from email.message import EmailMessage
+        from email.utils import formatdate, make_msgid
+
         built = EmailMessage()
         built["From"] = self.from_addr
         built["To"] = message.to
@@ -798,7 +797,7 @@ class SmtpEmailSender:
         for name, value in message.headers:
             built[name] = value
         built.set_content(message.body)
-        raw = built.as_bytes(policy=email.policy.SMTP)
+        raw = built.as_bytes(policy=policy.SMTP)
         if self.dkim is None:
             return raw
         signature = self.dkim.sign(raw)
@@ -818,6 +817,9 @@ class SmtpEmailSender:
         return domain.strip("<>") or "localhost"
 
     def _deliver(self, message: Message) -> None:
+        import smtplib
+        import ssl
+
         raw = self.build(message)
         context = ssl.create_default_context()
         if self.port == 465:

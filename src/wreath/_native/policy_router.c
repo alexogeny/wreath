@@ -521,10 +521,8 @@ disc_mix(uint64_t k)
 }
 
 static int
-maskmap_init(MaskMap *m, Py_ssize_t expected)
+maskmap_init(MaskMap *m, Py_ssize_t cap)
 {
-    Py_ssize_t cap = 8;
-    while (cap < expected * 2) cap *= 2;
     m->keys = PyMem_Calloc((size_t)cap, sizeof(char *));
     m->lens = PyMem_Calloc((size_t)cap, sizeof(Py_ssize_t));
     m->hashes = PyMem_Calloc((size_t)cap, sizeof(uint64_t));
@@ -553,16 +551,55 @@ maskmap_clear(MaskMap *m)
     memset(m, 0, sizeof(*m));
 }
 
+static int
+maskmap_grow(MaskMap *m)
+{
+    if (m->cap > PY_SSIZE_T_MAX / (2 * (Py_ssize_t)sizeof(uint64_t))) return -1;
+    MaskMap grown = {0};
+    Py_ssize_t cap = m->cap ? m->cap * 2 : 8;
+    if (maskmap_init(&grown, cap) < 0) {
+        maskmap_clear(&grown);
+        return -1;
+    }
+    Py_ssize_t mask = cap - 1;
+    for (Py_ssize_t old = 0; old < m->cap; old++) {
+        if (m->slots[old] < 0) continue;
+        Py_ssize_t slot = (Py_ssize_t)(m->hashes[old] & (uint64_t)mask);
+        while (grown.slots[slot] >= 0) slot = (slot + 1) & mask;
+        grown.keys[slot] = m->keys[old];
+        grown.lens[slot] = m->lens[old];
+        grown.hashes[slot] = m->hashes[old];
+        grown.slots[slot] = m->slots[old];
+    }
+    grown.count = m->count;
+    PyMem_Free(m->keys);
+    PyMem_Free(m->lens);
+    PyMem_Free(m->hashes);
+    PyMem_Free(m->slots);
+    *m = grown;
+    return 0;
+}
+
 /* Returns the slot index for `key`, inserting `fresh_slot` when absent. */
 static Py_ssize_t
 maskmap_intern(MaskMap *m, const char *key, Py_ssize_t len, Py_ssize_t fresh_slot,
                int *inserted)
 {
+    if (m->cap == 0 && maskmap_grow(m) < 0) {
+        *inserted = -1;
+        return -1;
+    }
     uint64_t h = hash_bytes(key, len);
     Py_ssize_t mask = m->cap - 1;
     Py_ssize_t i = (Py_ssize_t)(h & (uint64_t)mask);
     for (;;) {
         if (m->slots[i] < 0) {
+            if (m->count >= m->cap / 2) {
+                if (maskmap_grow(m) < 0) { *inserted = -1; return -1; }
+                mask = m->cap - 1;
+                i = (Py_ssize_t)(h & (uint64_t)mask);
+                while (m->slots[i] >= 0) i = (i + 1) & mask;
+            }
             char *copy = PyMem_Malloc((size_t)len ? (size_t)len : 1);
             if (copy == NULL) { *inserted = -1; return -1; }
             memcpy(copy, key, (size_t)len);
@@ -1014,10 +1051,6 @@ bgroup_build(BRoute **cands, Py_ssize_t ncand, int nseg)
     g->param = PyMem_Calloc((size_t)nseg * (size_t)g->nwords, sizeof(uint64_t));
     g->public_mask = PyMem_Calloc((size_t)g->nwords, sizeof(uint64_t));
     if (g->literal == NULL || g->param == NULL || g->public_mask == NULL) goto fail;
-    for (int p = 0; p < nseg; p++) {
-        if (maskmap_init(&g->literal[p], ncand) < 0) goto fail;
-    }
-
     for (Py_ssize_t i = 0; i < ncand; i++) {
         BRoute *r = &g->owned_routes[i];
         Py_ssize_t word = i / 64;

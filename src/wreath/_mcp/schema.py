@@ -10,8 +10,8 @@ the same handler's OpenAPI schema agree, so the two cannot drift.
 
 The only difference between the two renderings is where a dataclass lives. An
 OpenAPI document puts it in `components/schemas`; a JSON Schema document that
-has to travel alone puts it in `$defs`, so the `$ref` targets are rebased on the
-way out and nothing else changes.
+has to travel alone puts it in `$defs`, so the renderer emits that reference
+prefix directly.
 
 Derivation happens when the tool is registered, never per call.
 """
@@ -148,7 +148,7 @@ def derive_input_schema(
     builder = _Builder(allow_unknown=True)
 
     def render(annotation: Any) -> dict[str, Any]:
-        return _openapi_schema(builder.type_ref(annotation))
+        return _openapi_schema(builder.type_ref(annotation), _JSON_SCHEMA_REF_BASE)
 
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -157,7 +157,9 @@ def derive_input_schema(
         if default is inspect.Parameter.empty:
             required.append(wire_name)
         elif default is not None:
-            rendered["default"] = default
+            rendered["default"] = (
+                _rebase_refs(default) if isinstance(default, (dict, list)) else default
+            )
         properties[wire_name] = rendered
     if spec.body is not None:
         parameter, annotation = spec.body
@@ -171,7 +173,10 @@ def derive_input_schema(
     }
     if required:
         schema["required"] = required
-    definitions = {model.name: _component_schema(model) for model in builder.registry.models()}
+    definitions = {
+        model.name: _component_schema(model, _JSON_SCHEMA_REF_BASE, _rebase_refs)
+        for model in builder.registry.models()
+    }
     if definitions:
         schema["$defs"] = definitions
-    return _rebase_refs(schema), spec
+    return schema, spec

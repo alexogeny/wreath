@@ -68,7 +68,7 @@ typedef struct {
     PyObject_HEAD
     uint8_t *ctrl;
     WreathKVSlot *slots;
-    size_t slot_count; /* power of two, never below WREATH_CTRL_GROUP */
+    size_t slot_count; /* zero until first write, then a power of two */
     size_t slot_mask;
     size_t used;       /* live entries */
     size_t tombstones;
@@ -77,6 +77,7 @@ typedef struct {
     int32_t lru_head; /* most recently used */
     int32_t lru_tail; /* least recently used -- the eviction victim */
     double ttl;       /* default lifetime in seconds; HUGE_VAL for none */
+    double next_expiry; /* lower bound; removals may leave it conservatively early */
     size_t bytes;     /* sum of every live entry's cost */
     size_t max_bytes; /* ceiling on that sum; 0 means unbounded */
     /* Evicted (key, value) pairs the caller has not collected, or NULL when
@@ -217,6 +218,18 @@ kv_resolve_deadline(WreathKV *self, PyObject *value, double now, double *out)
     return 0;
 }
 
+static inline void
+kv_set_deadline(WreathKV *self, WreathKVSlot *slot, double deadline)
+{
+    slot->deadline = deadline;
+    if (isnan(deadline)) {
+        deadline = -HUGE_VAL;
+    }
+    if (deadline < self->next_expiry) {
+        self->next_expiry = deadline;
+    }
+}
+
 /* --- the recency list ---------------------------------------------------- */
 
 static void
@@ -280,6 +293,10 @@ static int
 kv_probe(WreathKV *self, PyObject *key, uint64_t mixed, Py_hash_t hash,
          size_t *index, size_t *insert_at)
 {
+    if (self->slot_count == 0) {
+        *insert_at = 0;
+        return 0;
+    }
     size_t group = (size_t)mixed & self->slot_mask & ~(size_t)(WREATH_CTRL_GROUP - 1);
     uint8_t tag = kv_tag(mixed);
     int have_insert = 0;
@@ -352,11 +369,15 @@ kv_place(uint8_t *ctrl, WreathKVSlot *slots, size_t mask, uint64_t mixed)
 static Py_ssize_t
 kv_rebuild(WreathKV *self, size_t target, double now)
 {
+    if (target == 0) {
+        return 0;
+    }
     uint8_t *ctrl = PyMem_Malloc(target);
     WreathKVSlot *slots = PyMem_Calloc(target, sizeof(WreathKVSlot));
     size_t mask = target - 1;
     size_t used = 0;
     size_t bytes = 0;
+    double next_expiry = HUGE_VAL;
     Py_ssize_t dropped = 0;
     int32_t head = -1;
     int32_t tail = -1;
@@ -386,6 +407,10 @@ kv_rebuild(WreathKV *self, size_t target, double now)
         slots[slot].value = entry->value;
         slots[slot].hash = entry->hash;
         slots[slot].deadline = entry->deadline;
+        double bound = isnan(entry->deadline) ? -HUGE_VAL : entry->deadline;
+        if (bound < next_expiry) {
+            next_expiry = bound;
+        }
         slots[slot].cost = entry->cost;
         slots[slot].prev = tail;
         slots[slot].next = -1;
@@ -407,6 +432,7 @@ kv_rebuild(WreathKV *self, size_t target, double now)
     self->slot_mask = mask;
     self->used = used;
     self->bytes = bytes;
+    self->next_expiry = next_expiry;
     self->tombstones = 0;
     self->lru_head = head;
     self->lru_tail = tail;
@@ -492,14 +518,19 @@ kv_ensure_room(WreathKV *self, double now)
     size_t target;
     Py_ssize_t expired;
 
-    if (WREATH_KV_FITS(occupied, self->slot_count) && self->used < self->max_entries) {
-        return 0;
+    if (WREATH_KV_FITS(occupied, self->slot_count)) {
+        if (self->used < self->max_entries) {
+            return 0;
+        }
+        if (now < self->next_expiry) {
+            return kv_evict_tail(self);
+        }
     }
     /* Grow if there is headroom, otherwise rebuild at the same size to clear
      * tombstones and expired entries. Either way one rebuild, and it also
      * reclaims every entry whose deadline has passed -- which is what makes a
      * TTL'd table self-limiting without a sweep thread. */
-    target = self->slot_count;
+    target = self->slot_count == 0 ? WREATH_CTRL_GROUP : self->slot_count;
     while (!WREATH_KV_FITS(self->used, target) && target < self->max_slots) {
         target <<= 1;
     }
@@ -829,7 +860,7 @@ kv_set(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwname
             deadline = entry->deadline;
         }
         Py_SETREF(entry->value, Py_NewRef(value));
-        entry->deadline = deadline;
+        kv_set_deadline(self, entry, deadline);
         self->bytes = self->bytes - entry->cost + cost;
         entry->cost = cost;
         kv_lru_touch(self, (int32_t)index);
@@ -854,7 +885,7 @@ kv_set(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwname
          * table. Treat it as an update rather than corrupting the invariants. */
         WreathKVSlot *entry = &self->slots[index];
         Py_SETREF(entry->value, Py_NewRef(value));
-        entry->deadline = deadline;
+        kv_set_deadline(self, entry, deadline);
         self->bytes = self->bytes - entry->cost + cost;
         entry->cost = cost;
         kv_lru_touch(self, (int32_t)index);
@@ -870,7 +901,7 @@ kv_set(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwname
     self->slots[insert_at].key = Py_NewRef(key);
     self->slots[insert_at].value = Py_NewRef(value);
     self->slots[insert_at].hash = hash;
-    self->slots[insert_at].deadline = deadline;
+    kv_set_deadline(self, &self->slots[insert_at], deadline);
     self->slots[insert_at].cost = cost;
     self->slots[insert_at].prev = -1;
     self->slots[insert_at].next = -1;
@@ -943,7 +974,7 @@ kv_claim(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwna
     if (found) {
         WreathKVSlot *entry = &self->slots[index];
         Py_SETREF(entry->value, Py_NewRef(value));
-        entry->deadline = deadline;
+        kv_set_deadline(self, entry, deadline);
         kv_lru_touch(self, (int32_t)index);
         Py_RETURN_TRUE;
     }
@@ -954,7 +985,7 @@ kv_claim(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwna
     self->slots[insert_at].key = Py_NewRef(key);
     self->slots[insert_at].value = Py_NewRef(value);
     self->slots[insert_at].hash = hash;
-    self->slots[insert_at].deadline = deadline;
+    kv_set_deadline(self, &self->slots[insert_at], deadline);
     self->slots[insert_at].cost = 0;
     self->slots[insert_at].prev = -1;
     self->slots[insert_at].next = -1;
@@ -1062,7 +1093,7 @@ kv_touch(WreathKV *self, PyObject *args, PyObject *kwargs)
     if (!live) {
         Py_RETURN_FALSE;
     }
-    self->slots[slot].deadline = deadline;
+    kv_set_deadline(self, &self->slots[slot], deadline);
     kv_lru_touch(self, (int32_t)slot);
     Py_RETURN_TRUE;
 }
@@ -1141,20 +1172,23 @@ static PyObject *
 kv_clear(WreathKV *self, PyObject *Py_UNUSED(ignored))
 {
     Py_ssize_t held = (Py_ssize_t)self->used;
-    for (size_t i = 0; i < self->slot_count; i++) {
-        if ((self->ctrl[i] & 0x80u) == 0) {
-            Py_CLEAR(self->slots[i].key);
-            Py_CLEAR(self->slots[i].value);
+    if (self->used != 0 || self->tombstones != 0) {
+        for (size_t i = 0; i < self->slot_count; i++) {
+            if ((self->ctrl[i] & 0x80u) == 0) {
+                Py_CLEAR(self->slots[i].key);
+                Py_CLEAR(self->slots[i].value);
+            }
+            self->ctrl[i] = (uint8_t)WREATH_CTRL_EMPTY;
+            self->slots[i].prev = -1;
+            self->slots[i].next = -1;
         }
-        self->ctrl[i] = (uint8_t)WREATH_CTRL_EMPTY;
-        self->slots[i].prev = -1;
-        self->slots[i].next = -1;
     }
     self->used = 0;
     self->bytes = 0;
     self->tombstones = 0;
     self->lru_head = -1;
     self->lru_tail = -1;
+    self->next_expiry = HUGE_VAL;
     if (self->evicted != NULL && PyList_SetSlice(self->evicted, 0, PY_SSIZE_T_MAX, NULL) < 0) {
         return NULL;
     }
@@ -1282,6 +1316,9 @@ kv_items(WreathKV *self, PyObject *args, PyObject *kwargs)
 static Py_ssize_t
 kv_count_at(WreathKV *self, double now)
 {
+    if (now < self->next_expiry) {
+        return (Py_ssize_t)self->used;
+    }
     Py_ssize_t live = 0;
     for (int32_t cursor = self->lru_head; cursor >= 0; cursor = self->slots[cursor].next) {
         if (now < self->slots[cursor].deadline) {
@@ -1367,25 +1404,12 @@ kv_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UNUSED(kwargs
     if (self == NULL) {
         return NULL;
     }
-    self->slot_count = WREATH_CTRL_GROUP;
-    self->slot_mask = WREATH_CTRL_GROUP - 1;
     self->max_entries = 1024;
     self->max_slots = kv_next_power_of_two((1024 * 8 + 6) / 7);
     self->ttl = HUGE_VAL;
+    self->next_expiry = HUGE_VAL;
     self->lru_head = -1;
     self->lru_tail = -1;
-    self->ctrl = PyMem_Malloc(self->slot_count);
-    self->slots = PyMem_Calloc(self->slot_count, sizeof(WreathKVSlot));
-    if (self->ctrl == NULL || self->slots == NULL) {
-        Py_DECREF(self);
-        PyErr_NoMemory();
-        return NULL;
-    }
-    memset(self->ctrl, (int)WREATH_CTRL_EMPTY, self->slot_count);
-    for (size_t i = 0; i < self->slot_count; i++) {
-        self->slots[i].prev = -1;
-        self->slots[i].next = -1;
-    }
     return (PyObject *)self;
 }
 
@@ -1436,9 +1460,9 @@ kv_init(WreathKV *self, PyObject *args, PyObject *kwargs)
         }
         Py_DECREF(discard);
     }
-    /* Sized for the ceiling but allocated at the floor: a table declared to
+    /* Reserve storage only when written: a table declared to
      * hold a million keys and given four should cost four keys' worth of
-     * memory, so it starts at one group and doubles. */
+     * memory, so its first allocation is one group, then it doubles. */
     self->max_slots = kv_next_power_of_two(((size_t)max_entries * 8 + 6) / 7);
     self->max_entries = (size_t)max_entries;
     self->max_bytes = (size_t)max_bytes;
@@ -1489,6 +1513,7 @@ kv_tp_clear(WreathKV *self)
     self->tombstones = 0;
     self->lru_head = -1;
     self->lru_tail = -1;
+    self->next_expiry = HUGE_VAL;
     return 0;
 }
 

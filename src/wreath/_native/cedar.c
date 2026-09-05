@@ -69,8 +69,9 @@ typedef struct {
 
 typedef struct {
     PyObject *policies; /* owned; keeps every borrowed policy field alive */
-    CedarPlanPolicy *all;
+    CedarPlanPolicy **all;
     Py_ssize_t policy_count;
+    CedarPlanPolicy *ordered;
     CedarPlanPolicy *forbids;
     CedarPlanPolicy *permits;
     Py_ssize_t forbid_count;
@@ -262,15 +263,10 @@ cedar_plan_destroy(PyObject *capsule)
         PyErr_Clear();
         return;
     }
-    for (Py_ssize_t index = 0; index < plan->forbid_count; index++)
-        cedar_plan_policy_clear(&plan->forbids[index]);
-    for (Py_ssize_t index = 0; index < plan->permit_count; index++)
-        cedar_plan_policy_clear(&plan->permits[index]);
     for (Py_ssize_t index = 0; index < plan->policy_count; index++)
-        cedar_plan_policy_clear(&plan->all[index]);
+        cedar_plan_policy_clear(&plan->ordered[index]);
     PyMem_Free(plan->all);
-    PyMem_Free(plan->forbids);
-    PyMem_Free(plan->permits);
+    PyMem_Free(plan->ordered);
     Py_DECREF(plan->policies);
     PyMem_Free(plan);
 }
@@ -451,52 +447,41 @@ wreath_cedar_compile_plan(PyObject *Py_UNUSED(self), PyObject *policies)
     plan->forbid_count = forbid_count;
     plan->permit_count = policy_count - forbid_count;
     plan->policy_count = policy_count;
-    if (policy_count != 0)
-        plan->all = PyMem_Calloc((size_t)policy_count, sizeof(*plan->all));
-    if (plan->forbid_count != 0) {
-        plan->forbids = PyMem_Calloc(
-            (size_t)plan->forbid_count, sizeof(*plan->forbids));
+    if (policy_count != 0) {
+        plan->all = PyMem_Malloc((size_t)policy_count * sizeof(*plan->all));
+        plan->ordered = PyMem_Calloc((size_t)policy_count, sizeof(*plan->ordered));
     }
-    if (plan->permit_count != 0) {
-        plan->permits = PyMem_Calloc(
-            (size_t)plan->permit_count, sizeof(*plan->permits));
-    }
-    if ((policy_count != 0 && plan->all == NULL) ||
-        (plan->forbid_count != 0 && plan->forbids == NULL) ||
-        (plan->permit_count != 0 && plan->permits == NULL)) {
-        PyMem_Free(plan->forbids);
-        PyMem_Free(plan->permits);
+    if (policy_count != 0 && (plan->all == NULL || plan->ordered == NULL)) {
         PyMem_Free(plan->all);
+        PyMem_Free(plan->ordered);
         PyMem_Free(plan);
         return PyErr_NoMemory();
+    }
+    if (policy_count != 0) {
+        plan->forbids = plan->ordered;
+        plan->permits = plan->ordered + forbid_count;
     }
 
     Py_ssize_t forbid_index = 0;
     Py_ssize_t permit_index = 0;
     for (Py_ssize_t index = 0; index < policy_count; index++) {
         PyObject *policy = PyTuple_GET_ITEM(policies, index);
-        if (cedar_plan_policy_compile(&plan->all[index], policy) < 0)
-            goto error;
         int forbid = cedar_program_int(PyTuple_GET_ITEM(policy, 0)) != 0;
         CedarPlanPolicy *compiled = forbid
             ? &plan->forbids[forbid_index++]
             : &plan->permits[permit_index++];
         if (cedar_plan_policy_compile(compiled, policy) < 0) goto error;
+        plan->all[index] = compiled;
     }
     plan->policies = Py_NewRef(policies);
     PyObject *capsule = PyCapsule_New(plan, CEDAR_PLAN_CAPSULE, cedar_plan_destroy);
     if (capsule != NULL) return capsule;
     Py_DECREF(plan->policies);
 error:
-    for (Py_ssize_t index = 0; index < plan->forbid_count; index++)
-        cedar_plan_policy_clear(&plan->forbids[index]);
-    for (Py_ssize_t index = 0; index < plan->permit_count; index++)
-        cedar_plan_policy_clear(&plan->permits[index]);
     for (Py_ssize_t index = 0; index < plan->policy_count; index++)
-        cedar_plan_policy_clear(&plan->all[index]);
+        cedar_plan_policy_clear(&plan->ordered[index]);
     PyMem_Free(plan->all);
-    PyMem_Free(plan->forbids);
-    PyMem_Free(plan->permits);
+    PyMem_Free(plan->ordered);
     PyMem_Free(plan);
     return NULL;
 }
@@ -1509,7 +1494,7 @@ cedar_authorize_plan_diagnostic(const CedarPlan *plan,
     int permitted = 0;
     int forbidden = 0;
     for (Py_ssize_t i = 0; i < policy_count; i++) {
-        const CedarPlanPolicy *compiled = &plan->all[i];
+        const CedarPlanPolicy *compiled = plan->all[i];
         PyObject *policy = compiled->policy;
         long forbid = cedar_program_int(PyTuple_GET_ITEM(policy, 0));
         PyObject *policy_id = PyTuple_GET_ITEM(policy, 1);

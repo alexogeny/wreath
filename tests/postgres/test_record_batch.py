@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import struct
+import tracemalloc
+import weakref
 from typing import Any
 
 import pytest
@@ -122,3 +125,59 @@ def test_native_backend_exports_record_batch() -> None:
     assert _postgres is not None
     expected = _postgres.RecordBatch if _implementation == "native" else PureRecordBatch
     assert RecordBatch is expected
+
+
+def test_native_batch_retains_at_most_two_words_per_scalar_cell() -> None:
+    rows, columns = 4096, 4
+    tape = _postgres._FieldTape(columns)
+    payload = _data_row(tuple(struct.pack("!q", 1000 + i) for i in range(columns)))
+    for _ in range(rows):
+        tape.append(payload, columns)
+    plan = _postgres._compile_decoder_plan((20,) * columns, (1,) * columns, tuple("abcd"))
+
+    tracemalloc.start()
+    try:
+        start, _ = tracemalloc.get_traced_memory()
+        batch = _postgres._decode_field_tape(plan, tape, "fetch_batch", rows)
+        retained, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(batch) == rows
+    assert _postgres._batch_storage_counts(batch) == (0, 0, rows * columns, 0, 0)
+    assert retained - start <= rows * (columns * 16 + struct.calcsize("P")) + 4096
+    assert tuple(batch[0][name] for name in "abcd") == (1000, 1001, 1002, 1003)
+    assert tuple(batch[-1][name] for name in "abcd") == (1000, 1001, 1002, 1003)
+
+
+def test_native_batch_mixed_cells_preserve_null_empty_text_and_owned_objects() -> None:
+    fields = (None, b"", struct.pack("!q", -(2**63)), b"\x01", b"\x00\xff")
+    names = ("null", "empty", "integer", "boolean", "bytes")
+    tape = _postgres._FieldTape(len(fields))
+    tape.append(_data_row(fields), len(fields))
+    plan = _postgres._compile_decoder_plan((25, 25, 20, 16, 17), (1,) * 5, names)
+    batch = _postgres._decode_field_tape(plan, tape, "fetch_batch", 256)
+
+    assert _postgres._batch_storage_counts(batch) == (0, 3, 1, 1, 0)
+    batch.sort_by("empty")
+    row = batch[0]
+    assert tuple(row[name] for name in names) == (None, "", -(2**63), True, b"\x00\xff")
+    assert _postgres._batch_storage_counts(batch) == (1, 5, 0, 0, 0)
+    del batch, tape
+    gc.collect()
+    assert tuple(row[name] for name in names) == (None, "", -(2**63), True, b"\x00\xff")
+
+
+def test_native_batch_collects_appended_cycle_after_tagged_rows() -> None:
+    class Row(dict):
+        pass
+
+    batch = _decoded_batch(((0, ""), (1, "text")))
+    row = Row(batch=batch)
+    reference = weakref.ref(row)
+    batch.append(row)
+
+    del row, batch
+    gc.collect()
+
+    assert reference() is None

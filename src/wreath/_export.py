@@ -41,6 +41,8 @@ from ._drainthread import DrainThread
 from ._logsink import BoundedLogQueue
 from ._otlp import (
     BoundedExportQueue,
+    _build_trace_request,
+    _Routes,
     build_logs_request,
     build_metrics_request,
     build_trace_request,
@@ -436,6 +438,7 @@ class ExportPipeline:
         if not pending:
             return
         projected = getattr(self._transport, "export_projected_traces", None)
+        routes = None
         for start in range(0, len(pending), self._batch_size):
             batch = pending[start : start + self._batch_size]
             try:
@@ -445,12 +448,17 @@ class ExportPipeline:
                         image=self._image,
                         resource_attributes=self._resource,
                     )
-                else:
+                elif len(pending) <= self._batch_size:
                     request = build_trace_request(
                         batch,
                         image=self._image,
                         resource_attributes=self._resource,
                     )
+                    self._transport.export_traces(request)
+                else:
+                    if routes is None:
+                        routes = _Routes(self._image)
+                    request = _build_trace_request(batch, routes, self._resource)
                     self._transport.export_traces(request)
             except Exception:  # noqa: BLE001 -- isolate exporter failure to a counter
                 with self._lock:
