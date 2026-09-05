@@ -1391,13 +1391,16 @@ class MetadataImage:
         """
         return _core.flight_metadata_bytes(self, SchemaError)
 
-    def image_hash(self) -> bytes:
+    def image_hash(self, *, canonical: bytes | None = None) -> bytes:
         """The full 32-byte BLAKE2b digest of the canonical form."""
-        return hashlib.blake2b(self.canonical_bytes(), digest_size=32).digest()
+        if canonical is None:
+            canonical = self.canonical_bytes()
+        return hashlib.blake2b(canonical, digest_size=32).digest()
 
-    def image_hash_short(self) -> bytes:
+    def image_hash_short(self, *, canonical: bytes | None = None) -> bytes:
         """The truncated hash carried on cells / in the container header."""
-        return self.image_hash()[:IMAGE_HASH_BYTES]
+        digest = self.image_hash() if canonical is None else self.image_hash(canonical=canonical)
+        return digest[:IMAGE_HASH_BYTES]
 
 
 # These sit here beside `MetadataImage.canonical_bytes` because they describe

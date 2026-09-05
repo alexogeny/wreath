@@ -19,16 +19,14 @@ wreath_compression_trim_ows(const char **data, Py_ssize_t *length)
 /* 0 none, 1 gzip, 2 zstd, 3 dcz. `fallback` retains the ordinary coding so a
  * DCZ dictionary miss continues without reparsing Accept-Encoding. */
 static inline int
-wreath_select_compression_value(PyObject *arg, int allow_dcz, int *fallback)
+wreath_select_compression_data(const char *data, Py_ssize_t size,
+                               int allow_dcz, int *fallback)
 {
-    if (arg == NULL) return 0;
-    Py_buffer view;
-    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return -1;
-    const char *data = (const char *)view.buf;
+    if (data == NULL) return 0;
     Py_ssize_t start = 0;
     int gzip_named = 0, gzip_q = 0, zstd_q = 0, dcz_q = 0, wildcard_q = 0;
-    for (Py_ssize_t i = 0; i <= view.len; i++) {
-        if (i < view.len && data[i] != ',') continue;
+    for (Py_ssize_t i = 0; i <= size; i++) {
+        if (i < size && data[i] != ',') continue;
         const char *item = data + start;
         Py_ssize_t item_len = i - start;
         start = i + 1;
@@ -68,7 +66,6 @@ wreath_select_compression_value(PyObject *arg, int allow_dcz, int *fallback)
         else if (wreath_ascii_equal_ci_str(coding, coding_len, "dcz")) dcz_q = quality;
         else if (coding_len == 1 && coding[0] == '*') wildcard_q = quality;
     }
-    PyBuffer_Release(&view);
     if (!gzip_named) gzip_q = wildcard_q;
     int ordinary = zstd_q > 0 && zstd_q >= gzip_q ? 2 : (gzip_q > 0 ? 1 : 0);
     int ordinary_q = ordinary == 2 ? zstd_q : (ordinary == 1 ? gzip_q : 0);
@@ -77,6 +74,18 @@ wreath_select_compression_value(PyObject *arg, int allow_dcz, int *fallback)
         *fallback = selected == 3 && gzip_q > 0 && gzip_q >= zstd_q
             ? 1 : ordinary;
     }
+    return selected;
+}
+
+static inline int
+wreath_select_compression_value(PyObject *arg, int allow_dcz, int *fallback)
+{
+    if (arg == NULL) return 0;
+    Py_buffer view;
+    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return -1;
+    int selected = wreath_select_compression_data(
+        view.buf, view.len, allow_dcz, fallback);
+    PyBuffer_Release(&view);
     return selected;
 }
 

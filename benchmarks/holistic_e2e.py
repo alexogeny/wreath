@@ -145,7 +145,7 @@ from wreath.webhooks import (
 )
 from wreath.workflows import InMemoryWorkflowStore, Workflow
 
-from .apps import _e2e_ensure
+from .e2e_peer import ensure_e2e_peer as _e2e_ensure
 
 REQUEST_METHOD = "POST"
 REQUEST_PATH = "/v1/holistic/42?limit=3&page=1&size=12&sort=-score"
@@ -349,28 +349,35 @@ _SERIES_FILLS = {
 }
 _SERIES_DOWNSAMPLE_ROWS = (0, 3, 6, 9, 12, 15, 18, 21)
 _SERIES_FULL_ROWS = (1, 3, 5)
-_SERIES_SPARSE = {
-    (f"tenant-{tenant:02d}", False): {
-        bucket: {
-            "requests": float(800 + tenant * 17 + index % 41),
-            "latency": None
-            if (index + tenant) % 29 == 0
-            else 18.0 + 7.0 * math.sin((index + tenant) / 19.0),
-            "revenue": float((index % 13 + 1) * (tenant + 3)),
-            "saturation": None
-            if index % 31 == 0
-            else 0.45 + 0.4 * math.sin((index + tenant) / 37.0),
-            "errors": float((index * (tenant + 1)) % 17),
-            "queue": None
-            if (index + tenant) % 43 == 0
-            else 6.0 + 5.0 * math.cos((index + tenant) / 23.0),
-        }
-        for index, bucket in enumerate(_SERIES_BUCKETS)
-        if (index + tenant) % 7 != 0
-    }
-    for tenant in range(48)
-}
-_SERIES_CHART = ChartData(_SERIES_BUCKETS, _SERIES_SPARSE, _SERIES_FILLS)
+
+
+def _series_readings(tenant: int):
+    for index, bucket in enumerate(_SERIES_BUCKETS):
+        if (index + tenant) % 7 != 0:
+            yield bucket, {
+                "requests": float(800 + tenant * 17 + index % 41),
+                "latency": None
+                if (index + tenant) % 29 == 0
+                else 18.0 + 7.0 * math.sin((index + tenant) / 19.0),
+                "revenue": float((index % 13 + 1) * (tenant + 3)),
+                "saturation": None
+                if index % 31 == 0
+                else 0.45 + 0.4 * math.sin((index + tenant) / 37.0),
+                "errors": float((index * (tenant + 1)) % 17),
+                "queue": None
+                if (index + tenant) % 43 == 0
+                else 6.0 + 5.0 * math.cos((index + tenant) / 23.0),
+            }
+
+
+_SERIES_CHART = ChartData.from_rows(
+    _SERIES_BUCKETS,
+    (
+        ((f"tenant-{tenant:02d}", False), _series_readings(tenant))
+        for tenant in range(48)
+    ),
+    _SERIES_FILLS,
+)
 _DEPOT = Coordinate(lat=-27.4698, lon=153.0251)
 _SITE = Coordinate(lat=-33.8688, lon=151.2093)
 _HOURLY_START = Instant.of(datetime.datetime(2026, 3, 20, 11, tzinfo=datetime.UTC))

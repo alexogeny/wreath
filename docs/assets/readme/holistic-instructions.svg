@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc" data-source-sha256="2320a2ec0c221f476319145b88cc9d92f581a1dd326783942b7b7935a0b630b2" data-generator="animejs-4.5.0">
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc" data-source-sha256="1b40829249de166408f8434eb0bd54f6dab741b8deecdc67a34fc75447628c96" data-generator="animejs-4.5.0">
   <title id="title">One complete request · retired instructions</title>
   <desc id="desc">TLS 1.3, policy, typed input, auth, Cedar, PostgreSQL, HTTP, analytics, templates and compression · log scale · lower is better</desc>
   <defs>
@@ -25,29 +25,29 @@
   <line x1="1048" y1="139" x2="1048" y2="454" stroke="#c4b5fd" stroke-opacity=".48"/>
   <text x="1048" y="477" text-anchor="middle" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">256M</text>
   <text x="208" y="175" text-anchor="end" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650">Wreath · DCZ</text>
-  <rect x="238" y="151" width="87.074" height="34" rx="17" fill="#7c3aed" opacity=".90" data-stack="wreath-optimal" data-median-instructions="1815020.333">
-    <animate attributeName="width" values="0;19.811;36.033;49.126;59.523;67.621;73.787;78.356;81.631;83.883;85.352;86.243;86.733;86.966;87.052;87.072;87.074" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  <rect x="238" y="151" width="93.676" height="34" rx="17" fill="#7c3aed" opacity=".90" data-stack="wreath-optimal" data-median-instructions="1898935.000">
+    <animate attributeName="width" values="0;21.313;38.765;52.851;64.036;72.748;79.382;84.297;87.821;90.244;91.823;92.782;93.31;93.56;93.653;93.674;93.676" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
   </rect>
-  <text x="337.074" y="174" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">1.82M</text>
+  <text x="343.676" y="174" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">1.90M</text>
   <text x="208" y="234" text-anchor="end" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650">Wreath · gzip</text>
-  <rect x="238" y="210" width="201.712" height="34" rx="17" fill="#d946ef" opacity=".90" data-stack="wreath" data-median-instructions="3978477.267">
-    <animate attributeName="width" values="0;50.234;90.444;122.062;146.408;164.694;178.02;187.377;193.643;197.588;199.872;201.043;201.54;201.69;201.712;201.712;201.712" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  <rect x="238" y="210" width="204.863" height="34" rx="17" fill="#d946ef" opacity=".90" data-stack="wreath" data-median-instructions="4065242.733">
+    <animate attributeName="width" values="0;51.019;91.857;123.969;148.696;167.267;180.802;190.304;196.668;200.675;202.995;204.184;204.689;204.841;204.863;204.863;204.863" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
   </rect>
-  <text x="451.712" y="233" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">3.98M</text>
+  <text x="454.863" y="233" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">4.07M</text>
   <text x="208" y="293" text-anchor="end" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650">BlackSheep</text>
-  <rect x="238" y="269" width="779.736" height="34" rx="17" fill="#2563eb" opacity=".90" data-stack="blacksheep" data-median-instructions="208094019.867">
-    <animate attributeName="width" values="0;210.608;375.363;501.458;595.475;663.379;710.523;741.642;760.86;771.686;777.014;779.124;779.68;779.735;779.736;779.736;779.736" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  <rect x="238" y="269" width="779.842" height="34" rx="17" fill="#2563eb" opacity=".90" data-stack="blacksheep" data-median-instructions="208246384.933">
+    <animate attributeName="width" values="0;210.637;375.414;501.527;595.557;663.47;710.62;741.744;760.965;771.792;777.121;779.231;779.787;779.842;779.842;779.842;779.842" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
   </rect>
-  <text x="1029.736" y="292" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">208.09M</text>
+  <text x="1029.842" y="292" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">208.25M</text>
   <text x="208" y="352" text-anchor="end" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650">FastAPI</text>
-  <rect x="238" y="328" width="781.078" height="34" rx="17" fill="#0891b2" opacity=".90" data-stack="fastapi" data-median-instructions="210014874.600">
-    <animate attributeName="width" values="0;227.074;400.62;529.795;622.897;687.364;729.773;755.844;770.434;777.543;780.31;781.015;781.078;781.078;781.078;781.078;781.078" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  <rect x="238" y="328" width="780.873" height="34" rx="17" fill="#0891b2" opacity=".90" data-stack="fastapi" data-median-instructions="209720647.800">
+    <animate attributeName="width" values="0;227.014;400.515;529.656;622.734;687.184;729.582;755.645;770.232;777.339;780.105;780.81;780.873;780.873;780.873;780.873;780.873" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
   </rect>
-  <text x="1031.078" y="351" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">210.01M</text>
+  <text x="1030.873" y="351" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">209.72M</text>
   <text x="208" y="411" text-anchor="end" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650">Sanic</text>
-  <rect x="238" y="387" width="781.708" height="34" rx="17" fill="#059669" opacity=".90" data-stack="sanic" data-median-instructions="210922423.467">
-    <animate attributeName="width" values="0;243.029;424.434;555.634;646.878;707.242;744.633;765.786;776.263;780.457;781.588;781.707;781.708;781.708;781.708;781.708;781.708" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  <rect x="238" y="387" width="781.944" height="34" rx="17" fill="#059669" opacity=".90" data-stack="sanic" data-median-instructions="211263773.933">
+    <animate attributeName="width" values="0;243.102;424.562;555.802;647.073;707.456;744.858;766.017;776.498;780.693;781.825;781.944;781.944;781.944;781.944;781.944;781.944" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
   </rect>
-  <text x="1031.708" y="410" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">210.92M</text>
-  <text x="1062" y="485" text-anchor="end" fill="#8b5cf6" font-family="ui-monospace, monospace" font-size="11">retained · 2026-09-02</text>
+  <text x="1031.944" y="410" fill="#312e81" font-family="ui-monospace, monospace" font-size="13" font-weight="700">211.26M</text>
+  <text x="1062" y="485" text-anchor="end" fill="#8b5cf6" font-family="ui-monospace, monospace" font-size="11">retained · 2026-09-05</text>
 </svg>

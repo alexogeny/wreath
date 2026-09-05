@@ -380,7 +380,8 @@ async def test_projector_orders_only_actual_resolvers(
             "computed", "Int", True, False, resolver=resolver, policy="Thing.computed"
         ),
     }
-    captured: list[dict[str, Any]] = []
+    captured: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    order_fields = execute_module.order_fields
     run = _run(monkeypatch, schema=_schema(fields=fields))
     monkeypatch.setattr(execute_module._core, "graphql_project_plain", lambda *_: None)
     monkeypatch.setattr(execute_module._core, "graphql_new_results", lambda _instances: [])
@@ -388,12 +389,16 @@ async def test_projector_orders_only_actual_resolvers(
     monkeypatch.setattr(
         execute_module,
         "order_fields",
-        lambda selected, specs, **_kwargs: captured.append(specs) or selected,
+        lambda selected, specs, **kwargs: captured.append((specs, kwargs)) or selected,
     )
 
     await run._project([], ObjectType("Thing", None, fields), [], ())
 
-    assert captured == [{"computed": resolver}]
+    assert len(captured) == 1
+    assert captured[0][0] is fields
+    assert captured[0][1] == {"type_name": "Thing", "schema_fields": True}
+    selected = [Field("value", "value"), Field("computed", "computed")]
+    assert order_fields(selected, captured[0][0], **captured[0][1]) == selected
 
 
 @pytest.mark.asyncio

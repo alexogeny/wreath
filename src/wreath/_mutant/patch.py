@@ -131,15 +131,50 @@ def compile_module(tree: ast.Module, filename: str, *, locate: bool = True) -> C
     return compile(tree, filename, "exec", dont_inherit=True, optimize=0)
 
 
-def compile_scope(tree: ast.Module, qualname: str, filename: str) -> CodeType:
+@dataclass(frozen=True, slots=True)
+class _ScopeFacts:
+    owners: dict[str, int]
+    future_imports: tuple[int, ...]
+
+    @classmethod
+    def from_tree(cls, tree: ast.Module) -> _ScopeFacts:
+        owners: dict[str, int] = {}
+        future_imports: list[int] = []
+        for index, statement in enumerate(tree.body):
+            if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                owners.setdefault(statement.name, index)
+            elif isinstance(statement, ast.ImportFrom) and statement.module == "__future__":
+                future_imports.append(index)
+        return cls(owners, tuple(future_imports))
+
+
+def compile_scope(
+    tree: ast.Module,
+    qualname: str,
+    filename: str,
+    *,
+    facts: _ScopeFacts | None = None,
+) -> CodeType:
     """Compile only the top-level owner of one replacement code object.
 
     A code patch installs one function or method; compiling every unrelated
     definition in its module repeats work whose result is immediately thrown
     away. The owner plus the module's future imports produces the same nested
     code object and compiler flags without paying for sibling definitions.
+
+    Build-local facts index the original declarations. `transform_module`
+    preserves their positions while copying the mutated owner's ancestor path.
     """
     owner_name = qualname.partition(".")[0]
+    if facts is not None:
+        owner_index = facts.owners.get(owner_name)
+        if owner_index is None:
+            return compile_module(tree, filename, locate=False)
+        narrowed = ast.Module(
+            body=[*(tree.body[index] for index in facts.future_imports), tree.body[owner_index]],
+            type_ignores=[],
+        )
+        return compile_module(narrowed, filename, locate=False)
     owner = next(
         (
             statement

@@ -324,6 +324,17 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
         raise ValueError(
             "session second_factor and OAuth oauth_step_up requirements cannot be combined"
         )
+    if (
+        public is False
+        and authenticated is False
+        and identify is False
+        and not role_checks
+        and not permission_checks
+        and not policies
+        and second_factor is None
+        and oauth_step_up is None
+    ):
+        return _EMPTY_REQUIREMENT
     return AuthRequirement(
         public=public,
         second_factor=second_factor,

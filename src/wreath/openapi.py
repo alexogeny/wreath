@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,7 +123,9 @@ class CompatibilityChange:
     detail: str
 
 
-def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
+def _openapi_schema(
+    ref: TypeRef, reference_prefix: str = "#/components/schemas/"
+) -> dict[str, Any]:
     """Render one canonical `TypeRef` as an OpenAPI 3.1 schema.
 
     OpenAPI and the client generators therefore share one interpretation of
@@ -141,20 +144,23 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
     if ref.kind == "unknown":
         return {}
     if ref.kind == "reference":
-        return {"$ref": f"#/components/schemas/{ref.name}"}
+        return {"$ref": f"{reference_prefix}{ref.name}"}
     if ref.kind == "array":
-        return {"type": "array", "items": _openapi_schema(ref.arguments[0])}
+        return {"type": "array", "items": _openapi_schema(ref.arguments[0], reference_prefix)}
     if ref.kind == "tuple":
         return {
             "type": "array",
-            "prefixItems": [_openapi_schema(arg) for arg in ref.arguments],
+            "prefixItems": [_openapi_schema(arg, reference_prefix) for arg in ref.arguments],
             "minItems": len(ref.arguments),
             "maxItems": len(ref.arguments),
         }
     if ref.kind == "record":
-        return {"type": "object", "additionalProperties": _openapi_schema(ref.arguments[0])}
+        return {
+            "type": "object",
+            "additionalProperties": _openapi_schema(ref.arguments[0], reference_prefix),
+        }
     if ref.kind == "union":
-        return {"anyOf": [_openapi_schema(arg) for arg in ref.arguments]}
+        return {"anyOf": [_openapi_schema(arg, reference_prefix) for arg in ref.arguments]}
     if ref.kind == "literal":
         return {"enum": list(ref.literals)}
     if ref.kind == "coordinate":
@@ -177,7 +183,7 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
         # minting `PageLlama`/`PageHerd` components would put a generated name
         # in the contract that the Python target then has to un-generate to
         # reach `wreath.pagination.Page`.
-        element = _openapi_schema(ref.arguments[0]) if ref.arguments else {}
+        element = _openapi_schema(ref.arguments[0], reference_prefix) if ref.arguments else {}
         return {
             "type": "object",
             "properties": {
@@ -196,14 +202,22 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
     )
 
 
-def _component_schema(model: Model) -> dict[str, Any]:
+def _component_schema(
+    model: Model,
+    reference_prefix: str = "#/components/schemas/",
+    transform_examples: Callable[[Any], Any] | None = None,
+) -> dict[str, Any]:
     properties: dict[str, dict[str, Any]] = {}
     for field in model.fields:
-        field_schema = _openapi_schema(field.type)
+        field_schema = _openapi_schema(field.type, reference_prefix)
         if field.description is not None:
             field_schema["description"] = field.description
         if field.examples:
-            field_schema["examples"] = list(field.examples)
+            field_schema["examples"] = (
+                list(field.examples)
+                if transform_examples is None
+                else [transform_examples(value) for value in field.examples]
+            )
         for value, key in (
             (field.gt, "exclusiveMinimum"),
             (field.ge, "minimum"),

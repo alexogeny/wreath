@@ -47,6 +47,8 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from wreath.authorization import roles
     from wreath.response import PreparedResponse, StreamingResponse, TextResponse
 
+    from .e2e_peer import ensure_e2e_peer
+
     app = Wreath()
 
     _JWT_SECRET = b"wreath-benchmark-hs256-secret-0123456789"
@@ -103,58 +105,10 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     async def auth_admin(request):
         return TextResponse("admin")
 
-    # Authentication, a database round trip through wreath.postgres, and a
-    # remote HTTP fetch through wreath.http_client, composed into one JSON
-    # response. Both upstreams run in-process on the benchmarked loop (see
-    # e2e_upstream.py), so on wreath-metal every wire -- ingress, DB, and
-    # client -- rides the fused native transport. Setup is lazy and happens
-    # once, inside the warmup requests.
-    _e2e_state: dict = {"lock": asyncio.Lock()}
-
-    async def _e2e_ensure():
-        if "connection" in _e2e_state:
-            return _e2e_state
-        async with _e2e_state["lock"]:
-            if "connection" in _e2e_state:
-                return _e2e_state
-            from wreath import postgres
-            from wreath.http_client import ClientLimits, DestinationPolicy, HTTPClient
-
-            from .e2e_upstream import BenchPostgres, BenchUpstreamHttp
-
-            database = BenchPostgres()
-            dsn = await database.start()
-            upstream = BenchUpstreamHttp()
-            upstream_port = await upstream.start()
-            client = HTTPClient(
-                "bench-e2e",
-                base_url=f"http://127.0.0.1:{upstream_port}",
-                # The socket-level run drives up to 64 concurrent requests per
-                # worker. A default 20-connection client turns the remaining 44
-                # into pool-waiter bookkeeping and measures an untuned bound
-                # rather than the DB+HTTP composition this route exists to
-                # exercise. Keep every admitted connection reusable so a trial
-                # also never benchmarks reconnect churn.
-                limits=ClientLimits(
-                    max_connections=64,
-                    max_keepalive_connections=64,
-                ),
-                destination=DestinationPolicy(allow_private=True, allow_loopback=True),
-            )
-            await client.start()
-            connection = await postgres.connect(dsn)
-            _e2e_state.update(
-                database=database,
-                upstream=upstream,
-                client=client,
-                connection=connection,
-            )
-            return _e2e_state
-
     @app.get("/e2e")
     @authenticated()
     async def e2e(request):
-        state = await _e2e_ensure()
+        state = await ensure_e2e_peer()
         # Overlap the HTTP fetch with the DB round trip: one task, no gather
         # (gather costs two task wrappers plus its own future per request).
         fetch = asyncio.create_task(state["client"].get("/data"))

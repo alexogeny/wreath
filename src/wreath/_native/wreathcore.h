@@ -327,6 +327,9 @@ PyObject *wreath_emf_render(PyObject *self, PyObject *args);
 /* client_facts.c -- native policy boundary, no Python result materialization. */
 int wreath_user_agent_blocked(PyObject *database, PyObject *value,
                               PyObject *table, int *blocked);
+int wreath_user_agent_blocked_raw(PyObject *database, const char *data,
+                                  Py_ssize_t size, PyObject *table,
+                                  int *blocked);
 int wreath_user_agent_database_check(PyObject *database);
 PyObject *wreath_metric_delta_state(PyObject *self, PyObject *arg);
 
@@ -348,6 +351,7 @@ PyObject *wreath_series_chart(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart_text(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_data(PyObject *self, PyObject *args);
+PyObject *wreath_series_data_rows(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart_text(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart_plan(PyObject *self, PyObject *args);
@@ -485,6 +489,9 @@ typedef struct {
     int (*replace_cookie)(PyObject *headers, PyObject *prefix, PyObject *value);
     int (*replace_server_timing)(PyObject *headers, PyObject *metric,
                                  PyObject *value);
+    int (*user_agent_blocked_raw)(PyObject *database, const char *data,
+                                  Py_ssize_t size, PyObject *table,
+                                  int *blocked);
 } WreathCoreCAPI;
 
 #define WREATH_CORE_CAPI_NAME "wreath._native._core._C_API"

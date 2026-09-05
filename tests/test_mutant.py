@@ -1625,7 +1625,20 @@ def test_sample_represents_every_operator_family_before_filling_remaining_slots(
         "sample_families.module_3": "predicate.drop-operand",
     }
 
-    def scan(_tree: ast.Module, module_name: str | None) -> list[operators.Candidate]:
+    shared_scopes = []
+    original_tag = mutant_runner.tag
+
+    def tag(tree: ast.Module) -> dict[int, tuple[str, ...]]:
+        scopes = original_tag(tree)
+        shared_scopes.append(scopes)
+        return scopes
+
+    monkeypatch.setattr(mutant_runner, "tag", tag)
+
+    def scan(
+        _tree: ast.Module, module_name: str | None, *, scopes: dict[int, tuple[str, ...]]
+    ) -> list[operators.Candidate]:
+        assert scopes is shared_scopes[-1]
         assert module_name is not None
         if module_name == "sample_families":
             return []
@@ -1666,7 +1679,20 @@ def test_sample_reports_operator_families_a_smaller_budget_cannot_represent(
     (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
     monkeypatch.syspath_prepend(tmp_path)
 
-    def scan(_tree: ast.Module, _module_name: str | None) -> list[operators.Candidate]:
+    shared_scopes = []
+    original_tag = mutant_runner.tag
+
+    def tag(tree: ast.Module) -> dict[int, tuple[str, ...]]:
+        scopes = original_tag(tree)
+        shared_scopes.append(scopes)
+        return scopes
+
+    monkeypatch.setattr(mutant_runner, "tag", tag)
+
+    def scan(
+        _tree: ast.Module, _module_name: str | None, *, scopes: dict[int, tuple[str, ...]]
+    ) -> list[operators.Candidate]:
+        assert scopes is shared_scopes[-1]
         return [
             operators.Candidate("cedar.flip-effect", "rare", 1, ("check",)),
             operators.Candidate("guard.never-fires", "common one", 2, ("check",)),

@@ -1136,7 +1136,8 @@ def _bind_payload(
         if encoded is None:
             payload += struct.pack("!i", -1)
         else:
-            payload += struct.pack("!I", len(encoded)) + encoded
+            payload += struct.pack("!I", len(encoded))
+            payload.extend(encoded)
     if binary_results:
         payload += struct.pack("!HH", 1, 1)
     else:
@@ -1169,7 +1170,7 @@ def _build_cold_query_packet(
     if mode not in {"execute", "fetch", "fetchrow", "fetchval"}:
         raise ValueError(f"unknown PostgreSQL result mode {mode!r}")
     parse = _cstring(statement_name) + _cstring(sql) + struct.pack("!H", len(args))
-    parse += b"".join(struct.pack("!I", 0) for _ in args)
+    parse += b"\x00\x00\x00\x00" * len(args)
     messages = [
         _message(b"P", parse),
         _message(b"D", b"S" + _cstring(statement_name)),

@@ -60,6 +60,7 @@ import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from urllib.parse import quote
 
@@ -717,7 +718,7 @@ class MemoryObjectStore:
     """
 
     def __init__(self, *, url_secret: bytes | None = None) -> None:
-        self._objects: dict[str, tuple[bytes, str | None]] = {}
+        self._objects: dict[str, tuple[bytes, ObjectStat]] = {}
         self._secret = _checked_secret(url_secret) or os.urandom(32)
 
     async def read(self, key: str) -> bytes:
@@ -748,10 +749,8 @@ class MemoryObjectStore:
         """
         range = _checked_range(range)
         data = await self.read(key)
-        if range is not None:
-            start, end = range
-            data = data[start : end + 1]
-        for chunk in _iter_chunks(data):
+        start, stop = (0, len(data)) if range is None else (range[0], range[1] + 1)
+        for chunk in _iter_chunks(data, start, stop):
             yield chunk
 
     async def write(
@@ -766,8 +765,9 @@ class MemoryObjectStore:
         """
         key = normalize_key(key)
         stored = bytes(data)
-        self._objects[key] = (stored, content_type)
-        return ObjectStat(key, len(stored), _etag(stored), None, content_type)
+        metadata = ObjectStat(key, len(stored), _etag(stored), None, content_type)
+        self._objects[key] = (stored, metadata)
+        return metadata
 
     async def write_stream(
         self,
@@ -777,12 +777,13 @@ class MemoryObjectStore:
         content_type: str | None = None,
     ) -> ObjectStat:
         """Drain `chunks` and store the result. Buffers the whole object."""
-        buf = bytearray()
+        buf = BytesIO()
         async for chunk in chunks:
-            buf += chunk
-        # `write` freezes what it stores, so handing it the `bytearray` costs
-        # one copy rather than two.
-        return await self.write(key, buf, content_type=content_type)
+            try:
+                buf.write(chunk)
+            except BufferError:
+                raise TypeError(f"can't concat {type(chunk).__name__} to bytearray") from None
+        return await self.write(key, buf.getvalue(), content_type=content_type)
 
     async def stat(self, key: str) -> ObjectStat:
         """Metadata for one object, with `last_modified` always `None`.
@@ -796,10 +797,12 @@ class MemoryObjectStore:
         """
         key = normalize_key(key)
         try:
-            data, ct = self._objects[key]
+            data, metadata = self._objects[key]
         except KeyError:
             raise ObjectError(f"no such object: {key!r}") from None
-        return ObjectStat(key, len(data), _etag(data), None, ct)
+        if type(data) is bytes:
+            return metadata
+        return ObjectStat(key, len(data), _etag(data), None, metadata.content_type)
 
     async def exists(self, key: str) -> bool:
         """Whether `key` is present.
@@ -825,8 +828,11 @@ class MemoryObjectStore:
         prefix = _checked_listing_value("prefix", prefix)
         for key in sorted(self._objects):
             if key.startswith(prefix):
-                data, ct = self._objects[key]
-                yield ObjectStat(key, len(data), _etag(data), None, ct)
+                data, metadata = self._objects[key]
+                if type(data) is bytes:
+                    yield metadata
+                else:
+                    yield ObjectStat(key, len(data), _etag(data), None, metadata.content_type)
 
     async def delete(self, key: str) -> None:
         """Remove `key`. Not an error when it is already gone."""
@@ -836,7 +842,7 @@ class MemoryObjectStore:
         stored = self._objects.get(normalize_key(key))
         if stored is None:
             return None
-        data, _content_type = stored
+        data, _metadata = stored
         return data, _version_etag(data)
 
     async def _upload_compare_and_swap(
@@ -853,8 +859,9 @@ class MemoryObjectStore:
         if current_etag != expected_etag:
             return None
         stored = bytes(data)
-        self._objects[key] = stored, content_type
-        return ObjectStat(key, len(stored), _etag(stored), None, content_type)
+        metadata = ObjectStat(key, len(stored), _etag(stored), None, content_type)
+        self._objects[key] = stored, metadata
+        return metadata
 
     async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
         key = normalize_key(key)
@@ -912,9 +919,10 @@ class MemoryObjectStore:
         return ObjectPath(self, key)
 
 
-def _iter_chunks(data: bytes) -> Iterable[bytes]:
-    for offset in range(0, len(data), _CHUNK):
-        yield data[offset : offset + _CHUNK]
+def _iter_chunks(data: bytes, start: int = 0, stop: int | None = None) -> Iterable[bytes]:
+    stop = len(data) if stop is None else min(stop, len(data))
+    for offset in range(start, stop, _CHUNK):
+        yield data[offset : min(offset + _CHUNK, stop)]
 
 
 def _etag(data: bytes) -> str:
@@ -1880,6 +1888,7 @@ class S3ObjectStore:
         self._region = region
         self._ak = access_key
         self._sk = secret_key
+        self._signing_keys = _sigv4._SigningKeyCache()
         self._token = session_token
         self._service = service
         self._scheme = scheme
@@ -1946,6 +1955,7 @@ class S3ObjectStore:
             headers=extra or None,
             session_token=self._token,
             _prevalidated=True,
+            _key_cache=self._signing_keys,
         )
         # `extra` goes on the wire as well as into the signature: a header S3
         # sees but the signature does not cover (or the reverse) is a 403 whose
@@ -2061,6 +2071,7 @@ class S3ObjectStore:
             headers={"range": rng},
             session_token=self._token,
             _prevalidated=True,
+            _key_cache=self._signing_keys,
         )
         headers = {"host": self._host, "range": rng, **signed}
         wire = tuple(
@@ -2494,6 +2505,7 @@ class S3ObjectStore:
             expires=expires,
             session_token=self._token,
             scheme=self._scheme,
+            _key_cache=self._signing_keys,
         )
 
     def path(self, key: str) -> ObjectPath:

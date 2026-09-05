@@ -531,6 +531,7 @@ async def _json_sse(
     buffer = bytearray()
     data: list[bytes] = []
     total = 0
+    search_start = 0
     try:
         async for chunk in _body_chunks(body):
             total += len(chunk)
@@ -538,11 +539,13 @@ async def _json_sse(
                 raise BackplaneError(f"{provider} response exceeds {maximum} bytes")
             buffer.extend(chunk)
             while True:
-                newline = buffer.find(b"\n")
+                newline = buffer.find(b"\n", search_start)
                 if newline < 0:
+                    search_start = len(buffer)
                     break
                 line = bytes(buffer[:newline]).rstrip(b"\r")
                 del buffer[: newline + 1]
+                search_start = 0
                 if not line:
                     if data:
                         # complexity: allow SL-LINEAR-METHOD -- each data line is joined once

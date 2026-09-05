@@ -1467,8 +1467,8 @@ static PyObject *
 series_chart_path(const double *values, const unsigned char *present,
                   Py_ssize_t count, const Py_ssize_t *indices,
                   Py_ssize_t index_count, const unsigned char *index_plan,
-                  const char *value_text, const size_t *value_offsets,
-                  const unsigned char *value_lengths)
+                  const char *value_text, const void *value_offsets,
+                  int value_offsets_32, const unsigned char *value_lengths)
 {
     Py_ssize_t points = indices != NULL ? index_count : count;
     if (points > PY_SSIZE_T_MAX / 37) return PyErr_NoMemory();
@@ -1496,8 +1496,11 @@ series_chart_path(const double *values, const unsigned char *present,
         Py_ssize_t value_length;
         if (value_lengths != NULL) {
             value_length = value_lengths[index];
+            size_t value_offset = value_offsets_32
+                ? ((const uint32_t *)value_offsets)[index]
+                : ((const size_t *)value_offsets)[index];
             memcpy(point + index_length + 2,
-                   value_text + value_offsets[index], (size_t)value_length);
+                   value_text + value_offset, (size_t)value_length);
         }
         else value_length = series_format_double(
             point + index_length + 2, values[index]);
@@ -2022,7 +2025,7 @@ series_chart_project(Py_ssize_t bucket_count, Py_ssize_t series_count,
             if (selected == NULL && bucket_count != 0) goto error;
             PyObject *path = series_chart_path(
                 row_values, row_present, bucket_count, selected,
-                selected_count, NULL, NULL, NULL, NULL);
+                selected_count, NULL, NULL, NULL, 0, NULL);
             PyObject *axis = tick_text ? NULL : series_chart_ticks(
                 minimum, maximum, tick_target);
             int tick_error = tick_text ? series_chart_write_ticks(
@@ -2071,7 +2074,7 @@ series_chart_project(Py_ssize_t bucket_count, Py_ssize_t series_count,
                     (size_t)slot * (size_t)bucket_count : NULL,
                 bucket_count != 0 ? present +
                     (size_t)slot * (size_t)bucket_count : NULL,
-                bucket_count, NULL, 0, NULL, NULL, NULL, NULL);
+                bucket_count, NULL, 0, NULL, NULL, NULL, 0, NULL);
             if (path == NULL) goto error;
             PyTuple_SET_ITEM(paths, output, path);
         }
@@ -2126,11 +2129,9 @@ typedef struct {
     unsigned char *present;
     unsigned char *index_plan;
     char *value_text;
-    size_t *value_offsets;
+    void *value_offsets;
+    int value_offsets_32;
     unsigned char *value_lengths;
-    char *path_text;
-    size_t *path_offsets;
-    double *prefix;
     double *bounds;
     PyObject *keys;
 } SeriesData;
@@ -2148,11 +2149,16 @@ typedef struct {
     size_t *selected_offsets;
     Py_ssize_t *selected;
     double *bounds;
+    char *full_path_text;
+    size_t *full_path_offsets;
     size_t joined_path_size;
 } SeriesChartPlan;
 
 static size_t series_chart_planned_path_size(
     const SeriesData *data, size_t row_offset,
+    const Py_ssize_t *indices, Py_ssize_t index_count);
+static size_t series_chart_write_planned_path(
+    char *buffer, const SeriesData *data, size_t row_offset,
     const Py_ssize_t *indices, Py_ssize_t index_count);
 static PyObject *series_chart_plan_build_joined_path(SeriesChartPlan *plan);
 static int series_chart_write_ticks(
@@ -2169,9 +2175,6 @@ series_data_free(SeriesData *data)
     PyMem_Free(data->value_text);
     PyMem_Free(data->value_offsets);
     PyMem_Free(data->value_lengths);
-    PyMem_Free(data->path_text);
-    PyMem_Free(data->path_offsets);
-    PyMem_Free(data->prefix);
     PyMem_Free(data->bounds);
     Py_XDECREF(data->keys);
     PyMem_Free(data);
@@ -2194,6 +2197,22 @@ series_data_get(PyObject *capsule)
     return PyCapsule_GetPointer(capsule, SERIES_DATA_CAPSULE_NAME);
 }
 
+static inline size_t
+series_data_value_offset(const SeriesData *data, size_t cell)
+{
+    return data->value_offsets_32
+        ? ((const uint32_t *)data->value_offsets)[cell]
+        : ((const size_t *)data->value_offsets)[cell];
+}
+
+static inline const void *
+series_data_value_offsets_at(const SeriesData *data, size_t cell)
+{
+    return data->value_offsets_32
+        ? (const void *)((const uint32_t *)data->value_offsets + cell)
+        : (const void *)((const size_t *)data->value_offsets + cell);
+}
+
 static void
 series_chart_plan_free(SeriesChartPlan *plan)
 {
@@ -2203,6 +2222,8 @@ series_chart_plan_free(SeriesChartPlan *plan)
     PyMem_Free(plan->selected_offsets);
     PyMem_Free(plan->selected);
     PyMem_Free(plan->bounds);
+    PyMem_Free(plan->full_path_text);
+    PyMem_Free(plan->full_path_offsets);
     PyMem_Free(plan);
 }
 
@@ -2337,23 +2358,274 @@ series_data_overlay(SeriesData *data, SeriesMeasure *measures,
     return 0;
 }
 
+static SeriesData *
+series_data_allocate(Py_ssize_t bucket_count, Py_ssize_t series_count,
+                     Py_ssize_t measure_count, size_t *cell_count_out,
+                     SeriesMeasure **measures_out)
+{
+    if (series_count > PY_SSIZE_T_MAX / measure_count) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t row_count = series_count * measure_count;
+    if (bucket_count != 0 &&
+        (size_t)row_count > SIZE_MAX / (size_t)bucket_count) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    size_t cell_count = (size_t)row_count * (size_t)bucket_count;
+    if (cell_count > SIZE_MAX / sizeof(double) ||
+        (size_t)row_count > SIZE_MAX / (2 * sizeof(double)) ||
+        cell_count > SIZE_MAX / sizeof(size_t) ||
+        (size_t)bucket_count > SIZE_MAX / 21 ||
+        (size_t)measure_count > SIZE_MAX / sizeof(SeriesMeasure)) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    SeriesData *data = PyMem_Calloc(1, sizeof(*data));
+    SeriesMeasure *measures = PyMem_Malloc(
+        (size_t)measure_count * sizeof(*measures));
+    if (data == NULL || measures == NULL) {
+        PyMem_Free(data);
+        PyMem_Free(measures);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    data->bucket_count = bucket_count;
+    data->series_count = series_count;
+    data->measure_count = measure_count;
+    data->values = cell_count != 0
+        ? PyMem_Malloc(cell_count * sizeof(*data->values)) : NULL;
+    data->present = cell_count != 0 ? PyMem_Malloc(cell_count) : NULL;
+    data->index_plan = bucket_count != 0
+        ? PyMem_Malloc((size_t)bucket_count * 21) : NULL;
+    data->bounds = row_count != 0
+        ? PyMem_Malloc((size_t)row_count * 2 * sizeof(*data->bounds)) : NULL;
+    data->keys = PyTuple_New(series_count);
+    if ((cell_count != 0 && (data->values == NULL || data->present == NULL)) ||
+        (row_count != 0 && data->bounds == NULL) ||
+        (bucket_count != 0 && data->index_plan == NULL) ||
+        data->keys == NULL) {
+        PyMem_Free(measures);
+        series_data_free(data);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+        unsigned char *planned = data->index_plan + (size_t)bucket * 21;
+        planned[0] = (unsigned char)series_format_index(
+            (char *)planned + 1, bucket);
+    }
+    *cell_count_out = cell_count;
+    *measures_out = measures;
+    return data;
+}
+
+static int
+series_data_overlay_rows(SeriesData *data, SeriesMeasure *measures,
+                         PyObject *buckets, PyObject *series)
+{
+    Py_ssize_t bucket_count = data->bucket_count;
+    Py_ssize_t measure_count = data->measure_count;
+    PyObject *bucket_lookup = PyDict_New();
+    PyObject *series_keys = PySet_New(NULL);
+    unsigned char *seen = bucket_count != 0
+        ? PyMem_Malloc((size_t)bucket_count) : NULL;
+    if (bucket_lookup == NULL || series_keys == NULL ||
+        (bucket_count != 0 && seen == NULL)) {
+        Py_XDECREF(bucket_lookup);
+        Py_XDECREF(series_keys);
+        PyMem_Free(seen);
+        if (!PyErr_Occurred()) PyErr_NoMemory();
+        return -1;
+    }
+
+    PyObject **bucket_items = PySequence_Fast_ITEMS(buckets);
+    for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
+        int contains = PyDict_Contains(bucket_lookup, bucket_items[bucket]);
+        if (contains < 0) goto error;
+        if (contains) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "series data buckets must be unique; duplicate bucket %R",
+                bucket_items[bucket]);
+            goto error;
+        }
+        PyObject *index = PyLong_FromSsize_t(bucket);
+        if (index == NULL ||
+            PyDict_SetItem(bucket_lookup, bucket_items[bucket], index) < 0) {
+            Py_XDECREF(index);
+            goto error;
+        }
+        Py_DECREF(index);
+    }
+
+    PyObject **series_items = PySequence_Fast_ITEMS(series);
+    for (Py_ssize_t series_index = 0;
+         series_index < data->series_count; series_index++) {
+        PyObject *pair = PySequence_Fast(
+            series_items[series_index],
+            "series data rows must contain (key, readings) pairs");
+        if (pair == NULL) goto error;
+        if (PySequence_Fast_GET_SIZE(pair) != 2) {
+            Py_DECREF(pair);
+            PyErr_SetString(
+                PyExc_ValueError,
+                "series data rows must contain (key, readings) pairs");
+            goto error;
+        }
+        PyObject **pair_items = PySequence_Fast_ITEMS(pair);
+        PyObject *key = pair_items[0];
+        int contains = PySet_Contains(series_keys, key);
+        if (contains < 0) {
+            Py_DECREF(pair);
+            goto error;
+        }
+        if (contains) {
+            PyErr_Format(PyExc_ValueError,
+                         "series data rows contain duplicate series key %R", key);
+            Py_DECREF(pair);
+            goto error;
+        }
+        if (PySet_Add(series_keys, key) < 0) {
+            Py_DECREF(pair);
+            goto error;
+        }
+        PyTuple_SET_ITEM(data->keys, series_index, Py_NewRef(key));
+        PyObject *iterator = PyObject_GetIter(pair_items[1]);
+        Py_DECREF(pair);
+        if (iterator == NULL) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "series %R readings must be an iterable of (bucket, measure dict) pairs",
+                key);
+            goto error;
+        }
+        if (bucket_count != 0) memset(seen, 0, (size_t)bucket_count);
+
+        PyObject *row_source;
+        while ((row_source = PyIter_Next(iterator)) != NULL) {
+            PyObject *row = PySequence_Fast(
+                row_source,
+                "series readings must contain (bucket, measure dict) pairs");
+            Py_DECREF(row_source);
+            if (row == NULL) {
+                Py_DECREF(iterator);
+                goto error;
+            }
+            if (PySequence_Fast_GET_SIZE(row) != 2) {
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                PyErr_SetString(
+                    PyExc_ValueError,
+                    "series readings must contain (bucket, measure dict) pairs");
+                goto error;
+            }
+            PyObject **row_items = PySequence_Fast_ITEMS(row);
+            PyObject *bucket_key = row_items[0];
+            PyObject *values_by_measure = row_items[1];
+            PyObject *bucket_index_object = NULL;
+            int found = PyDict_GetItemRef(
+                bucket_lookup, bucket_key, &bucket_index_object);
+            if (found < 0) {
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                goto error;
+            }
+            if (found == 0) {
+                PyErr_Format(
+                    PyExc_ValueError,
+                    "series %R row bucket %R is outside the declared bucket run",
+                    key, bucket_key);
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                goto error;
+            }
+            Py_ssize_t bucket = PyLong_AsSsize_t(bucket_index_object);
+            Py_DECREF(bucket_index_object);
+            if (bucket == -1 && PyErr_Occurred()) {
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                goto error;
+            }
+            if (seen[bucket]) {
+                PyErr_Format(
+                    PyExc_ValueError,
+                    "series %R readings contain duplicate bucket %R",
+                    key, bucket_key);
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                goto error;
+            }
+            seen[bucket] = 1;
+            if (!PyDict_Check(values_by_measure)) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "series bucket %R values must be a measure dict, got %.200s",
+                    bucket_key, Py_TYPE(values_by_measure)->tp_name);
+                Py_DECREF(row);
+                Py_DECREF(iterator);
+                goto error;
+            }
+            for (Py_ssize_t measure = 0; measure < measure_count; measure++) {
+                PyObject *value = PyDict_GetItemWithError(
+                    values_by_measure, measures[measure].name);
+                if (value == NULL) {
+                    if (PyErr_Occurred()) {
+                        Py_DECREF(row);
+                        Py_DECREF(iterator);
+                        goto error;
+                    }
+                    continue;
+                }
+                size_t cell = ((size_t)series_index * (size_t)measure_count +
+                               (size_t)measure) * (size_t)bucket_count +
+                              (size_t)bucket;
+                if (value == Py_None) {
+                    data->values[cell] = 0.0;
+                    data->present[cell] = 0;
+                    continue;
+                }
+                double number = series_as_double(value);
+                if (PyErr_Occurred() || !isfinite(number)) {
+                    if (!PyErr_Occurred()) PyErr_Format(
+                        PyExc_ValueError,
+                        "series chart value at bucket %zd must be finite", bucket);
+                    Py_DECREF(row);
+                    Py_DECREF(iterator);
+                    goto error;
+                }
+                data->values[cell] = number;
+                data->present[cell] = 1;
+            }
+            Py_DECREF(row);
+        }
+        Py_DECREF(iterator);
+        if (PyErr_Occurred()) goto error;
+    }
+
+    Py_DECREF(bucket_lookup);
+    Py_DECREF(series_keys);
+    PyMem_Free(seen);
+    return 0;
+
+error:
+    Py_DECREF(bucket_lookup);
+    Py_DECREF(series_keys);
+    PyMem_Free(seen);
+    return -1;
+}
+
 SERIES_ALWAYS_INLINE void
 series_data_aggregate(SeriesData *data)
 {
     Py_ssize_t bucket_count = data->bucket_count;
     Py_ssize_t row_count = data->series_count * data->measure_count;
     double *values = data->values;
-    double *prefixes = data->prefix;
     double *bounds = data->bounds;
     for (Py_ssize_t row = 0; row < row_count; row++) {
         size_t cell_offset = (size_t)row * (size_t)bucket_count;
-        double *prefix = prefixes +
-            (size_t)row * ((size_t)bucket_count + 1);
-        prefix[0] = 0.0;
-        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
-            prefix[bucket + 1] = prefix[bucket] +
-                values[cell_offset + (size_t)bucket];
-        }
         series_chart_minmax(
             values + cell_offset, bucket_count,
             &bounds[(size_t)row * 2], &bounds[(size_t)row * 2 + 1]);
@@ -2365,18 +2637,14 @@ series_data_format_values(SeriesData *data, size_t cell_count)
 {
     double *values = data->values;
     unsigned char *presence = data->present;
-    data->value_offsets = cell_count != 0
-        ? PyMem_Malloc(cell_count * sizeof(*data->value_offsets)) : NULL;
     data->value_lengths = cell_count != 0 ? PyMem_Malloc(cell_count) : NULL;
-    if (cell_count != 0 &&
-        (data->value_offsets == NULL || data->value_lengths == NULL)) {
+    if (cell_count != 0 && data->value_lengths == NULL) {
         PyErr_NoMemory();
         return -1;
     }
     size_t text_size = 0;
     char formatted[32];
     for (size_t cell = 0; cell < cell_count; cell++) {
-        data->value_offsets[cell] = text_size;
         if (!presence[cell]) {
             data->value_lengths[cell] = 0;
             continue;
@@ -2395,81 +2663,26 @@ series_data_format_values(SeriesData *data, size_t cell_count)
         data->value_lengths[cell] = (unsigned char)length;
         text_size += (size_t)length;
     }
+    data->value_offsets_32 = text_size <= UINT32_MAX;
+    size_t offset_size = data->value_offsets_32
+        ? sizeof(uint32_t) : sizeof(size_t);
+    data->value_offsets = cell_count != 0
+        ? PyMem_Malloc(cell_count * offset_size) : NULL;
     data->value_text = text_size != 0 ? PyMem_Malloc(text_size) : NULL;
-    if (text_size != 0 && data->value_text == NULL) {
+    if ((cell_count != 0 && data->value_offsets == NULL) ||
+        (text_size != 0 && data->value_text == NULL)) {
         PyErr_NoMemory();
         return -1;
     }
+    size_t offset = 0;
     for (size_t cell = 0; cell < cell_count; cell++) {
-        if (!presence[cell]) continue;
-        if (series_format_double(
-                data->value_text + data->value_offsets[cell],
-                values[cell]) < 0) return -1;
-    }
-    return 0;
-}
-
-SERIES_ALWAYS_INLINE int
-series_data_format_paths(SeriesData *data)
-{
-    Py_ssize_t bucket_count = data->bucket_count;
-    Py_ssize_t row_count = data->series_count * data->measure_count;
-    if ((size_t)row_count > SIZE_MAX / sizeof(*data->path_offsets) - 1) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    data->path_offsets = PyMem_Malloc(
-        ((size_t)row_count + 1) * sizeof(*data->path_offsets));
-    if (data->path_offsets == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    size_t path_size = 0;
-    for (Py_ssize_t row = 0; row < row_count; row++) {
-        data->path_offsets[row] = path_size;
-        size_t offset = (size_t)row * (size_t)bucket_count;
-        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
-            size_t cell = offset + (size_t)bucket;
-            if (!data->present[cell]) continue;
-            size_t point_size = 2 +
-                data->index_plan[(size_t)bucket * 21] +
-                data->value_lengths[cell];
-            if (point_size > SIZE_MAX - path_size) {
-                PyErr_NoMemory();
-                return -1;
-            }
-            path_size += point_size;
-        }
-    }
-    data->path_offsets[row_count] = path_size;
-    data->path_text = path_size != 0 ? PyMem_Malloc(path_size) : NULL;
-    if (path_size != 0 && data->path_text == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    for (Py_ssize_t row = 0; row < row_count; row++) {
-        size_t written = data->path_offsets[row];
-        size_t offset = (size_t)row * (size_t)bucket_count;
-        int open = 0;
-        for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
-            size_t cell = offset + (size_t)bucket;
-            if (!data->present[cell]) {
-                open = 0;
-                continue;
-            }
-            const unsigned char *planned =
-                data->index_plan + (size_t)bucket * 21;
-            data->path_text[written++] = open ? 'L' : 'M';
-            memcpy(data->path_text + written, planned + 1, planned[0]);
-            written += planned[0];
-            data->path_text[written++] = ',';
-            memcpy(
-                data->path_text + written,
-                data->value_text + data->value_offsets[cell],
-                data->value_lengths[cell]);
-            written += data->value_lengths[cell];
-            open = 1;
-        }
+        if (data->value_offsets_32)
+            ((uint32_t *)data->value_offsets)[cell] = (uint32_t)offset;
+        else ((size_t *)data->value_offsets)[cell] = offset;
+        if (presence[cell] &&
+            series_format_double(data->value_text + offset, values[cell]) < 0)
+            return -1;
+        offset += data->value_lengths[cell];
     }
     return 0;
 }
@@ -2498,76 +2711,19 @@ wreath_series_data(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "series data needs at least one measure");
         return NULL;
     }
-    if (series_count > PY_SSIZE_T_MAX / measure_count) {
+    size_t cell_count;
+    SeriesMeasure *measures;
+    SeriesData *data = series_data_allocate(
+        bucket_count, series_count, measure_count, &cell_count, &measures);
+    if (data == NULL) {
         Py_DECREF(buckets);
-        return PyErr_NoMemory();
-    }
-    Py_ssize_t row_count = series_count * measure_count;
-    if (bucket_count != 0 &&
-        (size_t)row_count > SIZE_MAX / (size_t)bucket_count) {
-        Py_DECREF(buckets);
-        return PyErr_NoMemory();
-    }
-    size_t cell_count = (size_t)row_count * (size_t)bucket_count;
-    if ((size_t)row_count != 0 &&
-        (size_t)bucket_count + 1 > SIZE_MAX / (size_t)row_count) {
-        Py_DECREF(buckets);
-        return PyErr_NoMemory();
-    }
-    size_t prefix_count = (size_t)row_count * ((size_t)bucket_count + 1);
-    if (cell_count > SIZE_MAX / sizeof(double) ||
-        prefix_count > SIZE_MAX / sizeof(double) ||
-        (size_t)row_count > SIZE_MAX / (2 * sizeof(double)) ||
-        cell_count > SIZE_MAX / sizeof(size_t) ||
-        (size_t)bucket_count > SIZE_MAX / 21 ||
-        (size_t)measure_count > SIZE_MAX / sizeof(SeriesMeasure)) {
-        Py_DECREF(buckets);
-        return PyErr_NoMemory();
-    }
-
-    SeriesData *data = PyMem_Calloc(1, sizeof(*data));
-    SeriesMeasure *measures = PyMem_Malloc(
-        (size_t)measure_count * sizeof(*measures));
-    if (data == NULL || measures == NULL) {
-        PyMem_Free(data);
-        PyMem_Free(measures);
-        Py_DECREF(buckets);
-        return PyErr_NoMemory();
-    }
-    data->bucket_count = bucket_count;
-    data->series_count = series_count;
-    data->measure_count = measure_count;
-    data->values = cell_count != 0
-        ? PyMem_Malloc(cell_count * sizeof(*data->values)) : NULL;
-    data->present = cell_count != 0 ? PyMem_Malloc(cell_count) : NULL;
-    data->index_plan = bucket_count != 0
-        ? PyMem_Malloc((size_t)bucket_count * 21) : NULL;
-    data->prefix = prefix_count != 0
-        ? PyMem_Malloc(prefix_count * sizeof(*data->prefix)) : NULL;
-    data->bounds = row_count != 0
-        ? PyMem_Malloc((size_t)row_count * 2 * sizeof(*data->bounds)) : NULL;
-    data->keys = PyTuple_New(series_count);
-    if ((cell_count != 0 && (data->values == NULL || data->present == NULL)) ||
-        (prefix_count != 0 && data->prefix == NULL) ||
-        (row_count != 0 && data->bounds == NULL) ||
-        (bucket_count != 0 && data->index_plan == NULL) ||
-        data->keys == NULL) {
-        PyMem_Free(measures);
-        Py_DECREF(buckets);
-        series_data_free(data);
-        return PyErr_NoMemory();
-    }
-    for (Py_ssize_t bucket = 0; bucket < bucket_count; bucket++) {
-        unsigned char *planned = data->index_plan + (size_t)bucket * 21;
-        planned[0] = (unsigned char)series_format_index(
-            (char *)planned + 1, bucket);
+        return NULL;
     }
 
     if (series_data_fill_defaults(data, measures, fills) < 0 ||
         series_data_overlay(data, measures, buckets, sparse) < 0) goto error;
     series_data_aggregate(data);
-    if (series_data_format_values(data, cell_count) < 0 ||
-        series_data_format_paths(data) < 0) goto error;
+    if (series_data_format_values(data, cell_count) < 0) goto error;
     PyMem_Free(measures);
     Py_DECREF(buckets);
     return PyCapsule_New(data, SERIES_DATA_CAPSULE_NAME, series_data_destroy);
@@ -2576,6 +2732,60 @@ error:
     PyMem_Free(measures);
     Py_DECREF(buckets);
     series_data_free(data);
+    return NULL;
+}
+
+PyObject *
+wreath_series_data_rows(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *bucket_source, *series_source, *fills;
+    if (!PyArg_ParseTuple(
+            args, "OOO:series_data_rows", &bucket_source, &series_source,
+            &fills)) return NULL;
+    if (!PyDict_Check(fills)) {
+        PyErr_SetString(PyExc_TypeError, "series data fills must be a dict");
+        return NULL;
+    }
+    if (PyDict_GET_SIZE(fills) == 0) {
+        PyErr_SetString(PyExc_ValueError, "series data needs at least one measure");
+        return NULL;
+    }
+    PyObject *buckets = PySequence_Fast(
+        bucket_source, "series data buckets must be an iterable dense run");
+    if (buckets == NULL) return NULL;
+    PyObject *series = PySequence_Fast(
+        series_source,
+        "series data rows must be an iterable of (key, readings) pairs");
+    if (series == NULL) {
+        Py_DECREF(buckets);
+        return NULL;
+    }
+    Py_ssize_t bucket_count = PySequence_Fast_GET_SIZE(buckets);
+    Py_ssize_t series_count = PySequence_Fast_GET_SIZE(series);
+    Py_ssize_t measure_count = PyDict_GET_SIZE(fills);
+    size_t cell_count;
+    SeriesMeasure *measures;
+    SeriesData *data = series_data_allocate(
+        bucket_count, series_count, measure_count, &cell_count, &measures);
+    if (data == NULL) goto error_without_data;
+
+    if (series_data_fill_defaults(data, measures, fills) < 0 ||
+        series_data_overlay_rows(data, measures, buckets, series) < 0) {
+        goto error;
+    }
+    series_data_aggregate(data);
+    if (series_data_format_values(data, cell_count) < 0) goto error;
+    PyMem_Free(measures);
+    Py_DECREF(series);
+    Py_DECREF(buckets);
+    return PyCapsule_New(data, SERIES_DATA_CAPSULE_NAME, series_data_destroy);
+
+error:
+    PyMem_Free(measures);
+    series_data_free(data);
+error_without_data:
+    Py_DECREF(series);
+    Py_DECREF(buckets);
     return NULL;
 }
 
@@ -2613,9 +2823,10 @@ series_chart_plan_compile(
     Py_ssize_t output_count = downsample_count + full_count;
     Py_ssize_t workspace_count = threshold < data->bucket_count
         ? threshold : data->bucket_count;
-    if (downsample_count == PY_SSIZE_T_MAX ||
+    if (downsample_count == PY_SSIZE_T_MAX || full_count == PY_SSIZE_T_MAX ||
         (size_t)output_count > SIZE_MAX / sizeof(Py_ssize_t) ||
         (size_t)(downsample_count + 1) > SIZE_MAX / sizeof(size_t) ||
+        (size_t)(full_count + 1) > SIZE_MAX / sizeof(size_t) ||
         (size_t)downsample_count > SIZE_MAX / (2 * sizeof(double)) ||
         (size_t)workspace_count > SIZE_MAX / sizeof(Py_ssize_t) ||
         (workspace_count != 0 && (size_t)downsample_count >
@@ -2643,10 +2854,13 @@ series_chart_plan_compile(
     plan->bounds = downsample_count != 0
         ? PyMem_Malloc((size_t)downsample_count * 2 * sizeof(*plan->bounds))
         : NULL;
+    plan->full_path_offsets = PyMem_Malloc(
+        (size_t)(full_count + 1) * sizeof(*plan->full_path_offsets));
     if ((output_count != 0 && plan->rows == NULL) ||
         plan->selected_offsets == NULL ||
         (selected_capacity != 0 && plan->selected == NULL) ||
-        (downsample_count != 0 && plan->bounds == NULL)) {
+        (downsample_count != 0 && plan->bounds == NULL) ||
+        plan->full_path_offsets == NULL) {
         PyErr_NoMemory();
         goto plan_error;
     }
@@ -2676,8 +2890,7 @@ series_chart_plan_compile(
         double maximum;
         Py_ssize_t *selected = series_chart_lttb(
             data->bucket_count != 0 ? data->values + offset : NULL,
-            data->prefix +
-                (size_t)row * ((size_t)data->bucket_count + 1),
+            NULL,
             data->bounds + (size_t)row * 2,
             data->bucket_count, threshold,
             selected_capacity != 0 ? plan->selected + selected_used : NULL,
@@ -2697,6 +2910,7 @@ series_chart_plan_compile(
         plan->bounds[(size_t)output * 2 + 1] = maximum;
     }
     plan->selected_offsets[downsample_count] = selected_used;
+    size_t full_path_size = 0;
     for (Py_ssize_t output = 0; output < full_count; output++) {
         Py_ssize_t row = PyLong_AsSsize_t(full_items[output]);
         if (row == -1 && PyErr_Occurred()) goto plan_error;
@@ -2707,12 +2921,39 @@ series_chart_plan_compile(
             goto plan_error;
         }
         plan->rows[downsample_count + output] = row;
-        size_t path_size = data->path_offsets[row + 1] - data->path_offsets[row];
-        if (path_size > SIZE_MAX - plan->joined_path_size) {
+        plan->full_path_offsets[output] = full_path_size;
+        size_t path_size = series_chart_planned_path_size(
+            data, (size_t)row * (size_t)data->bucket_count,
+            NULL, data->bucket_count);
+        if (path_size > SIZE_MAX - plan->joined_path_size ||
+            path_size > SIZE_MAX - full_path_size) {
             PyErr_NoMemory();
             goto plan_error;
         }
         plan->joined_path_size += path_size;
+        full_path_size += path_size;
+    }
+    plan->full_path_offsets[full_count] = full_path_size;
+    plan->full_path_text = full_path_size != 0
+        ? PyMem_Malloc(full_path_size) : NULL;
+    if (full_path_size != 0 && plan->full_path_text == NULL) {
+        PyErr_NoMemory();
+        goto plan_error;
+    }
+    for (Py_ssize_t output = 0; output < full_count; output++) {
+        Py_ssize_t row = plan->rows[downsample_count + output];
+        size_t written = series_chart_write_planned_path(
+            full_path_size != 0
+                ? plan->full_path_text + plan->full_path_offsets[output] : NULL,
+            data,
+            (size_t)row * (size_t)data->bucket_count,
+            NULL, data->bucket_count);
+        if (written != plan->full_path_offsets[output + 1] -
+                       plan->full_path_offsets[output]) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "series chart full path size changed while writing");
+            goto plan_error;
+        }
     }
     Py_DECREF(downsample);
     Py_DECREF(full);
@@ -2754,7 +2995,9 @@ series_chart_plan_render(SeriesChartPlan *plan, int tick_text)
                 ? plan->selected + selected_start : NULL,
             (Py_ssize_t)(selected_end - selected_start), data->index_plan,
             data->value_text,
-            data->bucket_count != 0 ? data->value_offsets + offset : NULL,
+            data->bucket_count != 0
+                ? series_data_value_offsets_at(data, offset) : NULL,
+            data->value_offsets_32,
             data->bucket_count != 0 ? data->value_lengths + offset : NULL);
         double minimum = plan->bounds[(size_t)output * 2];
         double maximum = plan->bounds[(size_t)output * 2 + 1];
@@ -2772,15 +3015,14 @@ series_chart_plan_render(SeriesChartPlan *plan, int tick_text)
         if (!tick_text) PyTuple_SET_ITEM(ticks, output, axis);
     }
     for (Py_ssize_t output = 0; output < plan->full_count; output++) {
-        Py_ssize_t row = plan->rows[plan->downsample_count + output];
-        size_t path_start = data->path_offsets[row];
-        size_t path_size = data->path_offsets[row + 1] - path_start;
+        size_t start = plan->full_path_offsets[output];
+        size_t path_size = plan->full_path_offsets[output + 1] - start;
         if (path_size > (size_t)PY_SSIZE_T_MAX) {
             PyErr_NoMemory();
             goto render_error;
         }
         PyObject *path = PyUnicode_DecodeASCII(
-            data->path_text == NULL ? "" : data->path_text + path_start,
+            path_size != 0 ? plan->full_path_text + start : "",
             (Py_ssize_t)path_size, NULL);
         if (path == NULL) goto render_error;
         PyTuple_SET_ITEM(paths, plan->downsample_count + output, path);
@@ -2819,7 +3061,7 @@ series_chart_planned_path_size(const SeriesData *data, size_t row_offset,
 {
     size_t size = 0;
     for (Py_ssize_t position = 0; position < index_count; position++) {
-        Py_ssize_t index = indices[position];
+        Py_ssize_t index = indices != NULL ? indices[position] : position;
         size_t cell = row_offset + (size_t)index;
         if (!data->present[cell]) continue;
         size += 2 + data->index_plan[(size_t)index * 21] +
@@ -2837,7 +3079,7 @@ series_chart_write_planned_path(char *buffer, const SeriesData *data,
     size_t written = 0;
     int open = 0;
     for (Py_ssize_t position = 0; position < index_count; position++) {
-        Py_ssize_t index = indices[position];
+        Py_ssize_t index = indices != NULL ? indices[position] : position;
         size_t cell = row_offset + (size_t)index;
         if (!data->present[cell]) {
             open = 0;
@@ -2850,7 +3092,7 @@ series_chart_write_planned_path(char *buffer, const SeriesData *data,
         written += planned[0];
         buffer[written++] = ',';
         memcpy(buffer + written,
-               data->value_text + data->value_offsets[cell],
+               data->value_text + series_data_value_offset(data, cell),
                data->value_lengths[cell]);
         written += data->value_lengths[cell];
         open = 1;
@@ -2880,11 +3122,10 @@ series_chart_plan_build_joined_path(SeriesChartPlan *plan)
             (Py_ssize_t)(selected_end - selected_start));
     }
     for (Py_ssize_t output = 0; output < plan->full_count; output++) {
-        Py_ssize_t row = plan->rows[plan->downsample_count + output];
-        size_t start = data->path_offsets[row];
-        size_t size = data->path_offsets[row + 1] - start;
+        size_t start = plan->full_path_offsets[output];
+        size_t size = plan->full_path_offsets[output + 1] - start;
         if (size != 0) {
-            memcpy(path_buffer + path_written, data->path_text + start, size);
+            memcpy(path_buffer + path_written, plan->full_path_text + start, size);
             path_written += size;
         }
     }
@@ -3057,18 +3298,18 @@ series_data_chart(PyObject *args, int tick_text)
             ? data->present + offset : NULL;
         double minimum, maximum;
         Py_ssize_t selected_count = 0;
-        const double *row_prefix = data->prefix +
-            (size_t)row * ((size_t)data->bucket_count + 1);
         const double *row_bounds = data->bounds + (size_t)row * 2;
         Py_ssize_t *selected = series_chart_lttb(
-            row_values, row_prefix, row_bounds, data->bucket_count, threshold,
+            row_values, NULL, row_bounds, data->bucket_count, threshold,
             selected_workspace, &selected_count, &minimum, &maximum);
         if (selected == NULL && data->bucket_count != 0) goto chart_error;
         PyObject *path = series_chart_path(
             row_values, row_present, data->bucket_count,
             selected, selected_count, data->index_plan,
             data->value_text,
-            data->bucket_count != 0 ? data->value_offsets + offset : NULL,
+            data->bucket_count != 0
+                ? series_data_value_offsets_at(data, offset) : NULL,
+            data->value_offsets_32,
             data->bucket_count != 0 ? data->value_lengths + offset : NULL);
         PyObject *axis = tick_text ? NULL : series_chart_ticks(
             minimum, maximum, tick_target);
@@ -3092,15 +3333,15 @@ series_data_chart(PyObject *args, int tick_text)
                          row, row_count - 1);
             goto chart_error;
         }
-        size_t path_start = data->path_offsets[row];
-        size_t path_size = data->path_offsets[row + 1] - path_start;
-        if (path_size > (size_t)PY_SSIZE_T_MAX) {
-            PyErr_NoMemory();
-            goto chart_error;
-        }
-        PyObject *path = PyUnicode_DecodeASCII(
-            data->path_text == NULL ? "" : data->path_text + path_start,
-            (Py_ssize_t)path_size, NULL);
+        size_t offset = (size_t)row * (size_t)data->bucket_count;
+        PyObject *path = series_chart_path(
+            data->bucket_count != 0 ? data->values + offset : NULL,
+            data->bucket_count != 0 ? data->present + offset : NULL,
+            data->bucket_count, NULL, 0, data->index_plan, data->value_text,
+            data->bucket_count != 0
+                ? series_data_value_offsets_at(data, offset) : NULL,
+            data->value_offsets_32,
+            data->bucket_count != 0 ? data->value_lengths + offset : NULL);
         if (path == NULL) goto chart_error;
         PyTuple_SET_ITEM(paths, downsample_count + output, path);
     }
@@ -3448,7 +3689,7 @@ series_spine_output(SeriesSpineProjection *projection,
         if (selected == NULL && bucket_count != 0) goto error;
         PyObject *path = series_chart_path(
             values, present, bucket_count, selected, selected_count,
-            projection->index_plan, NULL, NULL, NULL);
+            projection->index_plan, NULL, NULL, 0, NULL);
         PyMem_Free(selected);
         PyObject *axis = series_chart_ticks(minimum, maximum, tick_target);
         if (path == NULL || axis == NULL) {
@@ -3467,7 +3708,7 @@ series_spine_output(SeriesSpineProjection *projection,
             ? projection->present + projection->cell_offsets[slot] : NULL;
         PyObject *path = series_chart_path(
             values, present, bucket_count, NULL, 0,
-            projection->index_plan, NULL, NULL, NULL);
+            projection->index_plan, NULL, NULL, 0, NULL);
         if (path == NULL) goto error;
         PyTuple_SET_ITEM(paths, downsample_count + output, path);
     }

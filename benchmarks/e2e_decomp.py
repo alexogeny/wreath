@@ -13,7 +13,7 @@ import asyncio
 
 from wreath import Wreath
 
-from .apps import _e2e_ensure
+from .e2e_peer import ensure_e2e_peer as _e2e_ensure
 
 app = Wreath()
 

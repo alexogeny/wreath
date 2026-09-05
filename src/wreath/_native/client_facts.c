@@ -745,26 +745,21 @@ ua_rule_table_contains(const unsigned char *data, Py_ssize_t count,
 }
 
 static int
-ua_classify(UserAgentDBObject *self, PyObject *value, UAClassification *out,
-            const unsigned char *blocked_ids, Py_ssize_t blocked_count)
+ua_classify_data(UserAgentDBObject *self, const char *data, Py_ssize_t size,
+                 UAClassification *out, const unsigned char *blocked_ids,
+                 Py_ssize_t blocked_count)
 {
-    Py_buffer view;
-    if (PyObject_GetBuffer(value, &view, PyBUF_SIMPLE) < 0) return -1;
-    if (view.len > 8192) {
-        PyBuffer_Release(&view);
-        return 1;
-    }
-    const char *data = view.buf;
+    if (size > 8192) return 1;
     memset(out, 0, sizeof(*out));
     out->mobile = -1;
     int browser_priority = INT_MIN, platform_priority = INT_MIN;
     int mobile_priority = INT_MIN;
     int rule_priority = INT_MIN;
     Py_ssize_t at = 0;
-    while (at < view.len) {
-        while (at < view.len && !ua_token_char((unsigned char)data[at])) at++;
+    while (at < size) {
+        while (at < size && !ua_token_char((unsigned char)data[at])) at++;
         Py_ssize_t start = at;
-        while (at < view.len && ua_token_char((unsigned char)data[at])) at++;
+        while (at < size && ua_token_char((unsigned char)data[at])) at++;
         Py_ssize_t length = at - start;
         if (length == 0 || length > 128) continue;
         UAEntry *entry = ua_find(self, data + start, length);
@@ -792,9 +787,9 @@ ua_classify(UserAgentDBObject *self, PyObject *value, UAClassification *out,
             browser_priority = entry->priority;
             out->version = NULL;
             out->version_len = 0;
-            if (at < view.len && data[at] == '/') {
+            if (at < size && data[at] == '/') {
                 Py_ssize_t vstart = ++at;
-                while (at < view.len &&
+                while (at < size &&
                        (((unsigned char)data[at] >= '0' && (unsigned char)data[at] <= '9') ||
                         data[at] == '.')) at++;
                 if (at > vstart) {
@@ -814,8 +809,19 @@ ua_classify(UserAgentDBObject *self, PyObject *value, UAClassification *out,
         }
         if (entry->bot) out->bot = 1;
     }
-    PyBuffer_Release(&view);
     return 0;
+}
+
+static int
+ua_classify(UserAgentDBObject *self, PyObject *value, UAClassification *out,
+            const unsigned char *blocked_ids, Py_ssize_t blocked_count)
+{
+    Py_buffer view;
+    if (PyObject_GetBuffer(value, &view, PyBUF_SIMPLE) < 0) return -1;
+    int result = ua_classify_data(
+        self, view.buf, view.len, out, blocked_ids, blocked_count);
+    PyBuffer_Release(&view);
+    return result;
 }
 
 static PyObject *
@@ -850,8 +856,8 @@ UserAgentDB_classify(UserAgentDBObject *self, PyObject *value)
 }
 
 static int
-user_agent_blocked(PyObject *database, PyObject *value, PyObject *table,
-                   int *blocked)
+user_agent_blocked_data(PyObject *database, const char *data, Py_ssize_t size,
+                        PyObject *table, int *blocked)
 {
     if (!Py_IS_TYPE(database, &UserAgentDBType)) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -864,8 +870,8 @@ user_agent_blocked(PyObject *database, PyObject *value, PyObject *table,
         return -1;
     }
     UAClassification found;
-    int classified = ua_classify(
-        (UserAgentDBObject *)database, value, &found,
+    int classified = ua_classify_data(
+        (UserAgentDBObject *)database, data, size, &found,
         (const unsigned char *)PyBytes_AS_STRING(table),
         PyBytes_GET_SIZE(table) / 2);
     if (classified < 0) return -1;
@@ -876,6 +882,18 @@ user_agent_blocked(PyObject *database, PyObject *value, PyObject *table,
             memory_order_relaxed);
     }
     return 0;
+}
+
+static int
+user_agent_blocked(PyObject *database, PyObject *value, PyObject *table,
+                   int *blocked)
+{
+    Py_buffer view;
+    if (PyObject_GetBuffer(value, &view, PyBUF_SIMPLE) < 0) return -1;
+    int result = user_agent_blocked_data(
+        database, view.buf, view.len, table, blocked);
+    PyBuffer_Release(&view);
+    return result;
 }
 
 static PyObject *
@@ -996,6 +1014,13 @@ wreath_user_agent_blocked(PyObject *database, PyObject *value, PyObject *table,
                           int *blocked)
 {
     return user_agent_blocked(database, value, table, blocked);
+}
+
+int
+wreath_user_agent_blocked_raw(PyObject *database, const char *data,
+                              Py_ssize_t size, PyObject *table, int *blocked)
+{
+    return user_agent_blocked_data(database, data, size, table, blocked);
 }
 
 int

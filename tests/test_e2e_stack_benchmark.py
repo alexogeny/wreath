@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,15 @@ def test_holistic_counter_helpers_do_not_import_benchmark_frameworks() -> None:
         "import sys; import benchmarks.bench_holistic_stack_instructions; "
         "assert 'benchmarks.holistic_fastapi' not in sys.modules; "
         "assert 'aiohttp' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_holistic_app_does_not_construct_the_unrelated_benchmark_app() -> None:
+    code = (
+        "import sys; import benchmarks.holistic_e2e; "
+        "assert 'benchmarks.apps' not in sys.modules; "
+        "assert 'benchmarks.scenarios' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
@@ -191,11 +201,16 @@ def test_retained_holistic_account_drives_the_readme_hero() -> None:
             for stage in ("ready", "verified", "warmed", "retained")
         )
         peak_rss = (
-            artifact["memory"][framework]["observed_peak"]["rss_bytes"]["median"]
-            / (1024 * 1024)
+            Decimal(
+                artifact["memory"][framework]["observed_peak"]["rss_bytes"]["median"]
+            )
+            / Decimal(1024 * 1024)
+        ).quantize(
+            Decimal("0.001"),
+            rounding=ROUND_HALF_UP,
         )
         assert f'data-stack="{framework}" data-pss-mib="{pss}"' in memory_chart
-        assert f'data-peak-rss-mib="{peak_rss:.3f}"' in memory_chart
+        assert f'data-peak-rss-mib="{peak_rss}"' in memory_chart
 
 
 def test_holistic_counter_parser_names_every_required_event() -> None:
@@ -244,7 +259,8 @@ def test_holistic_fastapi_server_command_has_one_port_option(tmp_path: Path) -> 
 
 def test_holistic_wreath_reuses_compact_chart_data_without_caching_the_projection() -> None:
     source = (ROOT / "benchmarks/holistic_e2e.py").read_text()
-    assert "_SERIES_CHART = ChartData(" in source
+    assert "_SERIES_CHART = ChartData.from_rows(" in source
+    assert "_SERIES_SPARSE" not in source
     assert "_SERIES_CHART.project_chart_text_joined(" in source
     assert '"".join(paths)' not in source
     assert "cache=False" in source

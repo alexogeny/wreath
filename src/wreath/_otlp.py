@@ -280,7 +280,14 @@ def build_trace_request(
     (CLIENT for dependency calls, INTERNAL otherwise). Returns an empty request
     (no `resourceSpans`) when there is nothing to export.
     """
-    routes = _Routes(image)
+    return _build_trace_request(traces, _Routes(image), resource_attributes)
+
+
+def _build_trace_request(
+    traces: Iterable[ProjectedTrace],
+    routes: _Routes,
+    resource_attributes: dict[str, str] | None,
+) -> dict[str, Any]:
     spans: list[dict[str, Any]] = []
     for trace in traces:
         trace_id, span_id = _trace_ids(trace)

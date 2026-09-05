@@ -1198,8 +1198,8 @@ def _native_bodies(
             shape.clear()
         if lines < min_lines:
             continue
-        body_start = source.count("\n", 0, brace) + 1
-        body_end = source.count("\n", 0, end) + 1
+        body_start = line + source.count("\n", line_cursor, brace)
+        body_end = body_start + source.count("\n", brace, end)
         bodies.append(
             Body(
                 Site(relative, name, line, lines, name, body_start, body_end),

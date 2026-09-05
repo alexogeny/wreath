@@ -64,8 +64,8 @@ typedef struct {
  * only to the renderer itself.
  *
  * Decoding is O(tape) once per Template and execution is O(instructions
- * executed). Every pointer is borrowed from the tape, which the compiled
- * program capsule owns.
+ * executed). The compiled program owns only the operand objects it uses; the
+ * tuple scaffolding and decoded integer objects die after compilation.
  *
  * Unknown opcodes are decoded as themselves with no operands, so an invalid one
  * still raises where it is *reached* rather than where it is decoded. */
@@ -73,13 +73,12 @@ typedef struct {
     int op;
     int line;
     Py_ssize_t target;  /* OP_IF else-branch, OP_JUMP destination, OP_FOR end */
-    PyObject *first;    /* borrowed: text fragment, lookup path, or loop var */
-    PyObject *path;     /* borrowed: OP_FOR's iterable path */
+    PyObject *first;    /* owned: text fragment, lookup path, or loop var */
+    PyObject *path;     /* owned: OP_FOR's iterable path */
     int binding;        /* lexical loop-frame slot, or -1 for the context */
 } decoded;
 
 typedef struct {
-    PyObject *tape;       /* owned: decoded operands borrow from it */
     decoded *program;    /* owned */
     Py_ssize_t length;
     Py_ssize_t typed_for; /* simple top-level RecordBatch loop, or -1 */
@@ -1154,7 +1153,10 @@ compiled_template_destroy(PyObject *capsule)
         PyErr_WriteUnraisable(capsule);
         return;
     }
-    Py_DECREF(compiled->tape);
+    for (Py_ssize_t i = 0; i < compiled->length; i++) {
+        Py_XDECREF(compiled->program[i].first);
+        Py_XDECREF(compiled->program[i].path);
+    }
     PyMem_Free(compiled->program);
     PyMem_Free(compiled);
 }
@@ -1163,8 +1165,8 @@ compiled_template_destroy(PyObject *capsule)
  *
  * The Python parser has already resolved control-flow targets. Decode its
  * tuple tape once with the Template instead of re-reading every integer and
- * operand on every request. The capsule owns the tape because each decoded
- * instruction deliberately borrows its immutable operands from it. */
+ * operand on every request. The capsule retains only operands used by the
+ * decoded program, not the tape's instruction tuples and integer fields. */
 PyObject *
 wreath_template_compile(PyObject *self, PyObject *tape)
 {
@@ -1178,7 +1180,6 @@ wreath_template_compile(PyObject *self, PyObject *tape)
     if (compiled == NULL) {
         return PyErr_NoMemory();
     }
-    compiled->tape = Py_NewRef(tape);
     compiled->program = NULL;
     compiled->length = n;
     compiled->typed_for = -1;
@@ -1187,23 +1188,28 @@ wreath_template_compile(PyObject *self, PyObject *tape)
     if (n > 0) {
         compiled->program = PyMem_Malloc((size_t)n * sizeof(decoded));
         if (compiled->program == NULL) {
-            Py_DECREF(compiled->tape);
             PyMem_Free(compiled);
             return PyErr_NoMemory();
         }
         if (decode_tape(tape, n, compiled->program) < 0 ||
             validate_control_flow(compiled->program, n) < 0) {
-            Py_DECREF(compiled->tape);
             PyMem_Free(compiled->program);
             PyMem_Free(compiled);
             return NULL;
+        }
+        for (Py_ssize_t i = 0; i < n; i++) {
+            Py_XINCREF(compiled->program[i].first);
+            Py_XINCREF(compiled->program[i].path);
         }
         find_typed_loop(compiled);
     }
     PyObject *capsule = PyCapsule_New(compiled, TEMPLATE_CAPSULE_NAME,
                                       compiled_template_destroy);
     if (capsule == NULL) {
-        Py_DECREF(compiled->tape);
+        for (Py_ssize_t i = 0; i < compiled->length; i++) {
+            Py_XDECREF(compiled->program[i].first);
+            Py_XDECREF(compiled->program[i].path);
+        }
         PyMem_Free(compiled->program);
         PyMem_Free(compiled);
     }
