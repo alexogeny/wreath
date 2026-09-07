@@ -18,6 +18,45 @@ different template engine, an ORM that lacks a feature, a WSGI adapter in the
 path — the report says so, rather than letting a green cell imply more than it
 should.
 
+## Framework resource footprint
+
+`resource_footprint.py` produces a checked workload result on stdout and writes
+RSS/PSS bytes to a separate JSON file. It requires Linux `smaps_rollup`.
+
+```bash
+uv run python -m benchmarks.resource_footprint \
+  --scenario kv-empty --count 10000 --metrics /tmp/wreath-kv-memory.json
+uv run python -m benchmarks.resource_footprint \
+  --scenario asgi-cache --count 20000 --capacity 1024 --metrics /tmp/wreath-cache-memory.json
+uv run python -m benchmarks.resource_footprint \
+  --scenario body-memory --size 8388608 --chunk-size 65536 --metrics /tmp/wreath-body-memory.json
+```
+
+The KV cases are `kv-empty`, `kv-sparse`, `kv-dense`, `kv-hit`, `kv-miss`,
+`kv-update`, and `kv-evict`. `--count` means retained stores for the first three
+and operations for the rest; `--capacity` sets the entry bound, and `--ttl`
+enables expiry. `cached-handlers` retains that many decorated handlers with
+empty stores. `asgi-cache` drives unique queries through Wreath's ASGI lifespan,
+routing, response-cache decorator, and response emission, then checks a cache hit.
+It uses the in-process test client and makes no socket-throughput claim.
+
+`body-memory` samples while the collector still owns the completed body, before
+temporary storage is released. With `--signed-body`, it samples the verified
+stream yield instead. `body-read` repeats ordinary reads without that sampling
+hook; `--count` controls requests. `--native-messages` uses Wreath's internal
+receive tuples instead of ASGI dictionaries. These are component measurements,
+not a server's process-tree high-water mark. Other cases sample after full GC
+while their stores remain live; `body-read` releases completed requests first.
+
+For before/after comparisons, `--source-root PATH` selects a saved `src`
+directory, including its matching rebuilt native extension. The workload refuses
+imports outside that root. Run both arms on the same CPU with fixed hash seeds,
+warmups, at least seven interleaved trials, and an unchanged A/A control. An
+external collector such as `resource-bench` can read the `rss` and `pss` JSON
+metrics and collect `instructions:u` for the complete process. Keep stdout
+equivalence enabled and retain commands, source snapshots, and raw samples;
+instruction totals include imports, workload validation, and metric collection.
+
 ## End-to-end retired instructions
 
 `bench_holistic_stack_instructions.py` compares the broad application people

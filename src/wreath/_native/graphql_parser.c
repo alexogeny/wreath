@@ -4,6 +4,8 @@
 
 enum { G_PUNCT, G_NAME, G_NUMBER, G_STRING, G_SPREAD, G_EOF };
 
+#define G_INLINE_TOKENS 64
+
 typedef enum {
     GP_ATTR_SELECTIONS,
     GP_ATTR_NAME,
@@ -45,7 +47,10 @@ typedef struct {
     int *kinds;
     PyObject **values;
     Py_ssize_t *starts;
-    Py_ssize_t count, at;
+    Py_ssize_t count, at, capacity;
+    int inline_kinds[G_INLINE_TOKENS];
+    PyObject *inline_values[G_INLINE_TOKENS];
+    Py_ssize_t inline_starts[G_INLINE_TOKENS];
     PyObject *source;
     const void *source_data;
     int source_kind;
@@ -277,23 +282,51 @@ g_head_in(Py_UCS4 ch, const char *ascii)
 }
 
 static int
-g_tokenize(GParser *p, PyObject *source)
+g_reserve_token(GParser *p)
 {
-    Py_ssize_t length = PyUnicode_GET_LENGTH(source);
-    Py_ssize_t position = 0, capacity;
-    if ((size_t)length > SIZE_MAX / sizeof(*p->values) ||
-        (size_t)length > SIZE_MAX / sizeof(*p->starts) ||
-        (size_t)length > SIZE_MAX / sizeof(*p->kinds)) {
+    if (p->count < p->capacity) return 0;
+    Py_ssize_t capacity = p->capacity * 2;
+    if (capacity < p->capacity ||
+        (size_t)capacity > SIZE_MAX / sizeof(*p->values) ||
+        (size_t)capacity > SIZE_MAX / sizeof(*p->starts) ||
+        (size_t)capacity > SIZE_MAX / sizeof(*p->kinds)) {
         PyErr_NoMemory();
         return -1;
     }
-    capacity = length == 0 ? 1 : length;
-    p->kinds = PyMem_Malloc((size_t)capacity * sizeof(*p->kinds));
-    p->values = PyMem_Calloc((size_t)capacity, sizeof(*p->values));
-    p->starts = PyMem_Malloc((size_t)capacity * sizeof(*p->starts));
-    if (p->kinds == NULL || p->values == NULL || p->starts == NULL) {
-        PyErr_NoMemory(); return -1;
+    int *kinds = PyMem_Malloc((size_t)capacity * sizeof(*kinds));
+    PyObject **values = PyMem_Calloc((size_t)capacity, sizeof(*values));
+    Py_ssize_t *starts = PyMem_Malloc((size_t)capacity * sizeof(*starts));
+    if (kinds == NULL || values == NULL || starts == NULL) {
+        PyMem_Free(kinds);
+        PyMem_Free(values);
+        PyMem_Free(starts);
+        PyErr_NoMemory();
+        return -1;
     }
+    memcpy(kinds, p->kinds, (size_t)p->count * sizeof(*kinds));
+    memcpy(values, p->values, (size_t)p->count * sizeof(*values));
+    memcpy(starts, p->starts, (size_t)p->count * sizeof(*starts));
+    if (p->kinds != p->inline_kinds) {
+        PyMem_Free(p->kinds);
+        PyMem_Free(p->values);
+        PyMem_Free(p->starts);
+    }
+    p->kinds = kinds;
+    p->values = values;
+    p->starts = starts;
+    p->capacity = capacity;
+    return 0;
+}
+
+static int
+g_tokenize(GParser *p, PyObject *source)
+{
+    Py_ssize_t length = PyUnicode_GET_LENGTH(source);
+    Py_ssize_t position = 0;
+    p->kinds = p->inline_kinds;
+    p->values = p->inline_values;
+    p->starts = p->inline_starts;
+    p->capacity = G_INLINE_TOKENS;
     p->source = source;
     p->source_kind = PyUnicode_KIND(source);
     p->source_data = PyUnicode_DATA(source);
@@ -319,6 +352,7 @@ g_tokenize(GParser *p, PyObject *source)
             if (text != NULL) g_error(p, text, "steps", start);
             Py_XDECREF(message); return -1;
         }
+        if (g_reserve_token(p) < 0) return -1;
         p->starts[p->count] = start;
         if ((head >= 'A' && head <= 'Z') || (head >= 'a' && head <= 'z') || head == '_') {
             position++;
@@ -781,7 +815,9 @@ static void
 g_clear(GParser *p)
 {
     for (Py_ssize_t i = 0; i < p->count; i++) Py_XDECREF(p->values[i]);
-    PyMem_Free(p->kinds); PyMem_Free(p->values); PyMem_Free(p->starts);
+    if (p->kinds != p->inline_kinds) {
+        PyMem_Free(p->kinds); PyMem_Free(p->values); PyMem_Free(p->starts);
+    }
     Py_XDECREF(p->aliases);
 }
 

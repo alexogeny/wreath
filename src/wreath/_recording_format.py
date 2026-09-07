@@ -493,12 +493,13 @@ class WFR1Writer:
         self._steps = 0
         self._closed = False
         now_unix = time.time_ns()
+        canonical = image.canonical_bytes()
         header = _HEADER.pack(
             MAGIC,
             _CONTAINER_VERSION,
             SCHEMA_VERSION,
             0,
-            image.image_hash_short(),
+            image.image_hash_short(canonical=canonical),
             uuid.uuid4().bytes,
             now_unix,
             time.monotonic_ns(),
@@ -507,7 +508,7 @@ class WFR1Writer:
             0,
         )
         self._file.write(header)
-        self._write_chunk(_TAG_META, image.canonical_bytes())
+        self._write_chunk(_TAG_META, canonical)
 
     def _write_chunk(self, tag: bytes, payload: bytes) -> None:
         self._file.write(_chunk(tag, payload))

@@ -93,6 +93,55 @@ def test_scope_builders_do_not_allocate_the_host_name_per_request() -> None:
     )
 
 
+def test_queryless_request_reuses_the_parsed_target_as_raw_path() -> None:
+    h1 = (_NATIVE / "server_http1.c").read_text()
+    h2 = (_NATIVE / "server_http2.c").read_text()
+    h3 = (_NATIVE / "http3_asgi.c").read_text()
+
+    begin_h1 = _function(h1, "begin_request", "ws_write_frame")
+    build_h2 = _function(h2, "build_h2_scope", "start_request")
+    start_h3 = _function(h3, "start_request", "end_headers_cb")
+
+    assert "raw_path = Py_NewRef(target);" in begin_h1
+    assert "q < 0 ? Py_NewRef(path)" in build_h2
+    assert "q < 0 ? Py_NewRef(path)" in start_h3
+
+
+def test_native_ai_policy_classifies_the_header_span_without_a_bytes_object() -> None:
+    source = (_NATIVE / "server_policy.c").read_text()
+    run = _function(source, "run_ai_scraping", "wreath_policy_program_load")
+
+    assert "find_header_view(" in run
+    assert "user_agent_blocked_raw(" in run
+    assert "find_header(headers" not in run
+
+
+def test_native_compression_selects_the_header_span_without_a_bytes_object() -> None:
+    source = (_NATIVE / "server_policy.c").read_text()
+    ingress = _function(source, "wreath_policy_ingress", "wreath_policy_response")
+
+    assert "find_header_view(" in ingress
+    assert "wreath_select_compression_data(" in ingress
+    assert 'find_header(headers, "accept-encoding"' not in ingress
+
+
+def test_native_trusted_host_checks_the_header_span_without_a_bytes_object() -> None:
+    source = (_NATIVE / "server_policy.c").read_text()
+    ingress = _function(source, "wreath_policy_ingress", "wreath_policy_response")
+
+    assert "trusted_host_allowed_data(" in ingress
+    assert 'find_header(headers, "host"' not in ingress
+
+
+def test_native_proxy_checks_scalar_forwarding_headers_without_bytes_objects() -> None:
+    source = (_NATIVE / "server_policy.c").read_text()
+    proxy = _function(source, "run_proxy", "cookie_value")
+
+    assert 'find_header(headers, "x-forwarded-proto"' not in proxy
+    assert 'find_header(headers, "x-forwarded-host"' not in proxy
+    assert proxy.count("find_header_view(") == 2
+
+
 def test_well_known_name_matching_does_not_strlen_constants_per_request() -> None:
     source = (_NATIVE / "http.c").read_text()
     method = _function(source, "method_object", "header_name_object")

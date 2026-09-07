@@ -1368,12 +1368,13 @@ typedef struct {
     uint64_t identity;
     char *name;
     Py_ssize_t name_length;
-    uint64_t integer;
-    double real;
-    PyObject *object;
+    union {
+        uint64_t integer;
+        double real;
+        PyObject *object;
+    } value;
     unsigned char kind;
-    unsigned char occupied;
-    unsigned char is_real;
+    unsigned char representation;
 } MetricDeltaEntry;
 
 typedef struct {
@@ -1410,7 +1411,7 @@ metric_delta_key_equal(const MetricDeltaEntry *entry, unsigned char kind,
                        uint64_t identity, const char *name,
                        Py_ssize_t name_length, uint64_t hash)
 {
-    return entry->occupied && entry->hash == hash && entry->kind == kind &&
+    return entry->hash == hash && entry->kind == kind &&
            entry->identity == identity && entry->name_length == name_length &&
            (name_length == 0 || memcmp(entry->name, name, (size_t)name_length) == 0);
 }
@@ -1423,7 +1424,7 @@ metric_delta_slot(MetricDeltaEntry *entries, size_t capacity,
     size_t index = (size_t)hash & (capacity - 1);
     for (;;) {
         MetricDeltaEntry *entry = &entries[index];
-        if (!entry->occupied || metric_delta_key_equal(
+        if (entry->hash == 0 || metric_delta_key_equal(
                 entry, kind, identity, name, name_length, hash)) return entry;
         index = (index + 1) & (capacity - 1);
     }
@@ -1441,7 +1442,7 @@ metric_delta_grow(MetricDeltaState *state)
     if (entries == NULL) return PyErr_NoMemory(), -1;
     for (size_t index = 0; index < state->capacity; index++) {
         MetricDeltaEntry *old = &state->entries[index];
-        if (!old->occupied) continue;
+        if (old->hash == 0) continue;
         MetricDeltaEntry *next = metric_delta_slot(
             entries, capacity, old->kind, old->identity,
             old->name, old->name_length, old->hash);
@@ -1456,7 +1457,7 @@ metric_delta_grow(MetricDeltaState *state)
 static MetricDeltaEntry *
 metric_delta_get(MetricDeltaState *state, unsigned char kind,
                  uint64_t identity, const char *name, Py_ssize_t name_length,
-                 int is_real, int *created)
+                 int representation, int *created)
 {
     if (state->capacity == 0 ||
         (state->size + 1) * 10 >= state->capacity * 7) {
@@ -1465,8 +1466,8 @@ metric_delta_get(MetricDeltaState *state, unsigned char kind,
     uint64_t hash = metric_delta_hash(kind, identity, name, name_length);
     MetricDeltaEntry *entry = metric_delta_slot(
         state->entries, state->capacity, kind, identity, name, name_length, hash);
-    *created = !entry->occupied;
-    if (!entry->occupied) {
+    *created = entry->hash == 0;
+    if (entry->hash == 0) {
         char *copy = name_length != 0 ? PyMem_Malloc((size_t)name_length) : NULL;
         if (name_length != 0 && copy == NULL) return PyErr_NoMemory(), NULL;
         if (name_length != 0) memcpy(copy, name, (size_t)name_length);
@@ -1476,12 +1477,11 @@ metric_delta_get(MetricDeltaState *state, unsigned char kind,
             .name = copy,
             .name_length = name_length,
             .kind = kind,
-            .occupied = 1,
-            .is_real = (unsigned char)is_real,
+            .representation = (unsigned char)representation,
         };
         state->size++;
     }
-    else if (entry->is_real != (unsigned char)is_real) {
+    else if (entry->representation != (unsigned char)representation) {
         PyErr_SetString(PyExc_TypeError, "metric changed numeric representation");
         return NULL;
     }
@@ -1501,9 +1501,9 @@ metric_delta_u64(MetricDeltaState *state, unsigned char kind,
         PyMutex_Unlock(&state->mutex);
         return -1;
     }
-    *result = created || current < entry->integer
-        ? current : current - entry->integer;
-    entry->integer = current;
+    *result = created || current < entry->value.integer
+        ? current : current - entry->value.integer;
+    entry->value.integer = current;
     PyMutex_Unlock(&state->mutex);
     return 0;
 }
@@ -1520,9 +1520,9 @@ metric_delta_double(MetricDeltaState *state, unsigned char kind,
         PyMutex_Unlock(&state->mutex);
         return -1;
     }
-    *result = created || current < entry->real
-        ? current : current - entry->real;
-    entry->real = current;
+    *result = created || current < entry->value.real
+        ? current : current - entry->value.real;
+    entry->value.real = current;
     PyMutex_Unlock(&state->mutex);
     return 0;
 }
@@ -1541,18 +1541,18 @@ metric_delta_pyint(MetricDeltaState *state, unsigned char kind,
         return -1;
     }
     int reset = created ? 1 : PyObject_RichCompareBool(
-        current, entry->object, Py_LT);
+        current, entry->value.object, Py_LT);
     if (reset < 0) {
         PyMutex_Unlock(&state->mutex);
         return -1;
     }
     PyObject *emitted = reset ? Py_NewRef(current)
-        : PyNumber_Subtract(current, entry->object);
+        : PyNumber_Subtract(current, entry->value.object);
     if (emitted == NULL) {
         PyMutex_Unlock(&state->mutex);
         return -1;
     }
-    Py_XSETREF(entry->object, Py_NewRef(current));
+    Py_XSETREF(entry->value.object, Py_NewRef(current));
     *result = emitted;
     PyMutex_Unlock(&state->mutex);
     return 0;
@@ -1566,8 +1566,11 @@ metric_delta_free(PyObject *capsule)
         PyErr_Clear();
         return;
     }
-    for (size_t index = 0; index < state->capacity; index++)
-        Py_XDECREF(state->entries[index].object);
+    for (size_t index = 0; index < state->capacity; index++) {
+        MetricDeltaEntry *entry = &state->entries[index];
+        if (entry->hash != 0 && entry->representation == 3)
+            Py_XDECREF(entry->value.object);
+    }
     for (size_t index = 0; index < state->capacity; index++)
         PyMem_Free(state->entries[index].name);
     PyMem_Free(state->entries);

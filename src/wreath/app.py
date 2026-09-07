@@ -26,7 +26,7 @@ from inspect import iscoroutinefunction as _iscoroutinefunction
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
 from types import CoroutineType as _COROUTINE
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, SupportsIndex, cast
 from urllib.parse import quote
 
 from . import telemetry as _telemetry
@@ -333,6 +333,74 @@ def _ordered_middleware(
     return tuple(item[2] for item in ordered)
 
 
+class _RouteDefinitions(list[RouteDefinition]):
+    __slots__ = ("version",)
+
+    def __init__(self, values: Iterable[RouteDefinition] = ()) -> None:
+        self.version = object()
+        try:
+            super().__init__(values)
+        finally:
+            self.version = object()
+
+    def append(self, value: RouteDefinition, /) -> None:
+        super().append(value)
+        self.version = object()
+
+    def extend(self, values: Iterable[RouteDefinition], /) -> None:
+        try:
+            super().extend(values)
+        finally:
+            # An iterator may append a prefix before raising.
+            self.version = object()
+
+    def insert(self, index: SupportsIndex, value: RouteDefinition, /) -> None:
+        super().insert(index, value)
+        self.version = object()
+
+    def pop(self, index: SupportsIndex = -1, /) -> RouteDefinition:
+        value = super().pop(index)
+        self.version = object()
+        return value
+
+    def remove(self, value: RouteDefinition, /) -> None:
+        super().remove(value)
+        self.version = object()
+
+    def clear(self) -> None:
+        super().clear()
+        self.version = object()
+
+    def reverse(self) -> None:
+        super().reverse()
+        self.version = object()
+
+    def sort(
+        self, *, key: Callable[[RouteDefinition], Any] | None = None, reverse: bool = False
+    ) -> None:
+        try:
+            super().sort(key=key, reverse=reverse)
+        finally:
+            self.version = object()
+
+    def __setitem__(self, index: SupportsIndex | slice, value: Any, /) -> None:
+        super().__setitem__(index, value)
+        self.version = object()
+
+    def __delitem__(self, index: SupportsIndex | slice, /) -> None:
+        super().__delitem__(index)
+        self.version = object()
+
+    def __iadd__(self, values: Iterable[RouteDefinition], /) -> Self:
+        self.extend(values)
+        return self
+
+    def __imul__(self, count: SupportsIndex, /) -> Self:
+        super().__imul__(count)
+        self.version = object()
+        return self
+
+
 class _ApplicationImage:
     """Immutable-route analysis shared by runtime and control-plane consumers."""
 
@@ -341,6 +409,7 @@ class _ApplicationImage:
         "_binding_specs",
         "_contract_middleware_source",
         "_global_contract_components",
+        "_named_routes",
         "_operation_ids",
         "_operation_ids_analyzed",
         "_operation_diagnostics",
@@ -349,12 +418,19 @@ class _ApplicationImage:
         "_requestless",
         "_return_annotations",
         "_route_contract_components",
+        "_route_indices",
         "_routes",
+        "_routes_source",
+        "_routes_version",
     )
 
     def __init__(self, owner: Wreath) -> None:
         self._owner = owner
         self._routes: tuple[RouteDefinition, ...] = ()
+        self._routes_source: list[RouteDefinition] | None = None
+        self._routes_version: object = None
+        self._route_indices: dict[int, int] = {}
+        self._named_routes: dict[str | None, RouteDefinition] | None = None
         self._binding_specs: tuple[BindingSpec | None, ...] = ()
         self._contract_middleware_source: tuple[
             tuple[tuple[int, int, int], ...],
@@ -371,9 +447,27 @@ class _ApplicationImage:
         self._analyzed = False
 
     def routes(self) -> tuple[RouteDefinition, ...]:
-        current = tuple(self._owner._routes)
-        if current != self._routes:
+        source = self._owner._routes
+        if isinstance(source, _RouteDefinitions):
+            version = source.version
+            if source is self._routes_source and version is self._routes_version:
+                return self._routes
+            current = tuple(source)
+        else:
+            version = None
+            current = tuple(source)
+            if len(current) == len(self._routes) and all(
+                left is right for left, right in zip(current, self._routes, strict=True)
+            ):
+                return self._routes
+        self._routes_source = source
+        self._routes_version = version
+        if current is not self._routes:
             self._routes = current
+            self._named_routes = None
+            self._route_indices = {}
+            for index, definition in enumerate(current):
+                self._route_indices.setdefault(id(definition), index)
             self._binding_specs = ()
             self._requestless = ()
             self._return_annotations = ()
@@ -383,6 +477,19 @@ class _ApplicationImage:
             self._operation_diagnostics = ()
             self._analyzed = False
         return self._routes
+
+    def named_route(self, name: str) -> RouteDefinition:
+        routes = self.routes()
+        named = self._named_routes
+        if named is None:
+            named = {}
+            for definition in routes:
+                named.setdefault(definition.name, definition)
+            self._named_routes = named
+        definition = named.get(name)
+        if definition is None:
+            raise KeyError(f"no route named {name!r}")
+        return definition
 
     def binding_specs(self) -> tuple[BindingSpec | None, ...]:
         routes = self.routes()
@@ -416,12 +523,11 @@ class _ApplicationImage:
 
     def operation_id(self, definition: RouteDefinition, method: str) -> str:
         """The canonical operation id for one method of a registered route."""
-        routes = self.routes()
         operation_ids, _diagnostics = self.operation_ids()
-        for index, candidate in enumerate(routes):
-            if candidate is definition:
-                return operation_ids[index, method]
-        raise ValueError("operation id requested for a route outside this application")
+        index = self._route_indices.get(id(definition))
+        if index is None:
+            raise ValueError("operation id requested for a route outside this application")
+        return operation_ids[index, method]
 
     def operation_ids(self) -> tuple[dict[tuple[int, str], str], tuple[Any, ...]]:
         """All canonical operation ids and their declaration diagnostics."""
@@ -454,13 +560,11 @@ class _ApplicationImage:
             self._global_contract_components = _ordered_middleware(self._owner._global_middleware)
             self._route_contract_components = _ordered_middleware(self._owner._middleware)
             self._contract_middleware_source = source
-        routes = self.routes()
         requirements = self.requirements()
-        requirement = next(
-            requirement
-            for candidate, requirement in zip(routes, requirements, strict=True)
-            if candidate is definition
-        )
+        index = self._route_indices.get(id(definition))
+        if index is None:
+            raise StopIteration
+        requirement = requirements[index]
         route = MiddlewareRoute(
             definition.path,
             method,
@@ -870,7 +974,7 @@ class Wreath:
         self._mount_names: dict[str, str] = {}
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
-        self._routes: list[RouteDefinition] = []
+        self._routes: list[RouteDefinition] = _RouteDefinitions()
         self._route_names: set[str] = set()
         self._dynamic_route_keys: set[tuple[str, str, str | None]] = set()
         self._openapi_security_schemes: dict[str, dict[str, Any]] = {}
@@ -2076,10 +2180,7 @@ class Wreath:
         return self.route(path, methods=("DELETE",), **metadata)
 
     def _named_route(self, name: str) -> RouteDefinition:
-        for definition in self._routes:
-            if definition.name == name:
-                return definition
-        raise KeyError(f"no route named {name!r}")
+        return self._application_image.named_route(name)
 
     def url_path_for(self, name: str, **parameters: Any) -> str:
         """Build a percent-encoded path for a named route or mount."""

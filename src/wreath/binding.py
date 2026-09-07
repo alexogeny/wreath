@@ -1137,21 +1137,17 @@ def _compile_jsonable(annotation: Any, seen: frozenset[Any] = frozenset()) -> Ca
     return jsonable_value
 
 
-def _compile_response_check(annotation: Any) -> Callable[[Any], Any]:
-    """Compile the response's validation step where the plan allows.
-
-    The request body has executed a flat native plan since `_body_validator`
-    was written; the response side kept walking the annotation in Python for
-    every value it checked, which is the same work at eleven times the price.
-    This closes that gap -- same plan compiler, same validator, same error
-    ordering.
-    """
-    try:
-        plan = _compile_plan(annotation, frozenset())
-    except _PlanUnsupported:
-        plan = None
+def _compile_response_check(
+    annotation: Any, *, plan: Any = inspect.Parameter.empty
+) -> Callable[[Any], Any]:
+    if plan is inspect.Parameter.empty:
+        try:
+            plan = _compile_plan(annotation, frozenset())
+        except _PlanUnsupported:
+            plan = None
+        else:
+            plan = _core.compile_validation_plan(plan)
     if plan is not None:
-        plan = _core.compile_validation_plan(plan)
         run_validation = _core.run_validation
 
         def planned_check(value: Any, _plan: Any = plan, _run: Any = run_validation) -> Any:
@@ -1196,10 +1192,15 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
     if isinstance(annotation, type) and issubclass(annotation, response_types):
         return handler
 
-    # Three walks of the same fixed annotation, hoisted out of the request --
-    # and the first of them dropped entirely where it provably does nothing.
     projection_is_identity = _projection_is_identity(annotation)
-    check = _compile_response_check(annotation)
+    try:
+        response_plan = _compile_plan(annotation, frozenset())
+    except _PlanUnsupported:
+        response_plan = None
+        native_plan = None
+    else:
+        native_plan = _core.compile_validation_plan(response_plan)
+    check = _compile_response_check(annotation, plan=native_plan)
     if not projection_is_identity:
         project = _compile_response_input(annotation)
         validate_only = check
@@ -1209,23 +1210,19 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
 
     to_json = _compile_jsonable(annotation)
     planned_json: Callable[[Any], tuple[bytes | None, list[dict[str, Any]]]] | None = None
-    try:
-        response_plan = _compile_plan(annotation, frozenset())
-    except _PlanUnsupported:
-        pass
-    else:
-        if response_plan[0] in (_OP_LIST, _OP_DICT) and _response_plan_is_wire_preserving(
-            response_plan
-        ):
-            response_plan = _core.compile_validation_plan(response_plan)
-            run_validation_json = _core.run_validation_json
+    if (
+        response_plan is not None
+        and response_plan[0] in (_OP_LIST, _OP_DICT)
+        and _response_plan_is_wire_preserving(response_plan)
+    ):
+        run_validation_json = _core.run_validation_json
 
-            def planned_json(  # type: ignore[no-redef]
-                value: Any,
-                _plan: Any = response_plan,
-                _run: Any = run_validation_json,
-            ) -> tuple[bytes | None, list[dict[str, Any]]]:
-                return _run(_plan, value, _RESPONSE_LOC)
+        def planned_json(
+            value: Any,
+            _plan: Any = native_plan,
+            _run: Any = run_validation_json,
+        ) -> tuple[bytes | None, list[dict[str, Any]]]:
+            return _run(_plan, value, _RESPONSE_LOC)
 
     def _validated(value: Any) -> Any:
         if isinstance(value, response_types):

@@ -355,13 +355,25 @@ class _ReplayTransport(asyncio.Transport):
 
     def write(self, data: Any) -> None:
         if not self.closed:
-            self.buffer += bytes(data)
+            if (
+                type(data) is not bytes
+                and type(data) is not bytearray
+                and not (type(data) is memoryview and data.c_contiguous)
+            ):
+                data = bytes(data)
+            self.buffer.extend(data)
             self.write_count += 1
 
     def writelines(self, list_of_data: Any) -> None:
         if not self.closed:
             for chunk in list_of_data:
-                self.buffer += bytes(chunk)
+                if (
+                    type(chunk) is not bytes
+                    and type(chunk) is not bytearray
+                    and not (type(chunk) is memoryview and chunk.c_contiguous)
+                ):
+                    chunk = bytes(chunk)
+                self.buffer.extend(chunk)
             self.write_count += 1
 
     def close(self) -> None:

@@ -511,6 +511,7 @@ wreath_gzip_decompress_workspace(PyObject *workspace, PyObject *data,
     wreath_gzip_decoder_dec *decoder;
     PyObject *result = NULL;
     size_t written = 0;
+    size_t capacity;
     int status;
 
     decoder = PyCapsule_GetPointer(workspace, WREATH_GZIP_DECODER_CAPSULE);
@@ -529,12 +530,28 @@ wreath_gzip_decompress_workspace(PyObject *workspace, PyObject *data,
         PyErr_SetString(PyExc_ValueError, "not a readable gzip member");
         goto done;
     }
-    result = PyBytes_FromStringAndSize(NULL, maximum);
+    capacity = (size_t)maximum;
+    if (input.len >= 18) {
+        const unsigned char *tail = (const unsigned char *)input.buf + input.len - 4;
+        uint32_t hint = wreath_load_u32_le(tail);
+        if ((size_t)hint < capacity) capacity = hint;
+    }
+    result = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)capacity);
     if (result == NULL) goto done;
     wreath_gzip_decoder_dec_set_format(decoder, format);
     status = wreath_gzip_decoder_decompress(
         decoder, input.buf, (size_t)input.len, PyBytes_AS_STRING(result),
-        (size_t)maximum, &written);
+        capacity, &written);
+    /* RFC 1952 ISIZE is modulo 2^32, and the buffer may have trailing bytes.
+     * The tail is only a reservation hint; the decoder validates the member. */
+    if (status == WREATH_GZ_ERR_SPACE && capacity < (size_t)maximum) {
+        Py_CLEAR(result);
+        result = PyBytes_FromStringAndSize(NULL, maximum);
+        if (result == NULL) goto done;
+        status = wreath_gzip_decoder_decompress(
+            decoder, input.buf, (size_t)input.len, PyBytes_AS_STRING(result),
+            (size_t)maximum, &written);
+    }
     if (status == WREATH_GZ_OK) {
         if (_PyBytes_Resize(&result, (Py_ssize_t)written) < 0) result = NULL;
         goto done;

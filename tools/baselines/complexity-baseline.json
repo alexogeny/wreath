@@ -170,6 +170,118 @@
         ]
       }
     },
+    "application-image-route-sweep-control": {
+      "contract": {
+        "group": "web",
+        "stage": "startup",
+        "axis": "registered routes in a warmed application image",
+        "assumption": "the same-size route sweep reading requirement length is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "application-image-route-sweep-control",
+        "group": "web",
+        "stage": "startup",
+        "axis": "registered routes in a warmed application image",
+        "assumption": "the same-size route sweep reading requirement length is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.008,
+        "tail_exponent": 0.94,
+        "local_exponents": [
+          1.16,
+          0.959,
+          0.921
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          1.9399041775614023e-05,
+          4.33590030297637e-05,
+          8.431501919403672e-05,
+          0.00015963998157531023
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "application-image-warm-lookups": {
+      "contract": {
+        "group": "web",
+        "stage": "startup",
+        "axis": "registered routes in a warmed application image",
+        "assumption": "a full operation-id and contract lookup sweep is linear in routes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "application-image-warm-lookups",
+        "group": "web",
+        "stage": "startup",
+        "axis": "registered routes in a warmed application image",
+        "assumption": "a full operation-id and contract lookup sweep is linear in routes",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.997,
+        "tail_exponent": 1.0,
+        "local_exponents": [
+          0.989,
+          1.004,
+          0.996
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.0011023559491150081,
+          0.002187549020163715,
+          0.0043879279983229935,
+          0.008753708039876074
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
     "argument-normalize-deep": {
       "contract": {
         "group": "web",
@@ -2425,6 +2537,342 @@
           0.000395852024666965,
           0.0009672429878264666,
           0.0019577089697122574
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-empty-clear": {
+      "contract": {
+        "group": "web",
+        "stage": "state",
+        "axis": "previous entries in an already-cleared native KV table",
+        "assumption": "repeated empty clears are independent of retained table capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-empty-clear",
+        "group": "web",
+        "stage": "state",
+        "axis": "previous entries in an already-cleared native KV table",
+        "assumption": "repeated empty clears are independent of retained table capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.006,
+        "tail_exponent": -0.007,
+        "local_exponents": [
+          -0.003,
+          -0.01,
+          -0.004
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          4.0504964999854565e-05,
+          4.043098306283355e-05,
+          4.015601007267833e-05,
+          4.003901267424226e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-empty-peek-control": {
+      "contract": {
+        "group": "web",
+        "stage": "state",
+        "axis": "previous entries in an already-cleared native KV table",
+        "assumption": "same-size fixed missing-key peek batch is independent of retained capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-empty-peek-control",
+        "group": "web",
+        "stage": "state",
+        "axis": "previous entries in an already-cleared native KV table",
+        "assumption": "same-size fixed missing-key peek batch is independent of retained capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.003,
+        "tail_exponent": -0.005,
+        "local_exponents": [
+          0.005,
+          0.043,
+          -0.053
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          6.883195601403713e-05,
+          6.906897760927677e-05,
+          7.115997141227126e-05,
+          6.859202403575182e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-live-capacity-eviction": {
+      "contract": {
+        "group": "web",
+        "stage": "cache",
+        "axis": "resident entries during 8192 writes of new keys to a full live table",
+        "assumption": "live LRU eviction is amortized constant work, not a rebuild on every write",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-live-capacity-eviction",
+        "group": "web",
+        "stage": "cache",
+        "axis": "resident entries during 8192 writes of new keys to a full live table",
+        "assumption": "live LRU eviction is amortized constant work, not a rebuild on every write",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.019,
+        "tail_exponent": 0.034,
+        "local_exponents": [
+          -0.013,
+          0.031,
+          0.036
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          0.0004388320376165211,
+          0.00043474900303408504,
+          0.0004441359778866172,
+          0.000455481989774853
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-live-capacity-update-control": {
+      "contract": {
+        "group": "web",
+        "stage": "cache",
+        "axis": "resident entries during 8192 updates of an existing key in the same full table",
+        "assumption": "the same-size full-table update control is constant work",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-live-capacity-update-control",
+        "group": "web",
+        "stage": "cache",
+        "axis": "resident entries during 8192 updates of an existing key in the same full table",
+        "assumption": "the same-size full-table update control is constant work",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.008,
+        "tail_exponent": -0.008,
+        "local_exponents": [
+          -0.007,
+          -0.011,
+          -0.004
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          0.00031373300589621067,
+          0.00031216401839628816,
+          0.0003097329754382372,
+          0.0003087730146944523
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-live-count": {
+      "contract": {
+        "group": "web",
+        "stage": "state",
+        "axis": "live entries in a native KV table",
+        "assumption": "a fixed all-live count batch is independent of table size",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-live-count",
+        "group": "web",
+        "stage": "state",
+        "axis": "live entries in a native KV table",
+        "assumption": "a fixed all-live count batch is independent of table size",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.007,
+        "tail_exponent": -0.018,
+        "local_exponents": [
+          0.018,
+          -0.015,
+          -0.02
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          0.00018822401762008667,
+          0.00019059301121160388,
+          0.00018857698887586594,
+          0.00018596398876979947
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "kv-live-peek-control": {
+      "contract": {
+        "group": "web",
+        "stage": "state",
+        "axis": "live entries in a native KV table",
+        "assumption": "same-size fixed live-key peek batch is independent of table size",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "kv-live-peek-control",
+        "group": "web",
+        "stage": "state",
+        "axis": "live entries in a native KV table",
+        "assumption": "same-size fixed live-key peek batch is independent of table size",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.005,
+        "tail_exponent": 0.004,
+        "local_exponents": [
+          0.006,
+          0.009,
+          -0.001
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seconds": [
+          7.94240040704608e-05,
+          7.974501932039857e-05,
+          8.021900430321693e-05,
+          8.016399806365371e-05
         ],
         "counters": [
           {},

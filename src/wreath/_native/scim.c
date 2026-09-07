@@ -5,6 +5,7 @@
 
 #define SCIM_MAX_LENGTH 2048
 #define SCIM_MAX_DEPTH 16
+#define SCIM_INLINE_TOKENS 32
 
 enum { SCIM_WORD = 256, SCIM_STRING };
 
@@ -52,7 +53,9 @@ typedef struct {
     ScimToken *tokens;
     Py_ssize_t count;
     Py_ssize_t at;
+    Py_ssize_t capacity;
     PyObject *types;
+    ScimToken inline_tokens[SCIM_INLINE_TOKENS];
 } ScimParser;
 
 #define SCIM_PLAN_CAPSULE "wreath.scim.plan"
@@ -216,11 +219,34 @@ scim_string(PyObject *source, Py_ssize_t *position, PyObject *error_type)
 }
 
 static void
-scim_tokens_clear(ScimToken *tokens, Py_ssize_t count)
+scim_tokens_clear(ScimParser *parser)
 {
-    if (tokens == NULL) return;
-    for (Py_ssize_t i = 0; i < count; i++) Py_XDECREF(tokens[i].value);
-    PyMem_Free(tokens);
+    if (parser->tokens == NULL) return;
+    for (Py_ssize_t i = 0; i < parser->count; i++)
+        Py_XDECREF(parser->tokens[i].value);
+    if (parser->tokens != parser->inline_tokens) PyMem_Free(parser->tokens);
+}
+
+static int
+scim_reserve_token(ScimParser *parser)
+{
+    if (parser->count < parser->capacity) return 0;
+    Py_ssize_t capacity = parser->capacity * 2;
+    if (capacity < parser->capacity ||
+        (size_t)capacity > SIZE_MAX / sizeof(*parser->tokens)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    ScimToken *tokens = PyMem_Calloc((size_t)capacity, sizeof(*tokens));
+    if (tokens == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memcpy(tokens, parser->tokens, (size_t)parser->count * sizeof(*tokens));
+    if (parser->tokens != parser->inline_tokens) PyMem_Free(parser->tokens);
+    parser->tokens = tokens;
+    parser->capacity = capacity;
+    return 0;
 }
 
 static int
@@ -228,11 +254,8 @@ scim_tokenize(ScimParser *parser, PyObject *source)
 {
     Py_ssize_t length = PyUnicode_GET_LENGTH(source);
     Py_ssize_t position = 0;
-    parser->tokens = PyMem_Calloc((size_t)(length + 1), sizeof(*parser->tokens));
-    if (parser->tokens == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
+    parser->tokens = parser->inline_tokens;
+    parser->capacity = SCIM_INLINE_TOKENS;
     while (position < length) {
         Py_UCS4 ch = PyUnicode_READ_CHAR(source, position);
         ScimToken *token;
@@ -240,6 +263,7 @@ scim_tokenize(ScimParser *parser, PyObject *source)
             position++;
             continue;
         }
+        if (scim_reserve_token(parser) < 0) return -1;
         token = &parser->tokens[parser->count];
         if (ch == '(' || ch == ')' || ch == '[' || ch == ']') {
             token->kind = (int)ch;
@@ -630,7 +654,7 @@ wreath_scim_parse(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *source;
     PyObject *attributes;
     PyObject *types;
-    ScimParser parser = {NULL, 0, 0, NULL};
+    ScimParser parser = {0};
     PyObject *node = NULL;
     if (!PyArg_ParseTuple(args, "UOO:scim_parse", &source, &attributes, &types))
         return NULL;
@@ -658,7 +682,7 @@ wreath_scim_parse(PyObject *Py_UNUSED(self), PyObject *args)
     if (scim_check_attributes(node, attributes, types, 0) < 0) Py_CLEAR(node);
 
 done:
-    scim_tokens_clear(parser.tokens, parser.count);
+    scim_tokens_clear(&parser);
     return node;
 }
 

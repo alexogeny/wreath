@@ -120,6 +120,26 @@ find_header(PyObject *headers, const char *name, Py_ssize_t name_size,
     return first < 0 ? NULL : wreath_headers_value_borrowed(headers, first);
 }
 
+static int
+find_header_view(PyObject *headers, const char *name, Py_ssize_t name_size,
+                 const char **value, Py_ssize_t *value_size,
+                 Py_ssize_t *count)
+{
+    Py_ssize_t first;
+    Py_ssize_t matches;
+    if (wreath_headers_find(
+            headers, name, name_size, &first,
+            count == NULL ? NULL : &matches) < 0) return -1;
+    if (count != NULL) *count = matches;
+    if (first < 0) return 0;
+    const char *found_name;
+    Py_ssize_t found_name_size;
+    if (wreath_headers_view(
+            headers, first, &found_name, &found_name_size,
+            value, value_size) < 0) return -1;
+    return 1;
+}
+
 
 static PyObject *
 find_named_header(PyObject *headers, PyObject *name)
@@ -623,11 +643,14 @@ run_ai_scraping(const WreathCoreCAPI *core, PyObject *config,
     if (PyUnicode_CompareWithASCIIString(path, "/robots.txt") == 0 &&
         (PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
          PyUnicode_CompareWithASCIIString(method, "HEAD") == 0)) return 0;
-    PyObject *user_agent = find_header(headers, "user-agent", 10, NULL);
-    if (user_agent == NULL) return 0;
+    const char *user_agent;
+    Py_ssize_t user_agent_size;
+    int found = find_header_view(
+        headers, "user-agent", 10, &user_agent, &user_agent_size, NULL);
+    if (found <= 0) return found;
     int blocked = 0;
-    if (core->user_agent_blocked(
-            PyTuple_GET_ITEM(config, 0), user_agent,
+    if (core->user_agent_blocked_raw(
+            PyTuple_GET_ITEM(config, 0), user_agent, user_agent_size,
             PyTuple_GET_ITEM(config, 1), &blocked) < 0) return -1;
     if (!blocked) return 0;
     static const char body[] =
@@ -772,11 +795,8 @@ wreath_policy_record_completion(const WreathFlightCAPI *flight,
 
 /* Return 1 allowed, 0 refused. Patterns were normalized at construction. */
 static int
-trusted_host_allowed(PyObject *patterns, PyObject *value)
+trusted_host_allowed_data(PyObject *patterns, const char *data, Py_ssize_t size)
 {
-    if (!PyBytes_Check(value)) return 0;
-    const char *data = PyBytes_AS_STRING(value);
-    Py_ssize_t size = PyBytes_GET_SIZE(value);
     Py_ssize_t host_size = size;
     if (size == 0) return 0;
     for (Py_ssize_t i = 0; i < size; i++) {
@@ -1078,12 +1098,13 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
     }
 
     if (PyTuple_GET_ITEM(proxy, 1) == Py_True) {
+        const char *data = NULL;
+        Py_ssize_t size = 0;
         Py_ssize_t proto_count = 0;
-        PyObject *proto = find_header(
-            headers, "x-forwarded-proto", 17, &proto_count);
-        if (proto != NULL && proto_count == 1) {
-            const char *data = PyBytes_AS_STRING(proto);
-            Py_ssize_t size = PyBytes_GET_SIZE(proto);
+        int found = find_header_view(
+            headers, "x-forwarded-proto", 17, &data, &size, &proto_count);
+        if (found < 0) return -1;
+        if (found && proto_count == 1) {
             if (memchr(data, ',', (size_t)size) != NULL) goto proxy_host;
             Py_ssize_t end = 0;
             while (end < size && data[end] != ',') end++;
@@ -1101,12 +1122,13 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
 
 proxy_host:
     if (PyTuple_GET_ITEM(proxy, 2) == Py_True) {
+        const char *data = NULL;
+        Py_ssize_t size = 0;
         Py_ssize_t host_count = 0;
-        PyObject *forwarded_host = find_header(
-            headers, "x-forwarded-host", 16, &host_count);
-        if (forwarded_host != NULL && host_count == 1) {
-            const char *data = PyBytes_AS_STRING(forwarded_host);
-            Py_ssize_t size = PyBytes_GET_SIZE(forwarded_host);
+        int found = find_header_view(
+            headers, "x-forwarded-host", 16, &data, &size, &host_count);
+        if (found < 0) return -1;
+        if (found && host_count == 1) {
             if (memchr(data, ',', (size_t)size) != NULL) return 0;
             Py_ssize_t end = 0;
             while (end < size && data[end] != ',') end++;
@@ -1484,12 +1506,17 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
     state->scheme = Py_NewRef(scheme);
     if (program->compression != NULL) {
         PyObject *compression = program->compression;
-        PyObject *accepted = find_header(headers, "accept-encoding", 15, NULL);
+        const char *accepted = NULL;
+        Py_ssize_t accepted_size = 0;
+        int accepted_found = find_header_view(
+            headers, "accept-encoding", 15, &accepted, &accepted_size, NULL);
+        if (accepted_found < 0) return -1;
         int fallback = 0;
         int allow_dcz = PyTuple_CheckExact(compression) &&
             PyTuple_GET_SIZE(compression) >= 9 &&
             PyTuple_CheckExact(PyTuple_GET_ITEM(compression, 6));
-        int coding = wreath_select_compression_value(accepted, allow_dcz, &fallback);
+        int coding = wreath_select_compression_data(
+            accepted, accepted_size, allow_dcz, &fallback);
         if (coding < 0) return -1;
         state->compression_coding = (unsigned char)coding;
         state->compression_fallback = (unsigned char)fallback;
@@ -1514,10 +1541,14 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
 
     PyObject *trusted = program->trusted_host;
     if (trusted != NULL) {
+        const char *host = NULL;
+        Py_ssize_t host_size = 0;
         Py_ssize_t count = 0;
-        PyObject *host = find_header(headers, "host", 4, &count);
+        int found = find_header_view(
+            headers, "host", 4, &host, &host_size, &count);
+        if (found < 0) return -1;
         state->completed |= WREATH_POLICY_DONE_TRUSTED_HOST;
-        if (count != 1 || !trusted_host_allowed(trusted, host)) {
+        if (count != 1 || !trusted_host_allowed_data(trusted, host, host_size)) {
             return reply_problem(reply, 400);
         }
     }

@@ -41,7 +41,7 @@ def _names(value: Iterable[str] | None, label: str) -> frozenset[str] | None:
     return names
 
 
-def _column_annotations(model: type[Model]) -> dict[str, Any]:
+def _column_annotations(model: type[Model], selected: tuple[str, ...]) -> dict[str, Any]:
     try:
         annotations = typing.get_type_hints(model, include_extras=True)
     except NameError, TypeError:
@@ -49,11 +49,11 @@ def _column_annotations(model: type[Model]) -> dict[str, Any]:
         for base in reversed(model.__mro__):
             annotations.update(getattr(base, "__annotations__", {}))
     resolved: dict[str, Any] = {}
-    for column in model.__wreath_columns__:
-        annotation = annotations.get(column.python_name, Any)
+    for column_name in selected:
+        annotation = annotations.get(column_name, Any)
         if typing.get_origin(annotation) is Mapped:
             annotation = typing.get_args(annotation)[0]
-        resolved[column.python_name] = annotation
+        resolved[column_name] = annotation
     return resolved
 
 
@@ -102,19 +102,27 @@ def model_dataclass(
         raise TypeError("exclude= must be an iterable of column names, not None")
     if included is not None and excluded:
         raise ValueError("include= and exclude= are mutually exclusive")
-    available = {column.python_name for column in model.__wreath_columns__}
-    requested = included if included is not None else available - excluded
-    unknown = requested - available
-    if unknown:
-        raise ValueError(f"{model.__name__} has no column(s) {', '.join(sorted(unknown))}")
+    column_map = model.__wreath_column_map__
+    if included is not None:
+        requested = included
+        unknown = {column_name for column_name in included if column_name not in column_map}
+        if unknown:
+            raise ValueError(f"{model.__name__} has no column(s) {', '.join(sorted(unknown))}")
+    else:
+        requested = column_map.keys() - excluded
     if not requested:
         raise ValueError("a model dataclass must contain at least one column")
     type_name = name or f"{model.__name__}Data"
     if not isinstance(type_name, str) or not type_name.isidentifier():
         raise ValueError(f"name={type_name!r} is not a Python identifier")
-    selected = tuple(
-        column.python_name for column in model.__wreath_columns__ if column.python_name in requested
-    )
+    if included is not None and len(included) * 4 <= len(column_map):
+        selected = tuple(sorted(included, key=lambda column_name: column_map[column_name].index))
+    else:
+        selected = tuple(
+            column.python_name
+            for column in model.__wreath_columns__
+            if column.python_name in requested
+        )
     cache = model.__dict__.get(_CACHE_ATTRIBUTE)
     if cache is None:
         cache = {}
@@ -123,7 +131,7 @@ def model_dataclass(
     cached = cache.get(key)
     if cached is not None:
         return cached
-    annotations = _column_annotations(model)
+    annotations = _column_annotations(model, selected)
     fields = [
         _field(model.__wreath_column_map__[column_name], annotations[column_name])
         for column_name in selected

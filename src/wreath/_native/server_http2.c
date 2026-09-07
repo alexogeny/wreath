@@ -2101,7 +2101,8 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
          * into RST_STREAM(PROTOCOL_ERROR) (RFC 9113 s8.3.1). */
         goto proto_err;
     }
-    PyObject *raw_path = PyBytes_FromStringAndSize(pptr, path_len);
+    PyObject *raw_path = q < 0 ? Py_NewRef(path)
+                               : PyBytes_FromStringAndSize(pptr, path_len);
     PyObject *query = q >= 0
         ? PyBytes_FromStringAndSize(pptr + q + 1, plen - q - 1)
         : PyBytes_FromStringAndSize("", 0);

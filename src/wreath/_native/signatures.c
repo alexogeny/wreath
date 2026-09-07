@@ -746,27 +746,39 @@ signature_parse_plan_inner(SignatureParser *parser,
                            Py_ssize_t *count_out)
 {
     SignaturePlanComponent *components = NULL;
-    Py_ssize_t count = 0;
+    Py_ssize_t count = 0, capacity = 0;
     if (parser->index >= parser->length || parser->text[parser->index] != '(') {
         signature_error(parser, "structured field: expected an inner list");
         return -1;
     }
     parser->index++;
     signature_skip_ws(parser);
-    if (parser->max_components > 0) {
-        components = PyMem_Calloc((size_t)parser->max_components,
-                                  sizeof(*components));
-        if (components == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-    }
     while (parser->index < parser->length && parser->text[parser->index] != ')') {
         PyObject *name, *params;
         if (count >= parser->max_components) {
             signature_components_clear(components, count);
             signature_error(parser, "signature covers too many components");
             return -1;
+        }
+        if (count == capacity) {
+            Py_ssize_t next = capacity == 0 ? 4 :
+                (capacity > parser->max_components / 2
+                    ? parser->max_components : capacity * 2);
+            if (next > parser->max_components) next = parser->max_components;
+            if ((size_t)next > SIZE_MAX / sizeof(*components)) {
+                signature_components_clear(components, count);
+                PyErr_NoMemory();
+                return -1;
+            }
+            SignaturePlanComponent *grown = PyMem_Realloc(
+                components, (size_t)next * sizeof(*components));
+            if (grown == NULL) {
+                signature_components_clear(components, count);
+                PyErr_NoMemory();
+                return -1;
+            }
+            components = grown;
+            capacity = next;
         }
         name = signature_parse_string_value(parser);
         if (name == NULL) {
@@ -779,8 +791,7 @@ signature_parse_plan_inner(SignatureParser *parser,
             signature_components_clear(components, count);
             return -1;
         }
-        components[count].name = name;
-        components[count].params = params;
+        components[count] = (SignaturePlanComponent){.name = name, .params = params};
         count++;
         signature_skip_ws(parser);
     }

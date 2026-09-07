@@ -1019,12 +1019,18 @@ class ActivityRenderer:
         return True
 
 
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+def _atomic_json(path: Path, value: dict[str, Any], *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         temporary.write_text(
-            json.dumps(value, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                value,
+                indent=None if compact else 2,
+                sort_keys=True,
+                separators=(",", ":") if compact else None,
+            )
+            + "\n",
             encoding="utf-8",
         )
         os.replace(temporary, path)
@@ -1124,7 +1130,7 @@ def _update_history(path: Path, report: dict[str, Any]) -> None:
         )[:_MAX_HISTORY_TESTS]
         tests = dict(newest)
     history["tests"] = tests
-    _atomic_json(path, history)
+    _atomic_json(path, history, compact=True)
 
 
 def _history_weights(path: Path) -> tuple[dict[str, float], dict[str, float]]:
@@ -2124,7 +2130,7 @@ def _write_mutation_sample_cache(
         "selection": selection,
     }
     try:
-        _atomic_json(path, history)
+        _atomic_json(path, history, compact=True)
     except OSError as error:
         print(f"wreath test: could not cache mutation sample: {error}", file=sys.stderr)
 

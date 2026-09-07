@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import tracemalloc
 from collections import OrderedDict
 
 import pytest
@@ -13,6 +14,92 @@ ARM_IDS = ["kv"]
 #: A sentinel no stored value can equal, so "absent" is distinguishable from a
 #: stored `None` or a stored `"-"`.
 _ABSENT = object()
+
+
+def test_empty_table_allocates_slots_only_on_first_write() -> None:
+    table = KV(max_entries=4)
+    assert table.slots == 0
+    assert table.get("missing") is None
+    assert table.peek("missing") is None
+    assert table.held("missing") is None
+    assert table.pop("missing") is None
+    assert table.delete("missing") is False
+    assert "missing" not in table
+    assert table.items() == []
+    assert table.keys() == []
+    assert table.values() == []
+    assert table.purge() == 0
+    assert table.clear() == 0
+    assert len(table) == 0
+    assert table.slots == 0
+    table.set("key", "value")
+    assert table.slots > 0
+    assert table.get("key") == "value"
+
+
+def test_failed_first_write_keeps_empty_table_unallocated() -> None:
+    table = KV()
+    with pytest.raises(TypeError, match="unhashable"):
+        table.set([], "value")
+    with pytest.raises(ValueError, match="ttl must be positive"):
+        table.set("key", "value", ttl=-1)
+    with pytest.raises(TypeError, match="unhashable"):
+        table.get([])
+    assert table.slots == 0
+    table.set("key", "value")
+    assert table.get("key") == "value"
+
+
+def test_uninitialized_subclass_can_allocate_on_first_write() -> None:
+    class Store(KV):
+        def __init__(self) -> None:
+            pass
+
+    table = Store()
+    assert table.slots == 0
+    assert table.get("missing") is None
+    table.set("key", "value")
+    assert table.get("key") == "value"
+    assert table.max_entries == 1024
+
+
+@pytest.mark.parametrize("ttl", [None, 100.0])
+def test_full_live_table_evicts_without_allocating_another_table(ttl) -> None:
+    table = KV(max_entries=8192, ttl=ttl)
+    for key in range(8192):
+        table.set(key, key, now=0.0)
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        table.set("new", "value", now=1.0)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak - before < 65536
+    assert table.held(0) is None
+    assert table.held("new") == "value"
+    assert table.evictions == 1
+    assert table.count(now=1.0) == 8192
+
+
+@pytest.mark.parametrize("operation", ["set", "claim", "touch"])
+def test_earlier_per_key_expiry_is_reclaimed_before_live_lru(operation) -> None:
+    table = KV(max_entries=3, ttl=100.0)
+    table.set("old", 1, now=0.0)
+    if operation == "claim":
+        assert table.claim("brief", 2, ttl=2.0, now=0.0)
+    else:
+        table.set("brief", 2, now=0.0)
+        if operation == "set":
+            table.set("brief", 2, ttl=2.0, now=0.0)
+        else:
+            assert table.touch("brief", ttl=2.0, now=0.0)
+    table.set("recent", 3, now=0.0)
+    table.set("new", 4, now=3.0)
+    assert table.items(now=3.0) == [("new", 4), ("recent", 3), ("old", 1)]
+    assert table.expirations == 1
+    assert table.evictions == 0
 
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)

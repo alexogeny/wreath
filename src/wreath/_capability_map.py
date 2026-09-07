@@ -111,15 +111,14 @@ class CapabilityMap:
         keep_deadline: bool,
         new: bool,
     ) -> bool:
-        size = (
-            len(self._keys)
-            if self.overflow == "refuse"
-            else self._table.count(now=current)
-        )
-        if new and size >= self._table.max_entries:
+        if new:
             if self.overflow == "refuse":
-                return False
-            if self.overflow == "earliest":
+                if len(self._keys) >= self._table.max_entries:
+                    return False
+            elif (
+                self.overflow == "earliest"
+                and self._table.count(now=current) >= self._table.max_entries
+            ):
                 self._evict_earliest(current)
         self._table.set(key, value, ttl, current, keep_deadline)
         if new and self.overflow == "refuse":

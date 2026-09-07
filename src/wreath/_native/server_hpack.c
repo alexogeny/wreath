@@ -44,15 +44,8 @@ typedef struct {
     int child[2];
 } HuffNode;
 
-typedef struct {
-    int next_state;
-    uint8_t output[2];
-    uint8_t output_count;
-    uint8_t invalid;
-} HuffTransition;
-
 static HuffNode *huff_tree = NULL;
-static HuffTransition *huff_transitions = NULL;
+static uint32_t *huff_transitions = NULL;
 static uint8_t *huff_final_valid = NULL;
 static int huff_state_count = 0;
 
@@ -127,30 +120,44 @@ wreath_hpack_build_huffman(void)
         huff_tree[node].sym = sym;
     }
     huff_state_count = used;
-    if ((size_t)used > SIZE_MAX / (256 * sizeof(HuffTransition))) goto no_memory;
-    huff_transitions = PyMem_Calloc((size_t)used * 256, sizeof(HuffTransition));
+    if (used > 1024) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "HPACK Huffman decoder has more than 1024 states");
+        wreath_hpack_free_huffman();
+        return -1;
+    }
+    if ((size_t)used > SIZE_MAX / (256 * sizeof(*huff_transitions))) goto no_memory;
+    huff_transitions = PyMem_Calloc(
+        (size_t)used * 256, sizeof(*huff_transitions));
     huff_final_valid = PyMem_Calloc((size_t)used, sizeof(uint8_t));
     if (huff_transitions == NULL || huff_final_valid == NULL) goto no_memory;
 
     for (int state = 0; state < used; state++) {
         if (huff_tree[state].sym >= 0) continue;
         for (int byte = 0; byte < 256; byte++) {
-            HuffTransition *transition = &huff_transitions[(size_t)state * 256 + byte];
             int node = state;
+            uint8_t output[2] = {0, 0};
+            uint8_t output_count = 0;
+            int invalid = 0;
             for (int b = 7; b >= 0; b--) {
                 node = huff_tree[node].child[(byte >> b) & 1];
-                if (node < 0) { transition->invalid = 1; break; }
+                if (node < 0) { invalid = 1; break; }
                 int sym = huff_tree[node].sym;
                 if (sym >= 0) {
-                    if (sym == 256 || transition->output_count == 2) {
-                        transition->invalid = 1;
+                    if (sym == 256 || output_count == 2) {
+                        invalid = 1;
                         break;
                     }
-                    transition->output[transition->output_count++] = (uint8_t)sym;
+                    output[output_count++] = (uint8_t)sym;
                     node = 0;
                 }
             }
-            transition->next_state = node;
+            uint32_t packed = node < 0 ? 0U : (uint32_t)node;
+            packed |= (uint32_t)output[0] << 10;
+            packed |= (uint32_t)output[1] << 18;
+            packed |= (uint32_t)output_count << 26;
+            packed |= (uint32_t)invalid << 28;
+            huff_transitions[(size_t)state * 256 + byte] = packed;
         }
     }
 
@@ -162,6 +169,8 @@ wreath_hpack_build_huffman(void)
         if (node < 0 || huff_tree[node].sym >= 0) break;
         huff_final_valid[node] = 1;
     }
+    PyMem_Free(huff_tree);
+    huff_tree = NULL;
     if (build_static_table() < 0) {
         wreath_hpack_free_huffman();
         return -1;
@@ -194,18 +203,21 @@ huffman_decode(const uint8_t *data, Py_ssize_t len, int *err)
     Py_ssize_t out_len = 0;
     int state = 0;
     for (Py_ssize_t i = 0; i < len; i++) {
-        const HuffTransition *transition =
-            &huff_transitions[(size_t)state * 256 + data[i]];
-        if (transition->invalid || transition->next_state < 0 ||
-            out_len > out_cap - transition->output_count) {
+        uint32_t transition =
+            huff_transitions[(size_t)state * 256 + data[i]];
+        Py_ssize_t output_count = (Py_ssize_t)((transition >> 26) & 3U);
+        if ((transition & (1U << 28)) != 0 ||
+            out_len > out_cap - output_count) {
             *err = 1;
             PyMem_Free(out);
             return NULL;
         }
-        for (uint8_t j = 0; j < transition->output_count; j++) {
-            out[out_len++] = transition->output[j];
+        if (output_count != 0) {
+            out[out_len++] = (uint8_t)((transition >> 10) & 0xffU);
+            if (output_count == 2)
+                out[out_len++] = (uint8_t)((transition >> 18) & 0xffU);
         }
-        state = transition->next_state;
+        state = (int)(transition & 0x3ffU);
     }
     if (state < 0 || state >= huff_state_count || !huff_final_valid[state]) {
         *err = 1;

@@ -782,7 +782,19 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
     """Weaken enforcement inside functions whose own text names a control."""
     seen: set[int] = set()
     for function in _control_functions(context.tree):
+        name = function.name.lower()
+        predicate_watch = (
+            []
+            if len(function.body) > 1 and any(token in name for token in PREDICATE_TOKENS)
+            else None
+        )
+        has_return = False
         for node in ast.walk(function):
+            # Watches include nested statements even when operators already saw them.
+            if predicate_watch is not None and isinstance(node, ast.stmt):
+                predicate_watch.append(node.lineno)
+                if isinstance(node, ast.Return):
+                    has_return = True
             node_id = getattr(node, "_mutant_id", -1)
             if node_id in seen:
                 continue
@@ -901,29 +913,22 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                     mutate=_to_pass,
                 )
 
-        name = function.name.lower()
-        if any(token in name for token in PREDICATE_TOKENS):
-            returns = [n for n in ast.walk(function) if isinstance(n, ast.Return)]
-            if returns and len(function.body) > 1:
-                node_id = getattr(function, "_mutant_id", -1)
-                scope = context.scopes.get(node_id, ())
-                if scope:
-                    # The `def` line runs once, at import. Watching it would
-                    # attribute the mutation to no test at all and report a
-                    # covered control as unreached, so the body is what counts.
-                    yield Candidate(
-                        operator="predicate.always-true",
-                        control=f"every check in `{function.name}` (it now answers True)",
-                        line=function.lineno,
-                        scope=scope,
-                        node_id=node_id,
-                        watch=tuple(
-                            child.lineno
-                            for child in ast.walk(function)
-                            if isinstance(child, ast.stmt)
-                        ),
-                        mutate=_return_true,
-                    )
+        if predicate_watch is not None and has_return:
+            node_id = getattr(function, "_mutant_id", -1)
+            scope = context.scopes.get(node_id, ())
+            if scope:
+                # The `def` line runs once, at import. Watching it would
+                # attribute the mutation to no test at all and report a
+                # covered control as unreached, so the body is what counts.
+                yield Candidate(
+                    operator="predicate.always-true",
+                    control=f"every check in `{function.name}` (it now answers True)",
+                    line=function.lineno,
+                    scope=scope,
+                    node_id=node_id,
+                    watch=tuple(predicate_watch),
+                    mutate=_return_true,
+                )
 
 
 def _declaration_operators(context: _Context) -> Iterator[Candidate]:
@@ -1475,10 +1480,15 @@ OPERATORS: tuple[str, ...] = (
 )
 
 
-def scan(tree: ast.Module, module_name: str | None) -> list[Candidate]:
-    """Every mutation this library can make to one already-tagged module."""
+def scan(
+    tree: ast.Module,
+    module_name: str | None,
+    *,
+    scopes: dict[int, tuple[str, ...]] | None = None,
+) -> list[Candidate]:
+    """Every mutation this library can make to one module."""
     module = sys.modules.get(module_name) if module_name else None
-    context = _Context(module=module, tree=tree, scopes=tag(tree))
+    context = _Context(module=module, tree=tree, scopes=tag(tree) if scopes is None else scopes)
     found: list[Candidate] = []
     found.extend(_predicate_operators(context))
     found.extend(_declaration_operators(context))
@@ -1489,7 +1499,10 @@ def scan(tree: ast.Module, module_name: str | None) -> list[Candidate]:
 
 
 def unsupported_module_declarations(
-    tree: ast.Module, module_name: str | None
+    tree: ast.Module,
+    module_name: str | None,
+    *,
+    scopes: dict[int, tuple[str, ...]] | None = None,
 ) -> list[Candidate]:
     """Declarations that are real controls but have no safe live patch.
 
@@ -1497,7 +1510,8 @@ def unsupported_module_declarations(
     registrations and other startup effects. A function-held declaration can
     instead be recompiled and evaluated when the test calls its factory.
     """
-    scopes = tag(tree)
+    if scopes is None:
+        scopes = tag(tree)
     module_calls = {node_id for node_id, scope in scopes.items() if not scope}
     diagnostic_scopes = {
         node_id: (("<module>",) if node_id in module_calls else scope)

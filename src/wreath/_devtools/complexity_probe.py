@@ -2335,6 +2335,140 @@ def _trajectory_grid_outside_control(fix_count: int):
     return _trajectory_grid_harness(fix_count, inside=False)
 
 
+def _application_image_lookup_harness(n: int, *, control: bool) -> float:
+    from wreath import Wreath
+
+    app = Wreath(ai_scraping="allow")
+
+    async def endpoint(limit: int = 10) -> str:
+        return str(limit)
+
+    for index in range(n):
+        app.get(f"/items/{index}", operation_id=f"route_{index}")(endpoint)
+    image = app._application_image
+    definitions = image.routes()
+    image.binding_specs()
+    image.operation_ids()
+    expected = [(f"route_{index}", ()) for index in range(n)]
+    loops = 4
+    start = time.perf_counter()
+    for _ in range(loops):
+        if control:
+            result = sum(len(image._requirements) for _route in definitions)
+        else:
+            result = [
+                (image.operation_id(route, "GET"), image.contract_candidates(route, "GET"))
+                for route in definitions
+            ]
+    elapsed = time.perf_counter() - start
+    if result != (n * n if control else expected):
+        raise RuntimeError("application image sweep differs from declared route oracle")
+    return elapsed
+
+
+@probe(
+    "application-image-warm-lookups",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="registered routes in a warmed application image",
+    assumption="a full operation-id and contract lookup sweep is linear in routes",
+    stage="startup",
+    group="web",
+)
+def _application_image_warm_lookups(n: int):
+    return _application_image_lookup_harness(n, control=False)
+
+
+@probe(
+    "application-image-route-sweep-control",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="registered routes in a warmed application image",
+    assumption="the same-size route sweep reading requirement length is linear",
+    stage="startup",
+    group="web",
+)
+def _application_image_route_sweep_control(n: int):
+    return _application_image_lookup_harness(n, control=True)
+
+
+def _kv_lifecycle_harness(n: int, *, clear: bool, control: bool) -> float:
+    from wreath._native import _core
+
+    table = _core.KV(max_entries=n, clock=lambda: 0)
+    for key in range(n):
+        table.set(key, 1, now=0)
+    if clear:
+        table.clear()
+    loops = 2048
+    total = 0
+    start = time.perf_counter()
+    for _ in range(loops):
+        if control:
+            total += table.peek(0, 0, 0)
+        elif clear:
+            total += table.clear()
+        else:
+            total += table.count(now=0)
+    elapsed = time.perf_counter() - start
+    expected = 0 if clear else loops if control else loops * n
+    if total != expected:
+        raise RuntimeError("KV operation batch differs from live-entry oracle")
+    return elapsed
+
+
+@probe(
+    "kv-live-count",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="live entries in a native KV table",
+    assumption="a fixed all-live count batch is independent of table size",
+    stage="state",
+    group="web",
+)
+def _kv_live_count(n: int):
+    return _kv_lifecycle_harness(n, clear=False, control=False)
+
+
+@probe(
+    "kv-live-peek-control",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="live entries in a native KV table",
+    assumption="same-size fixed live-key peek batch is independent of table size",
+    stage="state",
+    group="web",
+)
+def _kv_live_peek_control(n: int):
+    return _kv_lifecycle_harness(n, clear=False, control=True)
+
+
+@probe(
+    "kv-empty-clear",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="previous entries in an already-cleared native KV table",
+    assumption="repeated empty clears are independent of retained table capacity",
+    stage="state",
+    group="web",
+)
+def _kv_empty_clear(n: int):
+    return _kv_lifecycle_harness(n, clear=True, control=False)
+
+
+@probe(
+    "kv-empty-peek-control",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="previous entries in an already-cleared native KV table",
+    assumption="same-size fixed missing-key peek batch is independent of retained capacity",
+    stage="state",
+    group="web",
+)
+def _kv_empty_peek_control(n: int):
+    return _kv_lifecycle_harness(n, clear=True, control=True)
+
+
 def _validation_list_harness(n: int, *, typed: bool, response: bool) -> float:
     """Price a homogeneous list contract beside an Any-item control."""
     import json
@@ -5090,6 +5224,48 @@ def _notification_expired_window(size: int) -> float:
 def _notification_live_window_control(size: int) -> float:
     """Same-size control: no timestamp has crossed the one-hour cutoff."""
     return _notification_window_harness(size, expired=False)
+
+
+def _kv_capacity_harness(size: int, *, evict: bool) -> float:
+    from wreath.kv import KV
+
+    table = KV(max_entries=size, ttl=100.0)
+    for key in range(size):
+        table.set(key, key, now=0.0)
+    keys = range(size, size + 8192) if evict else (0,) * 8192
+    start = time.perf_counter()
+    for key in keys:
+        table.set(key, key, now=1.0)
+    elapsed = time.perf_counter() - start
+    if table.count(now=1.0) != size or table.evictions != (8192 if evict else 0):
+        raise RuntimeError("KV capacity probe did not preserve its resident and eviction counts")
+    return elapsed
+
+
+@probe(
+    "kv-live-capacity-eviction",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="resident entries during 8192 writes of new keys to a full live table",
+    assumption="live LRU eviction is amortized constant work, not a rebuild on every write",
+    stage="cache",
+    group="web",
+)
+def _kv_live_capacity_eviction(size: int) -> float:
+    return _kv_capacity_harness(size, evict=True)
+
+
+@probe(
+    "kv-live-capacity-update-control",
+    expect=0.0,
+    sizes=(1024, 2048, 4096, 8192),
+    axis="resident entries during 8192 updates of an existing key in the same full table",
+    assumption="the same-size full-table update control is constant work",
+    stage="cache",
+    group="web",
+)
+def _kv_live_capacity_update_control(size: int) -> float:
+    return _kv_capacity_harness(size, evict=False)
 
 
 def main(argv: list[str] | None = None) -> int:

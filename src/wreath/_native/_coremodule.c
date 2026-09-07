@@ -397,6 +397,8 @@ static PyMethodDef core_methods[] = {
      "series_chart_spine(start, end, unit, zone, sparse, fills, downsample, full, threshold, ticks) -> compact chart"},
     {"series_data", wreath_series_data, METH_VARARGS,
      "series_data(buckets, sparse, fills) -> immutable numeric series data"},
+    {"series_data_rows", wreath_series_data_rows, METH_VARARGS,
+     "series_data_rows(buckets, series, fills) -> immutable numeric series data"},
     {"series_data_chart", wreath_series_data_chart, METH_VARARGS,
      "series_data_chart(data, downsample, full, threshold, ticks) -> compact chart"},
     {"series_data_chart_text", wreath_series_data_chart_text, METH_VARARGS,
@@ -654,6 +656,7 @@ static WreathCoreCAPI core_capi = {
     wreath_gzip_format_object,
     wreath_replace_cookie_inplace,
     wreath_replace_server_timing_inplace,
+    wreath_user_agent_blocked_raw,
 };
 
 

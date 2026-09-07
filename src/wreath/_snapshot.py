@@ -63,10 +63,7 @@ class SnapshotCache[K, V]:
         return self._current.data.get(key, default)
 
     def require(self, key: K) -> V:
-        data = self._current.data
-        if key not in data:
-            raise KeyError(key)
-        return data[key]
+        return self._current.data[key]
 
     def get_many(self, keys: Iterable[K], default: V | None = None) -> list[V | None]:
         """Look up each key, preserving input order and duplicate positions.

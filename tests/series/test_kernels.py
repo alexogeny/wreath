@@ -114,6 +114,67 @@ class TestChartProjection:
             == expected
         )
 
+    def test_prepared_rows_match_sparse_data_without_retaining_the_input_graph(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {
+                    "count": float(bucket + 1),
+                    "latency": None if bucket % 4 == 0 else bucket / 3,
+                }
+                for bucket in buckets
+                if bucket % 3 != 0
+            },
+            ("beta", True): {
+                bucket: {"count": float(20 - bucket), "latency": bucket / 2}
+                for bucket in buckets
+                if bucket % 2 == 0
+            },
+        }
+        fills = {"count": 0.0, "latency": None}
+        visited = []
+
+        def readings(key):
+            for bucket, values in sparse[key].items():
+                visited.append((key, bucket))
+                yield bucket, values
+
+        prepared = ChartData.from_rows(
+            buckets,
+            ((key, readings(key)) for key in sparse),
+            fills,
+        )
+
+        assert prepared.project_chart(
+            downsample_rows=(0, 2),
+            full_rows=(1, 3),
+            threshold=6,
+            tick_target=5,
+        ) == ChartData(buckets, sparse, fills).project_chart(
+            downsample_rows=(0, 2),
+            full_rows=(1, 3),
+            threshold=6,
+            tick_target=5,
+        )
+        assert visited == [
+            (key, bucket) for key, by_bucket in sparse.items() for bucket in by_bucket
+        ]
+
+    @pytest.mark.parametrize(
+        ("series", "message"),
+        [
+            (
+                (("alpha", iter(((0, {"count": 1.0}), (0, {"count": 2.0})))),),
+                "duplicate bucket 0",
+            ),
+            ((("alpha", iter(((2, {"count": 1.0}),))),), "bucket 2 is outside"),
+            ((("alpha", ()), ("alpha", ())), "duplicate series key 'alpha'"),
+        ],
+    )
+    def test_prepared_rows_refuse_ambiguous_or_unknown_coordinates(self, series, message):
+        with pytest.raises(ValueError, match=message):
+            ChartData.from_rows((0, 1), series, {"count": 0.0})
+
     def test_text_projection_materializes_only_the_final_tick_document(self):
         buckets = tuple(range(12))
         sparse = {

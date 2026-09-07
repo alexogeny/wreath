@@ -2598,7 +2598,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
         }
     }
     if (q < 0) {
-        raw_path = PyBytes_FromStringAndSize(td, ts);
+        raw_path = Py_NewRef(target);
         query_string = PyBytes_FromStringAndSize("", 0);
     }
     else {

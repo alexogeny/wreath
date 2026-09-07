@@ -43,7 +43,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .differential import DifferentialFuzzConfig, apply_differential_fuzz
 from .model import Mutation, Outcome, Report, Site, Verdict
@@ -54,6 +54,7 @@ from .patch import (
     PatchError,
     PolicyPatch,
     ValuePatch,
+    _ScopeFacts,
     compile_scope,
     find_code,
     transform_module,
@@ -183,7 +184,7 @@ class ChangedUnavailable(RuntimeError):
     """`--changed` was asked for where the answer cannot be computed."""
 
 
-def changed_lines(repo: Path, ref: str) -> dict[str, set[int]]:
+def changed_lines(repo: Path, ref: str) -> dict[str, set[int] | range]:
     """The lines that differ from `ref`, per repository-relative path.
 
     `--limit` takes the *first* N mutations, and mutations are ordered by line,
@@ -226,10 +227,11 @@ def changed_lines(repo: Path, ref: str) -> dict[str, set[int]]:
             length = int(count) if count else 1
             if length:
                 lines.setdefault(current, set()).update(range(int(start), int(start) + length))
+    result = cast("dict[str, set[int] | range]", lines)
     for path in git("ls-files", "--others", "--exclude-standard").splitlines():
         if path.endswith(".py"):
-            lines[path] = set(range(1, 1_000_000))
-    return lines
+            result[path] = range(1, 1_000_000)
+    return result
 
 
 def build_plan(
@@ -259,13 +261,13 @@ def build_plan(
         relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
         if selected_paths is not None and relative not in selected_paths:
             continue
+        if touched is not None and relative not in touched:
+            continue
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
         except (OSError, SyntaxError, ValueError) as error:
             plan.errors.append((str(path), f"unreadable: {error}"))
-            continue
-        if touched is not None and relative not in touched:
             continue
         if selected_ids is None:
             plan.sources.append(relative)
@@ -274,10 +276,10 @@ def build_plan(
         except Exception as error:
             plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
             continue
-        tag(tree)
+        scopes = tag(tree)
         selected: list[tuple[Candidate, str]] = []
 
-        for candidate in scan(tree, name):
+        for candidate in scan(tree, name, scopes=scopes):
             if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
             if touched is not None and candidate.line not in touched[relative]:
@@ -295,7 +297,7 @@ def build_plan(
                 continue
             selected.append((candidate, identifier))
         if selected_ids is None:
-            for candidate in unsupported_module_declarations(tree, name):
+            for candidate in unsupported_module_declarations(tree, name, scopes=scopes):
                 if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                     continue
                 if touched is not None and candidate.line not in touched[relative]:
@@ -314,8 +316,43 @@ def build_plan(
             continue
         if selected_ids is not None:
             plan.sources.append(relative)
+        captured_defaults = None
+        if len(selected) > 1:
+            default_names = frozenset(
+                candidate.value_path[0]
+                for candidate, _ in selected
+                if candidate.kind == "value"
+                and not candidate.operator.startswith("cedar.")
+                and len(candidate.value_path) == 1
+            )
+            captured_defaults = (
+                cast(
+                    dict[str, tuple[CapturedDefault, ...]],
+                    _captured_default_targets(tree, (), selected_names=default_names),
+                )
+                if default_names
+                else {}
+            )
+        scope_facts = None
+        if len(selected) > 1:
+            code_count = 0
+            for candidate, _ in selected:
+                if candidate.kind != "value" and candidate.mutate is not None:
+                    code_count += 1
+                    if code_count == 2:
+                        scope_facts = _ScopeFacts.from_tree(tree)
+                        break
         for candidate, identifier in selected:
-            mutation = _build(candidate, tree, name, relative, str(path), identifier)
+            mutation = _build(
+                candidate,
+                tree,
+                name,
+                relative,
+                str(path),
+                identifier,
+                captured_defaults=captured_defaults,
+                scope_facts=scope_facts,
+            )
             if isinstance(mutation, str):
                 plan.errors.append((identifier, mutation))
                 continue
@@ -392,8 +429,8 @@ def select_sample(
         except Exception as error:
             errors.append((name, f"not importable: {type(error).__name__}: {error}"))
             continue
-        tag(tree)
-        for candidate in scan(tree, name):
+        scopes = tag(tree)
+        for candidate in scan(tree, name, scopes=scopes):
             if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
             if touched is not None and candidate.line not in touched[relative]:
@@ -406,7 +443,7 @@ def select_sample(
             if only_pattern is not None and only_pattern.search(identifier) is None:
                 continue
             identifiers.append((identifier, candidate.operator, relative))
-        for candidate in unsupported_module_declarations(tree, name):
+        for candidate in unsupported_module_declarations(tree, name, scopes=scopes):
             if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
             if touched is not None and candidate.line not in touched[relative]:
@@ -420,34 +457,44 @@ def select_sample(
         digest = hashlib.blake2b(identifier.encode(), digest_size=16).digest()
         return digest, identifier
 
-    grouped: dict[str, list[tuple[str, str, str]]] = {}
+    candidate_counts: dict[str, int] = {}
     files: set[str] = set()
-    for item in identifiers:
-        grouped.setdefault(item[1], []).append(item)
-        files.add(item[2])
-    for candidates in grouped.values():
-        candidates.sort(key=lambda item: rank(item[0]))
-
-    selected: list[tuple[str, str, str]] = []
-    selected_ids: set[str] = set()
-    for operator in sorted(grouped, key=lambda item: (len(grouped[item]), item)):
-        if len(selected) >= count:
-            break
-        item = grouped[operator][0]
-        selected.append(item)
-        selected_ids.add(item[0])
-    if len(selected) < count:
-        remainder = sorted(
-            (item for item in identifiers if item[0] not in selected_ids),
-            key=lambda item: rank(item[0]),
+    for _, operator, relative in identifiers:
+        candidate_counts[operator] = candidate_counts.get(operator, 0) + 1
+        files.add(relative)
+    if count <= len(candidate_counts):
+        chosen = set(
+            sorted(candidate_counts, key=lambda item: (candidate_counts[item], item))[:count]
         )
-        selected.extend(remainder[: count - len(selected)])
-
-    selected.sort(key=lambda item: rank(item[0]))
+        best: dict[str, tuple[tuple[bytes, str], int]] = {}
+        for index, (identifier, operator, _) in enumerate(identifiers):
+            if operator not in chosen:
+                continue
+            key = rank(identifier)
+            previous = best.get(operator)
+            if previous is None or key < previous[0]:
+                best[operator] = key, index
+        selected = [identifiers[index] for _, index in sorted(best.values())]
+    else:
+        identifiers.sort(key=lambda item: rank(item[0]))
+        remaining = set(candidate_counts)
+        selected_indices: set[int] = set()
+        for index, (_, operator, _) in enumerate(identifiers):
+            if operator in remaining:
+                # complexity: allow SL-LINEAR-METHOD -- `remaining` is a set.
+                remaining.remove(operator)
+                selected_indices.add(index)
+                if not remaining:
+                    break
+        for index in range(len(identifiers)):
+            selected_indices.add(index)
+            if len(selected_indices) >= count:
+                break
+        selected = [identifiers[index] for index in sorted(selected_indices)]
     selected_counts: dict[str, int] = {}
     for _, operator, _ in selected:
         selected_counts[operator] = selected_counts.get(operator, 0) + 1
-    candidate_counts = {operator: len(items) for operator, items in sorted(grouped.items())}
+    candidate_counts = dict(sorted(candidate_counts.items()))
     missing = tuple(operator for operator in candidate_counts if operator not in selected_counts)
     return SampleSelection(
         identifiers=tuple(item[0] for item in selected),
@@ -480,10 +527,10 @@ def watch_selected_identifiers(
         if relative not in selected_paths:
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
         except OSError, SyntaxError, ValueError:
             continue
-        tag(tree)
         for candidate in scan(tree, name):
             identifier = f"{candidate.operator}@{relative}:{candidate.line}"
             duplicate = seen.get(identifier, 0)
@@ -494,12 +541,10 @@ def watch_selected_identifiers(
                 continue
             filename = str(path)
             if candidate.kind == "value":
-                whole_file.add(filename)
-                try:
-                    span = len(path.read_text(encoding="utf-8").splitlines()) + 1
-                except OSError:
-                    continue
-                watched.setdefault(filename, set()).update(range(1, span))
+                if filename not in whole_file:
+                    whole_file.add(filename)
+                    span = len(source.splitlines()) + 1
+                    watched.setdefault(filename, set()).update(range(1, span))
             else:
                 lines = watched.setdefault(filename, set())
                 lines.add(candidate.line)
@@ -517,6 +562,9 @@ def _build(
     relative: str,
     filename: str,
     identifier: str,
+    *,
+    captured_defaults: dict[str, tuple[CapturedDefault, ...]] | None = None,
+    scope_facts: _ScopeFacts | None = None,
 ) -> Mutation | str:
     site = Site(path=relative, line=candidate.line, scope=candidate.scope_name)
     if candidate.kind == "value":
@@ -529,11 +577,20 @@ def _build(
                 value=candidate.value,
             )
         else:
+            if len(candidate.value_path) != 1:
+                targets = ()
+            elif captured_defaults is None:
+                targets = cast(
+                    tuple[CapturedDefault, ...],
+                    _captured_default_targets(tree, candidate.value_path),
+                )
+            else:
+                targets = captured_defaults.get(candidate.value_path[0], ())
             patch = ValuePatch(
                 module_name=module,
                 path=candidate.value_path,
                 value=candidate.value,
-                captured_defaults=_captured_default_targets(tree, candidate.value_path),
+                captured_defaults=targets,
             )
         try:
             if patch.is_noop():
@@ -546,7 +603,7 @@ def _build(
         return "no transform"
     try:
         mutated = transform_module(tree, candidate.node_id, candidate.mutate)
-        code = compile_scope(mutated, candidate.scope_name, filename)
+        code = compile_scope(mutated, candidate.scope_name, filename, facts=scope_facts)
     except (PatchError, SyntaxError, ValueError, TypeError) as error:
         return f"did not compile: {type(error).__name__}: {error}"
     replacement = find_code(code, candidate.scope_name)
@@ -563,12 +620,17 @@ def _build(
 
 
 def _captured_default_targets(
-    tree: ast.Module, value_path: tuple[str, ...]
-) -> tuple[CapturedDefault, ...]:
-    if len(value_path) != 1:
+    tree: ast.Module,
+    value_path: tuple[str, ...],
+    *,
+    selected_names: frozenset[str] | None = None,
+) -> tuple[CapturedDefault, ...] | dict[str, tuple[CapturedDefault, ...]]:
+    if selected_names is None and len(value_path) != 1:
         return ()
-    name = value_path[0]
-    found: dict[str, tuple[set[int], set[str]]] = {}
+    names = frozenset((value_path[0],)) if selected_names is None else selected_names
+    if not names:
+        return {}
+    found: dict[str, dict[str, tuple[set[int], set[str]]]] = {}
 
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
@@ -588,30 +650,30 @@ def _captured_default_targets(
 
         def _record(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             scope = ".".join((*self.classes, node.name))
-            positions, keywords = found.setdefault(scope, (set(), set()))
-            positions.update(
-                index
-                for index, default in enumerate(node.args.defaults)
-                if isinstance(default, ast.Name) and default.id == name
-            )
-            keywords.update(
-                argument.arg
-                for argument, default in zip(
-                    node.args.kwonlyargs, node.args.kw_defaults, strict=True
-                )
-                if isinstance(default, ast.Name) and default.id == name
-            )
+            defaults = found.setdefault(scope, {})
+            for index, default in enumerate(node.args.defaults):
+                if isinstance(default, ast.Name) and default.id in names:
+                    positions, _ = defaults.setdefault(default.id, (set(), set()))
+                    positions.add(index)
+            for argument, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True):
+                if isinstance(default, ast.Name) and default.id in names:
+                    _, keywords = defaults.setdefault(default.id, (set(), set()))
+                    keywords.add(argument.arg)
 
     Visitor().visit(tree)
-    return tuple(
-        CapturedDefault(
-            scope=scope,
-            positional=tuple(sorted(positions)),
-            keywords=tuple(sorted(keywords)),
-        )
-        for scope, (positions, keywords) in found.items()
-        if positions or keywords
-    )
+    targets: dict[str, list[CapturedDefault]] = {name: [] for name in names}
+    for scope, defaults in found.items():
+        for name, (positions, keywords) in defaults.items():
+            targets[name].append(
+                CapturedDefault(
+                    scope=scope,
+                    positional=tuple(sorted(positions)),
+                    keywords=tuple(sorted(keywords)),
+                )
+            )
+    if selected_names is None:
+        return tuple(targets[value_path[0]])
+    return {name: tuple(items) for name, items in targets.items()}
 
 
 # running

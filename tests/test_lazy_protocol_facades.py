@@ -27,6 +27,15 @@ def test_dkim_export_does_not_load_email_delivery_types() -> None:
     assert "wreath._userkit" not in loaded
 
 
+def test_user_store_does_not_load_smtp_and_mime_machinery() -> None:
+    loaded = _loaded_modules(
+        "from wreath._userkit import InMemoryUserStore",
+        ("smtplib", "email.message", "email._header_value_parser"),
+    )
+
+    assert loaded == set()
+
+
 def test_mcp_tool_export_does_not_load_server_and_transport() -> None:
     loaded = _loaded_modules("from wreath.mcp import Tool", ("wreath._mcp",))
     assert "wreath._mcp.registry" in loaded

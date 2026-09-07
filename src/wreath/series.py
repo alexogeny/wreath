@@ -59,6 +59,7 @@ Reference: `/reference/series`.
 from __future__ import annotations
 
 from calendar import monthrange
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -285,6 +286,30 @@ class ChartData:
         self._chart_joined_text_cache = None
         self._chart_plan_cache = None
         self._chart_text_cache = None
+
+    @classmethod
+    def from_rows(
+        cls,
+        buckets: Any,
+        series: Iterable[
+            tuple[tuple[Any, bool], Iterable[tuple[Any, dict[str, Any]]]]
+        ],
+        fills: dict[str, Any],
+    ) -> ChartData:
+        """Prepare a chart without materializing a nested sparse mapping.
+
+        Each `series` item is a stable `(key, other)` identity paired with a
+        one-pass iterable of `(bucket, measure_dict)` readings. Series retain
+        their input order; every bucket must belong to `buckets` and may occur
+        only once within its series.
+        """
+        prepared = cls.__new__(cls)
+        prepared._data = _core.series_data_rows(buckets, series, fills)
+        prepared._chart_cache = None
+        prepared._chart_joined_text_cache = None
+        prepared._chart_plan_cache = None
+        prepared._chart_text_cache = None
+        return prepared
 
     def _chart_plan(
         self,

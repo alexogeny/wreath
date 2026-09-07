@@ -385,12 +385,9 @@ class _Run:
         # once, readable by dependents, and never emitted.
         hidden: dict[str, list[Any]] = {}
 
-        specs = {
-            name: schema_field.resolver
-            for name, schema_field in object_type.fields.items()
-            if schema_field.resolver is not None
-        }
-        ordered = order_fields(fields, specs, type_name=object_type.name)
+        ordered = order_fields(
+            fields, object_type.fields, type_name=object_type.name, schema_fields=True
+        )
         selected_names = {item.name for item in fields}
 
         async def ensure(name: str) -> None:

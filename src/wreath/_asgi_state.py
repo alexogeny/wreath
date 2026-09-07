@@ -26,7 +26,13 @@ class ResponseCapture:
     @property
     def body(self) -> bytes:
         """Materialize the collected body once, at the driver's boundary."""
-        return b"".join(self._chunks)
+        if len(self._chunks) == 1 and type(self._chunks[0]) is bytes:
+            return self._chunks[0]
+        if not self._chunks:
+            return b""
+        body = b"".join(self._chunks)
+        self._chunks[:] = [body]
+        return body
 
     async def send(self, message: dict[str, Any]) -> None:
         kind = message.get("type")

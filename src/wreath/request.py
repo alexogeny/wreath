@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from hashlib import new as new_hash
 from hmac import compare_digest
+from io import BytesIO
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any, cast
 
@@ -490,9 +491,8 @@ async def _stream_multipart(
             if previous is not uploaded:
                 uploaded.close()
             return
-        data = bytes(part_data)
-        retained += len(data)
-        decoded = data.decode("utf-8", "replace")
+        retained += len(part_data)
+        decoded = part_data.decode("utf-8", "replace")
         fields.setdefault(field_name, decoded)
         all_values.setdefault(field_name, []).append(decoded)
 
@@ -1230,7 +1230,7 @@ class Request:
             return cached
 
         first_chunk: bytes | None = None
-        buffer: bytearray | None = None
+        buffer: BytesIO | None = None
         async for body in self.stream():
             if body:
                 if first_chunk is None and buffer is None:
@@ -1239,12 +1239,13 @@ class Request:
                     if buffer is None:
                         if first_chunk is None:
                             raise RuntimeError("request body collector lost its first chunk")
-                        buffer = bytearray(first_chunk)
+                        buffer = BytesIO()
+                        buffer.write(first_chunk)
                         first_chunk = None
-                    buffer.extend(body)
+                    buffer.write(body)
 
         if buffer is not None:
-            result = bytes(buffer)
+            result = buffer.getvalue()
         elif first_chunk is not None:
             # The common one-chunk request reuses the ASGI bytes object directly.
             result = first_chunk
@@ -1315,7 +1316,7 @@ class Request:
         body_check = (
             None if expected is None else (new_hash(expected[0].replace("-", "")), expected[1])
         )
-        held = bytearray() if body_check is not None else None
+        held = BytesIO() if body_check is not None else None
         try:
             while True:
                 message = await self._receive()
@@ -1333,7 +1334,7 @@ class Request:
                         total += len(body)
                         if body_check is not None:
                             body_check[0].update(body)
-                            cast(bytearray, held).extend(body)
+                            cast(BytesIO, held).write(body)
                         else:
                             yield body
                     if not more_body:
@@ -1342,8 +1343,8 @@ class Request:
                                 raise BadRequest(
                                     "request body does not match its signed content-digest"
                                 )
-                            if held:
-                                yield bytes(held)
+                            if total:
+                                yield cast(BytesIO, held).getvalue()
                         return
                     continue
                 message_type = message["type"]
@@ -1362,7 +1363,7 @@ class Request:
                     total += len(body)
                     if body_check is not None:
                         body_check[0].update(body)
-                        cast(bytearray, held).extend(body)
+                        cast(BytesIO, held).write(body)
                     else:
                         yield body
                 if not message.get("more_body", False):
@@ -1371,8 +1372,8 @@ class Request:
                             raise BadRequest(
                                 "request body does not match its signed content-digest"
                             )
-                        if held:
-                            yield bytes(held)
+                        if total:
+                            yield cast(BytesIO, held).getvalue()
                     return
         finally:
             if getattr(self, "_body", _MISSING) is _STREAMING:

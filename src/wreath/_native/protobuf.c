@@ -166,16 +166,19 @@ protobuf_getattr(PyObject *object, ProtobufAttr attribute)
 }
 
 typedef struct {
-    uint64_t number;
-    int kind;
-    int flags;
     int map_key_kind;
     int map_value_kind;
-    PyObject *name;
-    PyObject *camel;
     PyObject *holder;
     PyObject *subplan;
     PyObject *nested_descriptor;
+} PbFieldPayload;
+
+typedef struct {
+    uint64_t number;
+    PyObject *name;
+    PbFieldPayload *payload;
+    int kind;
+    int flags;
 } PbCompiledField;
 
 typedef struct {
@@ -191,6 +194,7 @@ typedef struct {
 typedef struct {
     Py_ssize_t count;
     PbCompiledField *fields;
+    PbFieldPayload *payloads;
     PbFieldLookup *lookup;
     PyObject *json_lookup;
     PyObject *names;
@@ -198,6 +202,18 @@ typedef struct {
     Py_ssize_t oneof_count;
     PbOneof *oneofs;
 } PbDescriptor;
+
+static inline PyObject *
+pb_field_holder(const PbCompiledField *field)
+{
+    return field->payload == NULL ? Py_None : field->payload->holder;
+}
+
+static inline PyObject *
+pb_field_subplan(const PbCompiledField *field)
+{
+    return field->payload == NULL ? Py_None : field->payload->subplan;
+}
 
 static PbDescriptor *pb_descriptor_from_object(PyObject *object);
 static PyObject *pb_camel_name(PyObject *name);
@@ -1055,12 +1071,12 @@ pb_encode_compiled_object(WreathBytesWriter *w, PyObject *message,
         }
         if (field->flags & PB_FLAG_MAP) {
             failed = pb_encode_object_map(
-                w, field->number, field->subplan, value, depth) < 0;
+                w, field->number, pb_field_subplan(field), value, depth) < 0;
         }
         else if (field->flags & PB_FLAG_REPEATED) {
             failed = pb_encode_object_repeated(
                 w, field->number, field->kind, field->flags,
-                field->subplan, value, depth) < 0;
+                pb_field_subplan(field), value, depth) < 0;
         }
         else if (field->kind == PB_KIND_MESSAGE) {
             failed = pb_put_tag(w, field->number, PB_WIRE_LEN) < 0 ||
@@ -1482,8 +1498,8 @@ pb_read_compiled_map(PbReader *reader, PbCompiledField *field,
     entry.data = body;
     entry.len = body_len;
     entry.pos = 0;
-    key = pb_declared_default(field->map_key_kind);
-    value = pb_declared_default(field->map_value_kind);
+    key = pb_declared_default(field->payload->map_key_kind);
+    value = pb_declared_default(field->payload->map_value_kind);
     if (key == NULL || value == NULL) goto done;
     while (entry.pos < entry.len) {
         Py_ssize_t tag_start = entry.pos;
@@ -1509,24 +1525,27 @@ pb_read_compiled_map(PbReader *reader, PbCompiledField *field,
             goto done;
         }
         if (number == 1) {
-            item = pb_read_declared_value(&entry, field->map_key_kind);
+            item = pb_read_declared_value(&entry, field->payload->map_key_kind);
             if (item == NULL) goto done;
             Py_SETREF(key, item);
         }
-        else if (number == 2 && field->map_value_kind == PB_KIND_MESSAGE) {
+        else if (number == 2 &&
+                 field->payload->map_value_kind == PB_KIND_MESSAGE) {
             const uint8_t *nested_body;
             Py_ssize_t nested_length;
             PbDescriptor *nested;
             if (pb_read_len(&entry, &nested_body, &nested_length) < 0) goto done;
-            nested = pb_descriptor_from_object(field->nested_descriptor);
+            nested = pb_descriptor_from_object(field->payload->nested_descriptor);
             if (nested == NULL) goto done;
             item = pb_decode_compiled_message(
-                field->holder, nested, nested_body, nested_length, depth + 1);
+                field->payload->holder, nested,
+                nested_body, nested_length, depth + 1);
             if (item == NULL) goto done;
             Py_SETREF(value, item);
         }
         else if (number == 2) {
-            item = pb_read_declared_value(&entry, field->map_value_kind);
+            item = pb_read_declared_value(
+                &entry, field->payload->map_value_kind);
             if (item == NULL) goto done;
             Py_SETREF(value, item);
         }
@@ -1554,10 +1573,10 @@ pb_read_compiled_field(PbReader *reader, PbCompiledField *field,
         PbDescriptor *nested;
         PyObject *item;
         if (pb_read_len(reader, &body, &body_len) < 0) return -1;
-        nested = pb_descriptor_from_object(field->nested_descriptor);
+        nested = pb_descriptor_from_object(field->payload->nested_descriptor);
         if (nested == NULL) return -1;
         item = pb_decode_compiled_message(
-            field->holder, nested, body, body_len, depth + 1);
+            field->payload->holder, nested, body, body_len, depth + 1);
         return pb_compiled_store(values, index, field->flags, item);
     }
     if (field->kind == PB_KIND_STRING || field->kind == PB_KIND_BYTES) {
@@ -1815,10 +1834,10 @@ pb_compiled_convert(PbDescriptor *descriptor, PyObject **values)
         PyObject *converted;
         if ((field->flags & PB_FLAG_REPEATED) &&
             field->kind == PB_KIND_ENUM) {
-            converted = pb_build_enums(field->holder, values[index]);
+            converted = pb_build_enums(field->payload->holder, values[index]);
         }
         else if (field->kind == PB_KIND_ENUM && values[index] != Py_None) {
-            converted = pb_build_enum(field->holder, values[index], 1);
+            converted = pb_build_enum(field->payload->holder, values[index], 1);
         }
         else {
             continue;
@@ -1934,12 +1953,13 @@ pb_descriptor_free(PbDescriptor *descriptor)
     if (descriptor == NULL) return;
     for (Py_ssize_t index = 0; index < descriptor->count; index++) {
         PbCompiledField *field = &descriptor->fields[index];
-        Py_XDECREF(field->name);
-        Py_XDECREF(field->camel);
-        Py_XDECREF(field->holder);
-        Py_XDECREF(field->subplan);
-        Py_XDECREF(field->nested_descriptor);
+        if (field->payload != NULL) {
+            Py_XDECREF(field->payload->holder);
+            Py_XDECREF(field->payload->subplan);
+            Py_XDECREF(field->payload->nested_descriptor);
+        }
     }
+    PyMem_Free(descriptor->payloads);
     PyMem_Free(descriptor->fields);
     PyMem_Free(descriptor->lookup);
     if (descriptor->oneofs != NULL) {
@@ -1986,8 +2006,11 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *holders;
     PyObject *oneofs;
     PyObject *camel_names = NULL;
+    PyObject *camel_name = NULL;
     PbDescriptor *descriptor = NULL;
     PyObject *capsule = NULL;
+    Py_ssize_t payload_count = 0;
+    Py_ssize_t payload_index = 0;
 
     if (!PyArg_ParseTuple(args, "O!O!O!O!:protobuf_compile",
                           &PyTuple_Type, &plan,
@@ -2000,19 +2023,38 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
                         "protobuf plan, names, and holders differ in length");
         return NULL;
     }
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(plan); index++) {
+        PyObject *row = PyTuple_GET_ITEM(plan, index);
+        if (!PyTuple_Check(row) || PyTuple_GET_SIZE(row) != 4) {
+            PyErr_Format(PyExc_TypeError,
+                         "protobuf plan row %zd must have four items", index);
+            return NULL;
+        }
+        long kind = PyLong_AsLong(PyTuple_GET_ITEM(row, 1));
+        long flags = PyLong_AsLong(PyTuple_GET_ITEM(row, 2));
+        if (PyErr_Occurred()) return NULL;
+        if ((flags & PB_FLAG_MAP) || kind == PB_KIND_MESSAGE ||
+            kind == PB_KIND_ENUM) payload_count++;
+    }
     descriptor = PyMem_Calloc(1, sizeof(*descriptor));
     if (descriptor == NULL) return PyErr_NoMemory();
     descriptor->count = PyTuple_GET_SIZE(plan);
     descriptor->fields = PyMem_Calloc(
         (size_t)(descriptor->count == 0 ? 1 : descriptor->count),
         sizeof(*descriptor->fields));
+    if (payload_count != 0) {
+        descriptor->payloads = PyMem_Calloc(
+            (size_t)payload_count, sizeof(*descriptor->payloads));
+    }
     descriptor->lookup = PyMem_Calloc(
         (size_t)(descriptor->count == 0 ? 1 : descriptor->count),
         sizeof(*descriptor->lookup));
     descriptor->unknown_name = PyUnicode_FromString(
         "__wreath_protobuf_unknown__");
     descriptor->json_lookup = PyDict_New();
-    if (descriptor->fields == NULL || descriptor->lookup == NULL ||
+    if (descriptor->fields == NULL ||
+        (payload_count != 0 && descriptor->payloads == NULL) ||
+        descriptor->lookup == NULL ||
         descriptor->unknown_name == NULL || descriptor->json_lookup == NULL) {
         pb_descriptor_free(descriptor);
         return PyErr_NoMemory();
@@ -2036,32 +2078,37 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
         if (PyErr_Occurred()) goto error;
         descriptor->lookup[index].number = field->number;
         descriptor->lookup[index].index = index;
-        field->name = Py_NewRef(PyTuple_GET_ITEM(names, index));
-        field->camel = pb_camel_name(field->name);
-        if (field->camel == NULL) goto error;
-        PyObject *prior_name = PyDict_GetItemWithError(camel_names, field->camel);
+        field->name = PyTuple_GET_ITEM(names, index);
+        Py_XSETREF(camel_name, pb_camel_name(field->name));
+        if (camel_name == NULL) goto error;
+        PyObject *prior_name = PyDict_GetItemWithError(camel_names, camel_name);
         if (prior_name == NULL && PyErr_Occurred()) goto error;
         if (prior_name != NULL) {
             PyErr_Format(
                 PyExc_ValueError,
                 "protobuf fields %R and %R share OTLP/JSON name %R",
-                prior_name, field->name, field->camel);
+                prior_name, field->name, camel_name);
             goto error;
         }
-        if (PyDict_SetItem(camel_names, field->camel, field->name) < 0) goto error;
+        if (PyDict_SetItem(camel_names, camel_name, field->name) < 0) goto error;
         PyObject *json_index = PyLong_FromSsize_t(index);
         if (json_index == NULL ||
-            PyDict_SetItem(descriptor->json_lookup, field->camel, json_index) < 0) {
+            PyDict_SetItem(descriptor->json_lookup, camel_name, json_index) < 0) {
             Py_XDECREF(json_index);
             goto error;
         }
         Py_DECREF(json_index);
-        field->holder = Py_NewRef(holder);
-        field->subplan = Py_NewRef(PyTuple_GET_ITEM(row, 3));
-        field->map_key_kind = -1;
-        field->map_value_kind = -1;
+        Py_CLEAR(camel_name);
+        if ((field->flags & PB_FLAG_MAP) || field->kind == PB_KIND_MESSAGE ||
+            field->kind == PB_KIND_ENUM) {
+            field->payload = &descriptor->payloads[payload_index++];
+            field->payload->holder = Py_NewRef(holder);
+            field->payload->subplan = Py_NewRef(PyTuple_GET_ITEM(row, 3));
+            field->payload->map_key_kind = -1;
+            field->payload->map_value_kind = -1;
+        }
         if (field->flags & PB_FLAG_MAP) {
-            PyObject *subplan = field->subplan;
+            PyObject *subplan = field->payload->subplan;
             PyObject *value_row;
             if (!PyTuple_Check(subplan) || PyTuple_GET_SIZE(subplan) != 2) {
                 PyErr_Format(PyExc_TypeError,
@@ -2069,24 +2116,27 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
                              index);
                 goto error;
             }
-            field->map_key_kind = (int)PyLong_AsLong(
+            field->payload->map_key_kind = (int)PyLong_AsLong(
                 PyTuple_GET_ITEM(PyTuple_GET_ITEM(subplan, 0), 1));
             value_row = PyTuple_GET_ITEM(subplan, 1);
-            field->map_value_kind = (int)PyLong_AsLong(
+            field->payload->map_value_kind = (int)PyLong_AsLong(
                 PyTuple_GET_ITEM(value_row, 1));
-            if ((field->map_key_kind < 0 || field->map_value_kind < 0) &&
+            if ((field->payload->map_key_kind < 0 ||
+                 field->payload->map_value_kind < 0) &&
                 PyErr_Occurred()) goto error;
         }
         if ((field->kind == PB_KIND_MESSAGE && !(field->flags & PB_FLAG_MAP)) ||
-            field->map_value_kind == PB_KIND_MESSAGE) {
+            ((field->flags & PB_FLAG_MAP) &&
+             field->payload->map_value_kind == PB_KIND_MESSAGE)) {
             if (holder == Py_None) {
                 PyErr_Format(PyExc_TypeError,
                              "protobuf message field %zd has no holder", index);
                 goto error;
             }
-            field->nested_descriptor = protobuf_getattr(holder, PB_ATTR_DESCRIPTOR);
-            if (field->nested_descriptor == NULL) goto error;
-            if (pb_descriptor_from_object(field->nested_descriptor) == NULL)
+            field->payload->nested_descriptor = protobuf_getattr(
+                holder, PB_ATTR_DESCRIPTOR);
+            if (field->payload->nested_descriptor == NULL) goto error;
+            if (pb_descriptor_from_object(field->payload->nested_descriptor) == NULL)
                 goto error;
         }
     }
@@ -2152,6 +2202,7 @@ wreath_protobuf_compile(PyObject *Py_UNUSED(self), PyObject *args)
     return capsule;
 
 error:
+    Py_XDECREF(camel_name);
     Py_XDECREF(camel_names);
     pb_descriptor_free(descriptor);
     return NULL;
@@ -2479,7 +2530,7 @@ pb_encode_otlp_json(WreathBytesWriter *writer, PyObject *cls,
         }
         PbCompiledField *field = &descriptor->fields[found];
         if (pb_encode_otlp_value(writer, field->number, field->kind,
-                                 field->flags, field->holder, value,
+                                 field->flags, pb_field_holder(field), value,
                                  depth) < 0) {
             Py_DECREF(descriptor_object);
             return -1;
@@ -2567,7 +2618,7 @@ pb_otlp_from_json(PyObject *cls, PyObject *data, int depth)
         }
         converted = pb_otlp_value(
             descriptor->fields[index].kind, descriptor->fields[index].flags,
-            descriptor->fields[index].holder, value, depth);
+            pb_field_holder(&descriptor->fields[index]), value, depth);
         if (converted == NULL) goto done;
         Py_SETREF(arguments[index], converted);
     }

@@ -877,7 +877,8 @@ recorder_drain_captures(RecorderObject *self, PyObject *args)
         return NULL;
     }
     uint64_t capacity = wreath_nfr_capture_capacity(self->worker);
-    if (capacity == 0 || max_slabs <= 0) {
+    if (capacity == 0 || max_slabs <= 0 ||
+        wreath_nfr_capture_committed(self->worker) == 0) {
         return PyList_New(0);
     }
     if ((uint64_t)max_slabs > capacity) {
