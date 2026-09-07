@@ -82,6 +82,7 @@ site = Site(
         "A Python 3.14-first ASGI framework for realtime systems, durable work, "
         "governed AI and serious multi-tenant applications."
     ),
+    exclude=("agent/",),
     source_url="https://github.com/alexogeny/wreath/edit/main/docs",
     repo=Repo("https://github.com/alexogeny/wreath"),
     links=(

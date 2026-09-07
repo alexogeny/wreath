@@ -4,18 +4,21 @@ This file exists so a coding agent loads the repository's rules without being
 told to. The rules themselves are not here — keeping two copies would mean
 keeping two copies accurate.
 
-**Read [`AGENTS.md`](AGENTS.md) before changing anything.** It is short, and it
-carries the constraints that are not visible from the code: Python 3.14 only, no
-mandatory runtime dependencies in `src/wreath`, no Pydantic, no SQLAlchemy, no
-performance claim from a single run, and the measurement rules that have already
-caught one accepted-then-worthless optimization.
+**Read [`AGENTS.md`](AGENTS.md) before changing anything.** It is the compact
+repository-wide kernel and routes each kind of work to a bounded card under
+[`docs/agent/`](docs/agent/). Read every card matching the task; do not load the
+whole directory by default.
 
 ## Finding your way
 
 | You want | Read |
 | --- | --- |
 | The shape of the repository in prose | [`repo-map.md`](repo-map.md) |
-| Traps where the tool says "clean" and nothing ran | [`AGENTS.md`](AGENTS.md#traps-that-have-already-cost-someone-a-day) — read before a native, mutant, or worktree session |
+| Native build, sanitizer, SIMD, and architecture traps | [`docs/agent/native.md`](docs/agent/native.md) |
+| Test, mutation, and false-green guidance | [`docs/agent/testing.md`](docs/agent/testing.md) and [`docs/agent/test-validity.md`](docs/agent/test-validity.md) |
+| Performance and benchmark evidence | [`docs/agent/performance.md`](docs/agent/performance.md) |
+| PostgreSQL and live-database test traps | [`docs/agent/postgres.md`](docs/agent/postgres.md) |
+| Tool and dependency-group behavior | [`docs/agent/toolchain.md`](docs/agent/toolchain.md) |
 
 **The public API is literal.** Each feature lives in the module its name
 implies: `wreath.pagination` is `src/wreath/pagination.py`, `wreath.jobs` is

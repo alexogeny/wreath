@@ -16,8 +16,9 @@ tests.
 | `setup.py` | Optional C-extension build definitions and feature detection. |
 | `pyproject.toml` | Package metadata, dependency groups, test markers, lint/type configuration, and CLI entry points. |
 | `README.md` | Public project overview and quick start. |
-| `AGENTS.md` | Repository-wide engineering, testing, documentation, and benchmark rules. |
-| `CLAUDE.md` | Pointer file so a coding agent loads those rules without being told to. |
+| `AGENTS.md` | Compact repository-wide rules and task-to-guidance router. |
+| `docs/agent/` | Bounded task cards for framework, native, edge, PostgreSQL, testing, performance, toolchain, and parallel work. Read only the cards routed by `AGENTS.md`. |
+| `CLAUDE.md` | Pointer file so a coding agent loads the root rules and routed cards without being told to. |
 
 Generated or local-only directories such as `build/`, `site/`, `.venv/`, caches, `.sanitizers/`, and the root `benchmark-results`/`benchmark-diagnosis` trees are artifacts rather than source-of-truth code.
 
@@ -81,7 +82,10 @@ The broad test layout is:
 - `tests/http2/` and `tests/http3/` cover frames, HPACK, flow control, connection and stream state, limits/timeouts, ASGI behavior, networking, and shutdown.
 - `tests/fixtures/` holds reusable test data; `tests/_routing_impls.py` and `tests/_server_ingest.py` provide cross-backend test helpers.
 
-Prefer a focused test near the changed subsystem. The canonical commands and marker guidance remain in `AGENTS.md`.
+Prefer a focused test near the changed subsystem. Canonical commands remain in
+`AGENTS.md`; detailed test and marker guidance is routed through
+`docs/agent/testing.md`, `docs/agent/test-validity.md`, and
+`docs/agent/test-runner.md`.
 
 ## Benchmarks and native tooling
 
@@ -89,7 +93,9 @@ Prefer a focused test near the changed subsystem. The canonical commands and mar
 - `benchmarks/load.py`, `benchmarks/lifecycle.py`, and `benchmarks/report.py` provide load generation, lifecycle measurement, and reporting.
 - `benchmarks/postgres/` contains PostgreSQL and ORM microbenchmarks/workloads.
 - `tools/sanitizers/` builds isolated server, PostgreSQL, and HTTP/3 sanitizer variants.
-- Keep raw benchmark results and environment metadata; follow `AGENTS.md` before making performance claims.
+- Keep raw benchmark results and environment metadata; follow
+  `docs/agent/performance.md` before making performance claims.
 
 Use `rg --files src/wreath tests` and `rg` for deterministic source and test
-lookup. The code, tests, and `AGENTS.md` are authoritative.
+lookup. The code, tests, root `AGENTS.md`, and its routed task cards are
+authoritative.
